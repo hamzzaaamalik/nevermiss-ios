@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output (Codemagic builds it fresh on every run)
+dist/
+
+# Capacitor — keep ios/ folder source, but skip generated build artifacts
+ios/App/build/
+ios/App/Pods/
+ios/App/Podfile.lock
+ios/DerivedData/
+ios/App/App.xcworkspace/xcuserdata/
+ios/App/App.xcodeproj/xcuserdata/
+ios/App/App.xcodeproj/project.xcworkspace/xcuserdata/
+
+# OS junk
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# Replit-specific metadata
+.replit-artifact/
+.replit
+.config/
+.upm/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Secrets — never commit these
+.env
+.env.local
+.env.production
+.env.*.local
+*.p8
+*.p12
+*.mobileprovision
+*.cer
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Vite / cache
+.vite/
+.cache/
+*.tsbuildinfo
+
+# Capacitor CLI
+capacitor.config.json
+!capacitor.config.ts

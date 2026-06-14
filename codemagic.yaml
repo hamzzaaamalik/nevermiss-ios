@@ -1,0 +1,121 @@
+# Codemagic build pipeline for the NeverMiss iOS app.
+#
+# Setup (one-time, on codemagic.io after connecting the GitHub repo):
+#
+# 1. App Store Connect integration (Teams → Integrations → App Store Connect):
+#      Name:       nevermiss-asc          # any name; referenced below
+#      Issuer ID:  <paste from the API Keys page top>
+#      Key ID:     <paste from your key row>
+#      .p8 file:   <upload it>
+#
+# 2. iOS distribution certificate (Teams → Code Signing Identities → iOS):
+#      Either let Codemagic auto-generate (recommended) OR upload your own.
+#      The 'app-store-connect' integration above is enough for Codemagic to
+#      auto-generate + auto-renew certificates.
+#
+# 3. Bundle identifier match in App Store Connect:
+#      Bundle ID must be 'family.nevermiss.app' (already registered).
+#
+# After that, every push to `main` triggers this workflow → archive → upload
+# to TestFlight automatically.
+
+workflows:
+  ios-testflight:
+    name: NeverMiss iOS → TestFlight
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: family.nevermiss.app
+      vars:
+        APP_STORE_CONNECT_ISSUER_ID:  Encrypted(...)   # set via Codemagic UI, not here
+        APP_STORE_CONNECT_KEY_IDENTIFIER: Encrypted(...)
+        APP_STORE_CONNECT_PRIVATE_KEY: Encrypted(...)
+        BUNDLE_ID: family.nevermiss.app
+        XCODE_WORKSPACE: ios/App/App.xcworkspace
+        XCODE_SCHEME: App
+        VITE_API_BASE: "https://api.nevermiss.family/api"
+        NODE_ENV: production
+        PORT: "5173"
+        BASE_PATH: "/"
+      node: 20.18.0
+      xcode: latest
+      cocoapods: default
+
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: main
+          include: true
+          source: true
+
+    scripts:
+      - name: Install pnpm
+        script: |
+          npm install -g pnpm@10
+
+      - name: Install JS deps
+        script: |
+          pnpm install --frozen-lockfile
+
+      - name: Build the SPA for production
+        script: |
+          pnpm build
+
+      - name: Copy SPA into the iOS project
+        script: |
+          npx cap copy ios
+          npx cap sync ios
+
+      - name: Install CocoaPods
+        script: |
+          cd ios/App
+          pod install
+
+      - name: Set up code signing
+        script: |
+          keychain initialize
+          app-store-connect fetch-signing-files "$BUNDLE_ID" \
+            --type IOS_APP_STORE \
+            --create
+          keychain add-certificates
+          xcode-project use-profiles
+
+      - name: Increment build number (each TestFlight upload needs a unique build #)
+        script: |
+          cd ios/App
+          LATEST_BUILD=$(app-store-connect get-latest-app-store-build-number "$BUNDLE_ID" || echo "0")
+          NEW_BUILD=$((LATEST_BUILD + 1))
+          agvtool new-version -all $NEW_BUILD
+          echo "→ build number = $NEW_BUILD"
+
+      - name: Archive + export .ipa
+        script: |
+          cd ios/App
+          xcode-project build-ipa \
+            --workspace "App.xcworkspace" \
+            --scheme "App"
+
+    artifacts:
+      - ios/App/build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - ios/App/build/ios/xcarchive
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        # Submit to TestFlight (internal testers) but NOT to App Store review.
+        # Promote to review manually from App Store Connect once you've tested.
+        submit_to_testflight: true
+        beta_groups:
+          - Internal Testers      # create this group in App Store Connect first
+        submit_to_app_store: false
+      email:
+        recipients:
+          - rick@nevermiss.family   # change to your real email
+        notify:
+          success: true
+          failure: true
