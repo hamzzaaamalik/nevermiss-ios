@@ -1,23 +1,21 @@
 # Codemagic build pipeline for the NeverMiss iOS app.
 #
-# Setup (one-time, on codemagic.io after connecting the GitHub repo):
+# One-time setup on codemagic.io after connecting the GitHub repo:
 #
-# 1. App Store Connect integration (Teams → Integrations → App Store Connect):
-#      Name:       nevermiss-asc          # any name; referenced below
-#      Issuer ID:  <paste from the API Keys page top>
-#      Key ID:     <paste from your key row>
-#      .p8 file:   <upload it>
+# 1. Team Integrations → App Store Connect → "+ Add new":
+#      Name:       nevermiss-asc        # must match `integrations.app_store_connect` below
+#      Issuer ID:  <from App Store Connect → Users and Access → Keys page>
+#      Key ID:     <from the same page, your key row>
+#      API key:    upload the .p8 file
 #
-# 2. iOS distribution certificate (Teams → Code Signing Identities → iOS):
-#      Either let Codemagic auto-generate (recommended) OR upload your own.
-#      The 'app-store-connect' integration above is enough for Codemagic to
-#      auto-generate + auto-renew certificates.
+# 2. Code signing certificates: nothing to upload by hand — Codemagic
+#    auto-generates and renews the iOS distribution cert using the
+#    integration above.
 #
-# 3. Bundle identifier match in App Store Connect:
-#      Bundle ID must be 'family.nevermiss.app' (already registered).
+# 3. App Store Connect: confirm bundle ID `family.nevermiss.app` is
+#    registered (it is) AND the app entry exists (it does).
 #
-# After that, every push to `main` triggers this workflow → archive → upload
-# to TestFlight automatically.
+# Every push to `main` triggers this workflow → archive → TestFlight upload.
 
 workflows:
   ios-testflight:
@@ -25,17 +23,24 @@ workflows:
     instance_type: mac_mini_m2
     max_build_duration: 60
 
+    # ── Link this workflow to the named App Store Connect integration. ──
+    # The name on the RIGHT side must EXACTLY match the integration name
+    # you created in Codemagic UI (step 1 in the comment above). Without
+    # this link, publishing.auth=integration errors out with the validation
+    # error you just saw.
+    integrations:
+      app_store_connect: nevermiss-asc
+
     environment:
       ios_signing:
         distribution_type: app_store
         bundle_identifier: family.nevermiss.app
       vars:
-        APP_STORE_CONNECT_ISSUER_ID:  Encrypted(...)   # set via Codemagic UI, not here
-        APP_STORE_CONNECT_KEY_IDENTIFIER: Encrypted(...)
-        APP_STORE_CONNECT_PRIVATE_KEY: Encrypted(...)
         BUNDLE_ID: family.nevermiss.app
         XCODE_WORKSPACE: ios/App/App.xcworkspace
         XCODE_SCHEME: App
+        # Drives the Vite production build to call the live api host
+        # instead of the dev localhost proxy.
         VITE_API_BASE: "https://api.nevermiss.family/api"
         NODE_ENV: production
         PORT: "5173"
@@ -59,7 +64,7 @@ workflows:
 
       - name: Install JS deps
         script: |
-          pnpm install --frozen-lockfile
+          pnpm install --no-frozen-lockfile
 
       - name: Build the SPA for production
         script: |
@@ -84,7 +89,7 @@ workflows:
           keychain add-certificates
           xcode-project use-profiles
 
-      - name: Increment build number (each TestFlight upload needs a unique build #)
+      - name: Increment build number (TestFlight uploads need unique build #)
         script: |
           cd ios/App
           LATEST_BUILD=$(app-store-connect get-latest-app-store-build-number "$BUNDLE_ID" || echo "0")
@@ -107,15 +112,19 @@ workflows:
     publishing:
       app_store_connect:
         auth: integration
-        # Submit to TestFlight (internal testers) but NOT to App Store review.
-        # Promote to review manually from App Store Connect once you've tested.
+        # Submit to TestFlight (internal testers) but NOT to App Store
+        # review automatically. Promote to review manually from App Store
+        # Connect once you've tested.
         submit_to_testflight: true
-        beta_groups:
-          - Internal Testers      # create this group in App Store Connect first
+        # If you've created a Beta Group named "Internal Testers" in
+        # App Store Connect, uncomment this. Otherwise Codemagic uploads
+        # to TestFlight without auto-assigning a group.
+        # beta_groups:
+        #   - Internal Testers
         submit_to_app_store: false
       email:
         recipients:
-          - rick@nevermiss.family   # change to your real email
+          - malikameerhamza2010@gmail.com   # change if you want a different inbox
         notify:
           success: true
           failure: true
