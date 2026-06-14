@@ -1,0 +1,15 @@
+# Force LF line endings for files that run on macOS / Linux CI runners.
+# Xcode Cloud's shell can't execute scripts with CRLF — they fail with
+# "bad interpreter" or "syntax error near unexpected token".
+*.sh        text eol=lf
+*.bash      text eol=lf
+ci_scripts/* text eol=lf
+
+# YAML configs (Codemagic etc.) read by *nix tools — keep LF too.
+*.yml       text eol=lf
+*.yaml      text eol=lf
+
+# Default for everything else: let git normalize on commit but keep
+# the working-copy line ending whatever the host OS uses (CRLF on
+# Windows, LF on Mac). This is the standard pattern.
+* text=auto
