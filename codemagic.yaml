@@ -60,7 +60,14 @@ workflows:
     scripts:
       - name: Install pnpm
         script: |
-          npm install -g pnpm@10
+          # pnpm is pre-installed on Codemagic's macOS image. Skip if
+          # already on PATH; --force the install only when truly missing
+          # so npm doesn't fail with EEXIST on /usr/local/bin/pnpm.
+          if command -v pnpm >/dev/null 2>&1; then
+            echo "pnpm already present: $(pnpm -v)"
+          else
+            npm install -g pnpm@10
+          fi
 
       - name: Install JS deps
         script: |
