@@ -82,10 +82,33 @@ workflows:
 
       - name: Set up code signing
         script: |
+          set -e
           keychain initialize
+
+          # ── 1. Distribution certificate ──────────────────────────────
+          # Try to create a fresh iOS Distribution certificate. If one
+          # already exists in the team's account, this errors with
+          # "max certificates" — that's fine, we just use the existing
+          # ones via the next command.
+          echo "🔐 Ensuring iOS Distribution certificate is available..."
+          app-store-connect certificates create \
+            --type IOS_DISTRIBUTION \
+            --save || \
+            app-store-connect certificates list \
+              --type IOS_DISTRIBUTION \
+              --certificate-key-password "" \
+              --save
+
+          # ── 2. Provisioning profile ──────────────────────────────────
+          # Now that the cert exists, create or fetch the profile
+          # matching the bundle ID + distribution type.
+          echo "📜 Fetching/creating App Store provisioning profile for $BUNDLE_ID..."
           app-store-connect fetch-signing-files "$BUNDLE_ID" \
             --type IOS_APP_STORE \
+            --platform IOS \
             --create
+
+          # ── 3. Wire into Xcode ───────────────────────────────────────
           keychain add-certificates
           xcode-project use-profiles
 
