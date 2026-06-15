@@ -12,18 +12,21 @@ const config: CapacitorConfig = {
     contentInset: 'always',
     allowsLinkPreview: false,
   },
-  // Pin the in-app WebView's origin to a real subdomain of
-  // nevermiss.family. Default would be `capacitor://localhost`, which
-  // is cross-SITE to `api.nevermiss.family` — iOS WKWebView's ITP then
-  // blocks the auth session cookie (set with Domain=.nevermiss.family)
-  // because it counts as third-party. With this hostname, the WebView
-  // is `https://app.nevermiss.family`, same-site as api.*, so cookies
-  // flow naturally and the existing SameSite=Lax server config Just
-  // Works. No DNS record is required — the WebView resolves the
-  // hostname locally via WKURLSchemeHandler; it never hits the network.
-  server: {
-    iosScheme: 'https',
-    hostname: 'app.nevermiss.family',
+  // Enable CapacitorHttp: intercepts every fetch()/XMLHttpRequest call
+  // from the SPA and runs it through native iOS NSURLSession instead
+  // of the WKWebView. That gives us:
+  //   - a native cookie jar (NSHTTPCookieStorage) that survives ITP
+  //   - cross-origin requests without WebView CORS preflight
+  //   - persistent sessions across app restarts
+  // This is the fix for the "load failed" + "Not authenticated" issue
+  // we hit on Build #1: cookies set by api.nevermiss.family weren't
+  // being attached to subsequent WebView fetch() calls because iOS ITP
+  // treats them as third-party. With CapacitorHttp on, the SPA's
+  // fetch() calls happen at the native layer where cookies just work.
+  plugins: {
+    CapacitorHttp: {
+      enabled: true,
+    },
   },
 };
 
