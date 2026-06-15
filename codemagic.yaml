@@ -60,14 +60,18 @@ workflows:
     scripts:
       - name: Install pnpm
         script: |
-          # pnpm is pre-installed on Codemagic's macOS image. Skip if
-          # already on PATH; --force the install only when truly missing
-          # so npm doesn't fail with EEXIST on /usr/local/bin/pnpm.
-          if command -v pnpm >/dev/null 2>&1; then
-            echo "pnpm already present: $(pnpm -v)"
-          else
-            npm install -g pnpm@10
-          fi
+          # Codemagic's macOS image ships pnpm via corepack on Node 20.18,
+          # but that corepack version (v0.29) has a stale trusted-keys
+          # list and fails to verify pnpm's signature with:
+          #   Error: Cannot find matching keyid ...
+          # Update corepack to v0.31+ (which has current keys), then
+          # pin pnpm 10 explicitly so the install doesn't have to fetch
+          # the "latest" record from the npm registry.
+          npm install -g corepack@latest --force
+          corepack enable
+          corepack prepare pnpm@10.13.1 --activate
+          echo "pnpm: $(pnpm -v)"
+          echo "node: $(node -v)"
 
       - name: Install JS deps
         script: |
