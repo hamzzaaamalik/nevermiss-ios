@@ -84,5 +84,6 @@
   "dependencies": {
     "@mediapipe/selfie_segmentation": "^0.1.1675465747",
     "@mediapipe/tasks-vision": "^0.10.35"
-  }
+  },
+  "packageManager": "pnpm@10.13.1"
 }

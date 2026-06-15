@@ -75,6 +75,13 @@ workflows:
 
       - name: Install JS deps
         script: |
+          # COREPACK_ENABLE_STRICT=0 stops corepack from walking up the
+          # filesystem looking for a `packageManager` field. The macOS
+          # build image has `/Users/builder/package.json` declaring
+          # yarn, which intercepts pnpm calls even when pnpm is on PATH.
+          # Combined with the `packageManager` field we set in
+          # nevermiss/package.json, this guarantees pnpm gets used.
+          export COREPACK_ENABLE_STRICT=0
           pnpm install --no-frozen-lockfile
 
       - name: Build the SPA for production
