@@ -134,14 +134,28 @@ workflows:
       - name: Archive + export .ipa
         script: |
           cd ios/App
-          # -v flag prints the full xcodebuild output so the actual
-          # archive failure surfaces inline instead of buried in
-          # /tmp/xcodebuild_logs/*.log. Without this Codemagic shows
-          # only the benign Pods-Embed-Frameworks warning + "Failed
-          # to archive" with no reason.
+          # On failure, dump the xcodebuild log inline so the actual
+          # archive error shows up in the Codemagic build output
+          # instead of being buried in /tmp/xcodebuild_logs/*.log
+          # that we'd otherwise have to download manually as an
+          # artifact. Codemagic CLI's -v wrapper doesn't pass through
+          # xcodebuild's stderr — only the log file does.
+          set +e
           xcode-project -v build-ipa \
             --workspace "App.xcworkspace" \
             --scheme "App"
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo ""
+            echo "==================== xcodebuild log dump ===================="
+            for f in /tmp/xcodebuild_logs/*.log; do
+              echo "----- $f (last 300 lines) -----"
+              tail -300 "$f"
+              echo ""
+            done
+            echo "==================== end log dump ===================="
+            exit $EXIT_CODE
+          fi
 
     artifacts:
       - ios/App/build/ios/ipa/*.ipa
