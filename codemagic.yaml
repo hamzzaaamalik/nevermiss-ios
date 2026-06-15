@@ -111,6 +111,18 @@ workflows:
       # generates / fetches the matching provisioning profile from the
       # `nevermiss-asc` integration. No explicit script step is needed.
 
+      - name: Apply profiles to Xcode project
+        script: |
+          # `use-profiles` does two things needed before xcode-project
+          # build-ipa can run:
+          #   1. Reads the provisioning profile + cert that Codemagic's
+          #      automatic signing already injected into the keychain
+          #   2. Writes /Users/builder/export_options.plist so build-ipa
+          #      knows how to sign + export the .ipa
+          # Without this step build-ipa errors with
+          #   "argument --export-options-plist: Path does not exist"
+          xcode-project use-profiles
+
       - name: Increment build number (TestFlight uploads need unique build #)
         script: |
           cd ios/App
