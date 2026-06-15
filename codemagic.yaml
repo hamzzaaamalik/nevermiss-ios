@@ -102,33 +102,14 @@ workflows:
           cd ios/App
           pod install
 
-      - name: Set up code signing
-        script: |
-          set -e
-          keychain initialize
-
-          # fetch-signing-files with --create handles BOTH:
-          #   - generating a fresh private key + creating an iOS
-          #     Distribution certificate that uses it
-          #   - downloading (or creating) the App Store provisioning
-          #     profile bound to that cert + the bundle ID
-          # The previous explicit `certificates create` step failed with
-          # "Cannot create resource without certificate private key"
-          # because the CLI needs to bind the new cert to a private key
-          # it has access to — which fetch-signing-files generates
-          # internally when given --create.
-          #
-          # The App ID, an existing iOS Distribution certificate, and a
-          # manually-created provisioning profile are all now in place
-          # at developer.apple.com, so this finds them and downloads
-          # them into the keychain without creating duplicates.
-          app-store-connect fetch-signing-files "$BUNDLE_ID" \
-            --type IOS_APP_STORE \
-            --platform IOS \
-            --create
-
-          keychain add-certificates
-          xcode-project use-profiles
+      # Code signing is handled by Codemagic's automatic signing — see
+      # `environment.ios_signing` at the top of this workflow. The
+      # certificate + private key live in Codemagic's UI under Teams →
+      # Code signing identities → iOS, generated once via the App Store
+      # Connect API integration. Codemagic injects them into the build
+      # keychain automatically before xcodebuild archive runs, then
+      # generates / fetches the matching provisioning profile from the
+      # `nevermiss-asc` integration. No explicit script step is needed.
 
       - name: Increment build number (TestFlight uploads need unique build #)
         script: |
