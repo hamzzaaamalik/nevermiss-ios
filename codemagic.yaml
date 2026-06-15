@@ -123,13 +123,30 @@ workflows:
           #   "argument --export-options-plist: Path does not exist"
           xcode-project use-profiles
 
-      - name: Increment build number (TestFlight uploads need unique build #)
+      - name: Increment build number (TestFlight needs unique build #)
         script: |
+          # agvtool silently no-ops on this project because
+          # VERSIONING_SYSTEM = "apple-generic" was never set in the
+          # pbxproj — so the previous attempt stayed at CFBundleVersion=1
+          # and TestFlight upload errored with:
+          #   The bundle version must be higher than the previously
+          #   uploaded version: '1'.
+          #
+          # Use Codemagic's auto-incrementing $BUILD_NUMBER (sequential
+          # per CI build) and patch CURRENT_PROJECT_VERSION directly
+          # via sed. Both Debug and Release configs get the same number.
+          # Fallback to TestFlight's "latest + 1" if BUILD_NUMBER isn't
+          # set for any reason.
           cd ios/App
-          LATEST_BUILD=$(app-store-connect get-latest-app-store-build-number "$BUNDLE_ID" || echo "0")
-          NEW_BUILD=$((LATEST_BUILD + 1))
-          agvtool new-version -all $NEW_BUILD
-          echo "→ build number = $NEW_BUILD"
+          if [ -z "$BUILD_NUMBER" ]; then
+            LATEST_TF=$(app-store-connect get-latest-testflight-build-number "$BUNDLE_ID" 2>/dev/null || echo "0")
+            BUILD_NUMBER=$((LATEST_TF + 1))
+          fi
+          echo "→ Setting CURRENT_PROJECT_VERSION = $BUILD_NUMBER"
+          sed -i.bak -E "s/CURRENT_PROJECT_VERSION = [0-9]+;/CURRENT_PROJECT_VERSION = $BUILD_NUMBER;/g" App.xcodeproj/project.pbxproj
+          rm -f App.xcodeproj/project.pbxproj.bak
+          echo "→ Verified pbxproj entries:"
+          grep "CURRENT_PROJECT_VERSION" App.xcodeproj/project.pbxproj
 
       - name: Archive + export .ipa
         script: |
