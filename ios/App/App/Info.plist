@@ -53,5 +53,13 @@
 	<string>NeverMiss uses your iPad microphone so you can hear and talk to your grandchild during reading sessions. Your audio is only shared with the family member you are connected to.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>NeverMiss uses your local network to establish a direct, lower-latency video connection between the two iPads when both are on the same Wi-Fi network. No data is shared with other devices.</string>
+	<!-- App Store Connect Export Compliance: NeverMiss only uses iOS's
+	     built-in HTTPS / TLS via URLSession plus Daily.co's standard
+	     WebRTC DTLS-SRTP (also via iOS APIs). We don't ship our own
+	     crypto or implement non-standard encryption. Declaring
+	     ITSAppUsesNonExemptEncryption=false here means TestFlight
+	     skips the "Missing Compliance" prompt on every future build. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>
