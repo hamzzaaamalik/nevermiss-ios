@@ -45,7 +45,11 @@ workflows:
         NODE_ENV: production
         PORT: "5173"
         BASE_PATH: "/"
-      node: 20.18.0
+      # Vite 7.x requires Node >= 20.19 or >= 22.12. Codemagic's
+      # default "20.18.0" alias fails the Vite preflight check with
+      # "Vite requires Node.js version 20.19+ or 22.12+". Pin to a
+      # 22.x LTS that's known good with Vite + Capacitor + esbuild.
+      node: 22.12.0
       xcode: latest
       cocoapods: default
 
