@@ -5,6 +5,24 @@
 // deployed api host (e.g. `https://api.nevermiss.family/api`).
 const BASE: string = (import.meta.env.VITE_API_BASE as string | undefined) ?? "/api";
 
+// Bearer token auth — the iOS Capacitor WebView can't reliably keep
+// cross-origin cookies (WKWebView ITP blocks them even with
+// SameSite=None), so we ALSO send the session id as an Authorization
+// header. The server reads either Bearer header OR the cookie, so
+// browser flows (where cookies work) are unchanged. localStorage
+// inside Capacitor's WebView IS persisted across app launches by iOS.
+const SESSION_TOKEN_KEY = "nm_session_token";
+let sessionToken: string | null = (() => {
+  try { return localStorage.getItem(SESSION_TOKEN_KEY); } catch { return null; }
+})();
+function setSessionToken(tok: string | null) {
+  sessionToken = tok;
+  try {
+    if (tok) localStorage.setItem(SESSION_TOKEN_KEY, tok);
+    else localStorage.removeItem(SESSION_TOKEN_KEY);
+  } catch {}
+}
+
 export class ApiError extends Error {
   status: number;
   reason?: string;
@@ -21,9 +39,13 @@ export class ApiError extends Error {
 }
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const headers: Record<string, string> = {};
+  if (body) headers["Content-Type"] = "application/json";
+  if (sessionToken) headers["Authorization"] = `Bearer ${sessionToken}`;
+
   const res = await fetch(`${BASE}${path}`, {
     method,
-    headers: body ? { "Content-Type": "application/json" } : {},
+    headers,
     credentials: "include",
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -82,7 +104,7 @@ export interface ReadingSession {
 export const api = {
   auth: {
     me: () => req<{ user: SafeUser }>("GET", "/auth/me"),
-    register: (body: {
+    register: async (body: {
       firstName: string;
       lastName: string;
       displayName?: string;
@@ -90,10 +112,21 @@ export const api = {
       password: string;
       role: "nana" | "parent";
       phone?: string;
-    }) => req<{ user: SafeUser }>("POST", "/auth/register", body),
-    login: (body: { email: string; password: string }) =>
-      req<{ user: SafeUser }>("POST", "/auth/login", body),
-    logout: () => req<{ ok: boolean }>("POST", "/auth/logout"),
+    }) => {
+      const res = await req<{ user: SafeUser; sessionToken?: string }>("POST", "/auth/register", body);
+      if (res.sessionToken) setSessionToken(res.sessionToken);
+      return res;
+    },
+    login: async (body: { email: string; password: string }) => {
+      const res = await req<{ user: SafeUser; sessionToken?: string }>("POST", "/auth/login", body);
+      if (res.sessionToken) setSessionToken(res.sessionToken);
+      return res;
+    },
+    logout: async () => {
+      const res = await req<{ ok: boolean }>("POST", "/auth/logout");
+      setSessionToken(null);
+      return res;
+    },
   },
   connections: {
     invite: () => req<{ connection: Connection; inviteToken: string }>("POST", "/connections/invite"),
@@ -287,7 +320,12 @@ export const api = {
      *  every child profile on those connections, all session log
      *  entries, all progress rows. Server clears the session cookie
      *  in the same response. Immediate — no grace window. */
-    delete: () => req<{ ok: boolean; deleted: { userId: string; connections: number } }>("DELETE", "/account"),
+    delete: async () => {
+      const res = await req<{ ok: boolean; deleted: { userId: string; connections: number } }>("DELETE", "/account");
+      // Server-side session row is gone; client-side token must be too.
+      setSessionToken(null);
+      return res;
+    },
     /** Single-blob JSON export of everything we hold on the user.
      *  Caller is responsible for triggering the browser download —
      *  use the dedicated download helper rather than this method
