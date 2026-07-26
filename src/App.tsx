@@ -1,4 +1,4 @@
-import { useCallback, useState, useEffect, useRef, type ReactNode } from "react";
+import { useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   BookHeart,
@@ -1347,28 +1347,25 @@ function BookContent({
   const leftRef = useRef<HTMLParagraphElement>(null);
   const rightRef = useRef<HTMLParagraphElement>(null);
 
-  // Apply fontScale and auto-shrink symmetrically until BOTH pages fit.
-  //
-  // History: an earlier asymmetric loop shrank only the longer page —
-  // Rick: "font only changes the left page." That was fixed by removing
-  // the loop and hard-coding 100/125/150%. But on iPad mini and other
-  // smaller tiles, 150% pushed long bodies past the page bottom — and
-  // because the body container is `overflow: hidden`, the last lines
-  // silently vanished (Rick: "large font cuts off lines at the bottom").
-  //
-  // This version starts at the user's target scale, then steps DOWN in
-  // 5% increments (applied to BOTH pages in lockstep) until neither
-  // container overflows. Floor at 70% so even worst-case dense pages on
-  // iPad mini fit; text is still legible at 70% × 16px ≈ 11px. Same
-  // scale on both sides → page-turn sync invariant preserved.
-  //
-  // Ultimate fallback: if even the 70% floor still overflows (very rare
-  // — would require a page exceeding any reasonable iPad render area),
-  // toggle the body container to `overflow-y: auto` so the last lines
-  // become scrollable instead of silently hidden. Restored to default
-  // (CSS-inherited hidden) on the next render where content fits.
-  useEffect(() => {
-    const target = fontScale >= 1.5 ? 150 : fontScale >= 1.25 ? 125 : 100;
+  // Target scale (in %) from the user's fontScale pick. Also applied as
+  // an inline default on both `<p>` elements below so both pages START
+  // at the same size even before the auto-fit effect runs — this is
+  // the fix for Rick's "font only changes the right page." Previous
+  // implementations relied entirely on a post-mount effect to write
+  // fontSize onto both refs; when the effect raced with a React re-render
+  // one side could be updated while the other stayed at the pre-effect
+  // default, causing asymmetry.
+  const targetFontPct = fontScale >= 1.5 ? 150 : fontScale >= 1.25 ? 125 : 100;
+
+  // Auto-shrink symmetrically until BOTH pages fit. Runs BEFORE paint via
+  // useLayoutEffect so users never see the pre-shrink flash. Both refs
+  // are guaranteed to be set at this point (JSX commit precedes the
+  // layout effect), and the inline default above ensures they start
+  // matched. Steps DOWN in 5% increments in lockstep until neither
+  // container overflows. Floors at 70% (~11px at base 16px); if even
+  // that overflows, drops the container to `overflow-y: auto` so no
+  // text is silently clipped.
+  useLayoutEffect(() => {
     const apply = (pct: number) => {
       if (leftRef.current)  leftRef.current.style.fontSize  = `${pct}%`;
       if (rightRef.current) rightRef.current.style.fontSize = `${pct}%`;
@@ -1379,10 +1376,8 @@ function BookContent({
         .map(p => p.parentElement)
         .filter(Boolean) as HTMLElement[];
     const overflows = () =>
-      // +1px slack absorbs sub-pixel rounding so we don't churn at
-      // a "fits exactly" boundary.
       containers().some(c => c.scrollHeight > c.clientHeight + 1);
-    let scale = target;
+    let scale = targetFontPct;
     apply(scale);
     let attempts = 0;
     while (overflows() && scale > 70 && attempts < 18) {
@@ -1390,18 +1385,13 @@ function BookContent({
       apply(scale);
       attempts += 1;
     }
-    // Wish 2 polish: if NEITHER container overflows AND at least one is
-    // significantly under-filled (body uses <65% of available height),
-    // step up to fill the page so chapter books don't look sparse.
-    // Cap at 160% — anything bigger pushes past the visual character of
-    // a book page. Skip on title spreads (those are intentionally airy).
+    // Grow-back pass only when BOTH containers are significantly under
+    // 65% of their available height. Skipped on title spreads (rightRef
+    // is null there so containers() length differs from the two-body
+    // path and the every() naturally short-circuits false).
     const underFilled = () => {
       const cs = containers();
-      if (cs.length === 0) return false;
-      // Treat "fills less than 65%" as significant whitespace worth
-      // closing. Title pages render `rightIsTitle` and have their own
-      // ornament layout — leftRef/rightRef aren't used there, so cs
-      // will be empty and this branch never fires.
+      if (cs.length < 2) return false;
       return cs.every(c => c.scrollHeight < c.clientHeight * 0.65);
     };
     if (!overflows() && underFilled()) {
@@ -1411,17 +1401,15 @@ function BookContent({
         apply(scale);
         growAttempts += 1;
       }
-      // If grow pushed into overflow on the last step, back off one.
       if (overflows() && scale > 70) {
         scale -= 5;
         apply(scale);
       }
     }
-    // Scroll fallback only when the floor wasn't enough.
     containers().forEach(c => {
       c.style.overflowY = c.scrollHeight > c.clientHeight + 1 ? "auto" : "";
     });
-  }, [page, fontScale, p?.leftBody, p?.rightBody, p?.rightIsTitle]);
+  }, [page, targetFontPct, p?.leftBody, p?.rightBody, p?.rightIsTitle]);
 
   return (
     <div style={{
@@ -1626,6 +1614,11 @@ function BookContent({
             textJustify: "inter-word",
             animation: "page-arrived 280ms ease-out",
             transition: "color 240ms ease",
+            // Match the target scale inline so LEFT and RIGHT start
+            // identical even before the layout-effect writes the final
+            // (possibly shrunk) value. See BookContent's useLayoutEffect
+            // above — this fixes Rick's "font only changes right page".
+            fontSize: `${targetFontPct}%`,
           }}>
             <WordWrapped
               text={p.leftBody}
@@ -1725,6 +1718,8 @@ function BookContent({
                 textJustify: "inter-word",
                 animation: "page-arrived 280ms ease-out",
                 transition: "color 240ms ease",
+                // Match LEFT — see leftRef paragraph above.
+                fontSize: `${targetFontPct}%`,
               }}>
                 <WordWrapped
                   text={p.rightBody}
@@ -1869,49 +1864,84 @@ function ChatModeView({
    *  gap (audit). Previously Nana had to tap Back→Reading then Home. */
   onGoHome?: () => void;
 }) {
-  const videoName = isNana ? (childName || getRoleLabel("child")) : (nanaName || getRoleLabel("nana"));
+  const otherName = isNana ? (childName || getRoleLabel("child")) : (nanaName || getRoleLabel("nana"));
+  const selfName  = isNana ? (nanaName || getRoleLabel("nana"))  : (childName || getRoleLabel("child"));
 
+  // Rick's Jun 22 spec: "I'd like to explore using a layout similar to
+  // Show & Tell for Chat Mode … big picture on top, words/content below."
+  // Previously this was a horizontal split (44% prompt / 56% video).
+  // Now video stage claims the top with the FaceVideoStage (big + PiP,
+  // matching Show & Tell), and the prompt + controls sit in a bottom
+  // strip. Font scale still applies to the prompt body.
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "row", overflow: "hidden" }}>
-
-      {/* ── LEFT: Workspace panel ───────────────────────────── */}
-      <div style={{ width: "44%", display: "flex", flexDirection: "column", backgroundColor: "#0b172e", padding: "14px 12px 14px", gap: "12px", borderRight: "1px solid rgba(255,255,255,0.08)", overflow: "hidden", flexShrink: 0 }}>
-
-        {/* Book badge — decorative book-spine icon. Title is announced via aria-label. */}
-        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-          <div
-            role="img"
-            aria-label="Charlotte's Web"
-            style={{ backgroundColor: PARCHMENT, border: `2px solid ${LEATHER}`, borderRadius: "5px", width: "28px", height: "35px", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
-          >
-            <span style={{ fontSize: "16px", lineHeight: 1 }} aria-hidden>🕷️</span>
+    <div style={{
+      flex: 1, display: "flex", flexDirection: "column",
+      backgroundColor: "#000", overflow: "hidden",
+    }}>
+      {/* ── TOP: Big video ─── */}
+      <div style={{ flex: "1 1 0", minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: 12, position: "relative", overflow: "hidden" }}>
+        <div style={{ width: "100%", maxWidth: 900, height: "100%", position: "relative" }}>
+          <FaceVideoStage
+            bigPerson={isNana ? "child" : "nana"}
+            pipPerson={isNana ? "nana" : "child"}
+            bigName={otherName}
+            pipName={selfName}
+            bigObjectFit="contain"
+          />
+          {/* Floating mode badge — matches Show & Tell. */}
+          <div style={{
+            position: "absolute", top: 12, left: 12, zIndex: 4,
+            display: "inline-flex", alignItems: "center", gap: 6,
+            padding: "5px 10px", borderRadius: 999,
+            backgroundColor: "rgba(11,23,46,0.7)",
+            border: "1px solid rgba(201,146,42,0.45)",
+            backdropFilter: "blur(6px)",
+            color: AMBER,
+            fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800,
+            letterSpacing: "0.16em",
+          }}>
+            💬 CHAT MODE
           </div>
-          <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700, letterSpacing: "0.08em", lineHeight: 1.3 }}>
-            {isNana ? "📖 READING PROMPT" : "📖 STORY TIME CHAT"}
-          </span>
         </div>
+      </div>
 
-        {/* Main prompt / message */}
+      {/* ── BOTTOM: Prompt + actions ─── */}
+      <div style={{
+        flexShrink: 0,
+        backgroundColor: "#0b172e",
+        borderTop: "1px solid rgba(255,255,255,0.08)",
+        padding: "12px 14px 14px",
+        display: "flex", flexDirection: "column", gap: 10,
+      }}>
         {isNana ? (
-          <ChatModePrompt text={nanaPromptText} fontScale={fontScale} />
-        ) : (
-          <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", gap: "10px" }}>
-            <span style={{ fontSize: 32 * fontScale, textAlign: "center" }}>👂</span>
-            <p style={{ color: "rgba(134,239,172,0.95)", fontFamily: "Merriweather, serif", fontSize: 16 * fontScale, fontWeight: 700, lineHeight: 1.6, margin: 0, textAlign: "center" }}>
-              Nana has a question about the story!
-            </p>
-            <p style={{ color: "rgba(255,255,255,0.45)", fontFamily: "DM Sans, sans-serif", fontSize: 11 * fontScale, margin: 0, textAlign: "center", lineHeight: 1.4 }}>
-              Listen carefully and tell her what you think.
-            </p>
-          </div>
-        )}
-
-        {/* Primary actions — Nana only. Rick: "a young child could tap
-            it accidentally on Perry's side." Perry just sees the prompt
-            and listens; Nana drives the navigation. */}
-        {isNana && (
           <>
-            <div style={{ display: "flex", justifyContent: "center", gap: 8, flexShrink: 0 }}>
+            {/* Prompt card — same amber treatment as the READING PROMPT card */}
+            <div style={{
+              backgroundColor: "rgba(201,146,42,0.10)",
+              border: `1px solid ${AMBER}`,
+              borderRadius: 14,
+              padding: "10px 14px",
+              display: "flex", flexDirection: "column", gap: 6,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div
+                  role="img"
+                  aria-label="Book"
+                  style={{ backgroundColor: PARCHMENT, border: `2px solid ${LEATHER}`, borderRadius: 5, width: 24, height: 30, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
+                >
+                  <span style={{ fontSize: 14, lineHeight: 1 }} aria-hidden>📖</span>
+                </div>
+                <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: "0.14em" }}>
+                  READING PROMPT
+                </span>
+              </div>
+              <div style={{ maxHeight: "22vh", overflow: "auto" }}>
+                <ChatModePrompt text={nanaPromptText} fontScale={fontScale} />
+              </div>
+            </div>
+
+            {/* Actions — Back to Reading + Font. Home lives in the drawer. */}
+            <div style={{ display: "flex", justifyContent: "center", gap: 10, flexWrap: "wrap" }}>
               <TileButton
                 icon="←"
                 label="Back to"
@@ -1931,37 +1961,37 @@ function ChatModeView({
                   ariaLabel="Cycle chat font size"
                 />
               )}
-            </div>
-            {/* NEED 1 — direct Home pill. Previously Nana had to chain
-                Back→Reading then Home (2 taps); now it's one. */}
-            <div style={{ display: "flex", justifyContent: "center", flexShrink: 0 }}>
-              <ProminentHomePill onClick={onGoHome} />
+              {onGoHome && (
+                <TileButton
+                  icon="🏠"
+                  label="Home"
+                  sublabel="Dashboard"
+                  tone="ghost"
+                  size="md"
+                  onClick={onGoHome}
+                />
+              )}
             </div>
           </>
+        ) : (
+          // Perry side: contextual listening prompt. No controls (Nana drives).
+          <div style={{
+            backgroundColor: "rgba(34,197,94,0.10)",
+            border: "1px solid rgba(34,197,94,0.45)",
+            borderRadius: 14,
+            padding: "14px 16px",
+            display: "flex", flexDirection: "column", gap: 6, alignItems: "center",
+          }}>
+            <span style={{ fontSize: 26 * Math.max(1, fontScale), textAlign: "center" }}>👂</span>
+            <p style={{ color: "rgba(134,239,172,0.95)", fontFamily: "Merriweather, serif", fontSize: 15 * Math.max(1, fontScale), fontWeight: 700, lineHeight: 1.5, margin: 0, textAlign: "center" }}>
+              Nana has a question about the story!
+            </p>
+            <p style={{ color: "rgba(255,255,255,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 11 * Math.max(1, fontScale), margin: 0, textAlign: "center", lineHeight: 1.4 }}>
+              Listen carefully and tell her what you think.
+            </p>
+          </div>
         )}
-
       </div>
-
-      {/* ── RIGHT: Live video panel ──────────────────────────── */}
-      <div style={{ flex: 1, position: "relative", overflow: "hidden" }}>
-        <FaceVideo
-          person={isNana ? "child" : "nana"}
-          width="100%"
-          height="100%"
-          showLabel={false}
-          hideQualityDot
-          borderRadius={0}
-          autoMirror={false}
-          style={{ border: "none", boxShadow: "none" }}
-        />
-        <div aria-hidden style={{ position: "absolute", inset: 0, background: "linear-gradient(to bottom, rgba(0,0,0,0.12) 0%, transparent 30%, transparent 65%, rgba(0,0,0,0.65) 100%)", pointerEvents: "none" }} />
-        {/* Name + live dot */}
-        <div style={{ position: "absolute", bottom: "14px", left: "12px", display: "flex", alignItems: "center", gap: "7px", zIndex: 10 }}>
-          <div style={{ width: "8px", height: "8px", borderRadius: "50%", backgroundColor: "#22c55e", boxShadow: "0 0 8px #22c55e", flexShrink: 0 }} />
-          <span style={{ color: "white", fontFamily: "DM Sans, sans-serif", fontSize: "15px", fontWeight: 700, textShadow: "0 1px 8px rgba(0,0,0,0.9)" }}>{videoName}</span>
-        </div>
-      </div>
-
     </div>
   );
 }
@@ -2685,51 +2715,94 @@ function BookSpread({
     }
   };
 
+  // Word highlight is triggered TWO ways for reliability:
+  //   1) A quick tap on a word (existing behavior)
+  //   2) A firm long-press (~500ms) on a word — Rick's Jun 22 spec:
+  //      "Pressing on a word (harder press, distinct from a normal
+  //      tap-to-select) should turn that word yellow." iOS's own
+  //      long-press callout is suppressed via CSS (WebkitTouchCallout +
+  //      user-select on the .book-body containers below), so neither
+  //      the Copy/Look Up menu nor a stray text selection can compete.
+  const longPressTimerRef = useRef<number | null>(null);
+  const longPressFiredRef = useRef<boolean>(false);
+  const pointerDownXYRef = useRef<{ x: number; y: number } | null>(null);
+
+  const doWordHighlight = (target: HTMLElement | null): boolean => {
+    const closestWordEl = target?.closest?.("[data-w]") as HTMLElement | null;
+    const wordRef = target?.dataset?.w ?? closestWordEl?.dataset?.w;
+    const wordText = closestWordEl?.textContent ?? target?.textContent ?? "";
+    if (!wordRef || !onWord) return false;
+    const dash = wordRef.indexOf("-");
+    if (dash <= 0) return false;
+    const side = wordRef.slice(0, dash) as "L" | "R";
+    const idx = Number(wordRef.slice(dash + 1));
+    if ((side !== "L" && side !== "R") || !Number.isFinite(idx)) return false;
+    onWord(side, idx, displayPage);
+    if (!isNana && wordText.trim()) speakWord(wordText.trim());
+    if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+      try { (navigator as Navigator).vibrate?.(12); } catch {}
+    }
+    return true;
+  };
+
+  const cancelLongPress = () => {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  };
+
+  const handlePointerDownForLongPress = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (justSwipedRef.current) return;
+    longPressFiredRef.current = false;
+    pointerDownXYRef.current = { x: e.clientX, y: e.clientY };
+    // Capture the DOM target NOW — by the time the timer fires the
+    // React SyntheticEvent has been recycled, so we can't safely read
+    // e.target inside the setTimeout closure.
+    const target = e.target as HTMLElement | null;
+    cancelLongPress();
+    longPressTimerRef.current = window.setTimeout(() => {
+      longPressTimerRef.current = null;
+      if (justSwipedRef.current) return;
+      if (doWordHighlight(target)) {
+        longPressFiredRef.current = true;
+      }
+    }, 500);
+  };
+
+  const handlePointerMoveForLongPress = (e: React.PointerEvent<HTMLDivElement>) => {
+    const start = pointerDownXYRef.current;
+    if (!start) return;
+    if (Math.abs(e.clientX - start.x) > 8 || Math.abs(e.clientY - start.y) > 8) {
+      // User is scrolling or swiping — cancel the pending long-press
+      // so a page-flip gesture doesn't accidentally leave a highlight
+      // on whatever word the finger started on.
+      cancelLongPress();
+      pointerDownXYRef.current = null;
+    }
+  };
+
   const handleBookTap = (e: React.PointerEvent<HTMLDivElement> | React.MouseEvent<HTMLDivElement>) => {
-    // BOTH Nana and Perry can tap words and the highlight broadcasts so the
-    // other side sees what was pointed at. But only Perry's device pronounces
-    // the word out loud — that's an early-reader "what does this say?" hint.
-    // Speaking on Nana's side would talk over her while she's reading.
+    // Called on pointerup. If the long-press timer already fired the
+    // highlight, this is just the tail of that gesture — no-op.
+    if (longPressFiredRef.current) {
+      longPressFiredRef.current = false;
+      pointerDownXYRef.current = null;
+      return;
+    }
+    cancelLongPress();
+    pointerDownXYRef.current = null;
 
     // A swipe just turned the page — don't also count the gesture's
     // tail-end as a tap on whatever word is now under the finger.
     if (justSwipedRef.current) return;
 
+    // Short tap: still try word highlight first (backup path if the
+    // long-press timing was off) then fall back to a pointer dot on
+    // non-word taps.
     const target = e.target as HTMLElement | null;
-    const closestWordEl = target?.closest?.("[data-w]") as HTMLElement | null;
-    const wordRef = target?.dataset?.w ?? closestWordEl?.dataset?.w;
-    const wordText = closestWordEl?.textContent ?? target?.textContent ?? "";
+    if (doWordHighlight(target)) return;
 
-    if (wordRef && onWord) {
-      const dash = wordRef.indexOf("-");
-      if (dash > 0) {
-        const side = wordRef.slice(0, dash) as "L" | "R";
-        const idx = Number(wordRef.slice(dash + 1));
-        if ((side === "L" || side === "R") && Number.isFinite(idx)) {
-          // Dev-only diagnostic so we can verify in screen recordings
-          // that taps are firing even when the highlight or speech
-          // doesn't visibly happen.
-          if (import.meta.env.DEV) {
-            // eslint-disable-next-line no-console
-            console.log("[word-tap]", { side, idx, page: displayPage, isNana, word: wordText.trim() });
-          }
-          onWord(side, idx, displayPage);
-          // Local pronunciation — Perry only.
-          if (!isNana && wordText.trim()) speakWord(wordText.trim());
-          // Trigger a soft haptic / visible pulse (the visible pulse
-          // fallback inside haptic() is what actually shows on iPad).
-          if (typeof navigator !== "undefined" && "vibrate" in navigator) {
-            try { (navigator as Navigator).vibrate?.(8); } catch {}
-          }
-          return;
-        }
-      }
-    }
-
-    // Fall back to x/y dot — bidirectional. Rick: "Nana's gold
-    // highlight and circle pointer are syncing to the child's iPad
-    // correctly. However, the child cannot initiate highlights or
-    // circles from her iPad" — both sides now broadcast pointer dots.
     if (!onPointer) return;
     const el = bookAreaRef.current;
     if (!el) return;
@@ -2813,10 +2886,24 @@ function BookSpread({
           for direction detection. */}
       <div
         ref={bookAreaRef}
-        style={{ flex: 1, position: "relative", overflow: "hidden", cursor: isNana ? "crosshair" : "default" }}
+        style={{
+          flex: 1, position: "relative", overflow: "hidden",
+          cursor: isNana ? "crosshair" : "default",
+          // Suppress iOS's system text-selection UI on the book so a
+          // firm press produces our yellow word highlight instead of
+          // the Copy / Look Up / Translate callout. Rick's Jun 22
+          // spec on the new highlight interaction.
+          WebkitUserSelect: "none",
+          userSelect: "none",
+          WebkitTouchCallout: "none",
+        }}
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
+        onPointerDown={handlePointerDownForLongPress}
+        onPointerMove={handlePointerMoveForLongPress}
         onPointerUp={handleBookTap}
+        onPointerCancel={() => { cancelLongPress(); pointerDownXYRef.current = null; }}
+        onPointerLeave={() => { cancelLongPress(); pointerDownXYRef.current = null; }}
       >
         {/* Pointer highlight ring — visible on both devices when Nana taps the book */}
         {pointerHighlight && pointerHighlight.page === displayPage && (
@@ -3033,19 +3120,27 @@ function LibraryView({
    *  the bookshelf scroll container so her view tracks Nana's scrolling. */
   scrollTop?: number;
 }) {
-  // Ref to the bookshelf scroll container. Nana publishes its scrollTop;
-  // Perry receives a target scrollTop and applies it imperatively.
+  // Ref to the bookshelf scroll container. EITHER side publishes its
+  // scrollTop, and EITHER side applies the other's incoming scrollTop —
+  // Rick (Jun 22 feedback): "When Nana scrolls the Library, it scrolls
+  // on Perry's side too. But when Perry scrolls, Nana's side does not
+  // update." Prior implementation gated onScroll on !readOnly (Nana-
+  // only publish) and the applier on readOnly (Perry-only receive);
+  // both directions now flow. Feedback-loop guard: suppressUntilRef
+  // is set when we programmatically apply an incoming scrollTop, and
+  // any scroll event fired inside that ~400ms window is treated as
+  // the browser's own scroll-fire from that apply (not a user gesture)
+  // and dropped. User gestures beyond the window publish normally.
   const shelfRef = useRef<HTMLDivElement | null>(null);
-  // Apply incoming scroll position on Perry's side. Guard with a small
-  // epsilon to avoid feedback if the same value is re-applied.
+  const suppressUntilRef = useRef<number>(0);
   useEffect(() => {
-    if (!readOnly) return;
     const el = shelfRef.current;
     if (!el) return;
     if (typeof scrollTop !== "number") return;
     if (Math.abs(el.scrollTop - scrollTop) < 1) return;
+    suppressUntilRef.current = performance.now() + 400;
     el.scrollTop = scrollTop;
-  }, [readOnly, scrollTop]);
+  }, [scrollTop]);
   // Search + status filter — Rick: "The library is growing, so we'll
   // eventually need a search and/or filter function to keep it
   // manageable." Filters apply locally over Object.values(booksLibrary);
@@ -3224,7 +3319,12 @@ function LibraryView({
           also see scroll." */}
       <div
         ref={shelfRef}
-        onScroll={readOnly || !onScroll ? undefined : (e) => onScroll((e.currentTarget as HTMLDivElement).scrollTop)}
+        onScroll={!onScroll ? undefined : (e) => {
+          // Drop echoes from a just-applied incoming scroll — see
+          // suppressUntilRef in the useEffect above.
+          if (performance.now() < suppressUntilRef.current) return;
+          onScroll((e.currentTarget as HTMLDivElement).scrollTop);
+        }}
         style={{ flex: 1, padding: "0 10px 0", overflow: "auto", display: "flex", flexDirection: "column", gap: "12px" }}
       >
         {/* Empty-state when search/filter yields no matches. */}
@@ -5024,6 +5124,154 @@ function PerryAwaitingView({
               <span aria-hidden style={{ fontSize: 14 }}>⇄</span>
               <span>Switch user</span>
             </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * SayHelloView — the "opening moment" screen Rick asked for on Jun 22:
+ * "I'd like to explore opening the session with a big video view —
+ * similar to the Show & Tell format — so Nana and the grandchild can
+ * see each other big and say hello before going to Home or picking a
+ * book. I think this would feel a lot more exciting than landing
+ * straight on Home."
+ *
+ * Renders when BOTH are connected and the session hasn't dismissed the
+ * greeting yet. Nana can either continue to Home (browse the library,
+ * pick a book) or jump straight to the greeting flow. Perry sees the
+ * same big video with a friendlier waiting/waving message.
+ */
+function SayHelloView({
+  isNana,
+  childName,
+  nanaName,
+  onContinueHome,
+  onStartReading,
+}: {
+  isNana: boolean;
+  childName: string;
+  nanaName: string;
+  /** Nana-only: dismiss to normal Home dashboard. */
+  onContinueHome?: () => void;
+  /** Nana-only: jump straight to reading (skips the dashboard). */
+  onStartReading?: () => void;
+}) {
+  const otherName = isNana ? (childName || getRoleLabel("child")) : (nanaName || getRoleLabel("nana"));
+  const selfName  = isNana ? (nanaName  || getRoleLabel("nana"))  : (childName || getRoleLabel("child"));
+  return (
+    <div style={{
+      flex: 1, display: "flex", flexDirection: "column",
+      backgroundColor: "#000", overflow: "hidden",
+    }}>
+      <style>{`
+        @keyframes nm-hello-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes nm-hello-wave { 0%,100% { transform: rotate(0deg); } 20% { transform: rotate(22deg); } 40% { transform: rotate(-14deg); } 60% { transform: rotate(22deg); } 80% { transform: rotate(-8deg); } }
+      `}</style>
+
+      {/* Big video stage — Show & Tell layout (contain fit). */}
+      <div style={{ flex: "1 1 0", minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: 12, position: "relative", overflow: "hidden" }}>
+        <div style={{ width: "100%", maxWidth: 900, height: "100%", position: "relative" }}>
+          <FaceVideoStage
+            bigPerson={isNana ? "child" : "nana"}
+            pipPerson={isNana ? "nana" : "child"}
+            bigName={otherName}
+            pipName={selfName}
+            bigObjectFit="contain"
+          />
+          <div style={{
+            position: "absolute", top: 16, left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 5,
+            background: "linear-gradient(135deg, rgba(201,146,42,0.95), rgba(141,98,28,0.95))",
+            color: NAVY,
+            fontFamily: "Playfair Display, serif",
+            fontSize: "clamp(15px, 2vw, 20px)",
+            fontWeight: 700,
+            letterSpacing: "0.02em",
+            padding: "9px 20px",
+            borderRadius: 999,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(247,201,93,0.45)",
+            animation: "nm-hello-rise 0.4s cubic-bezier(0.22,1,0.36,1)",
+            display: "inline-flex", alignItems: "center", gap: 10,
+            maxWidth: "calc(100% - 32px)",
+            textAlign: "center",
+          }}>
+            <span style={{ fontSize: 22, display: "inline-block", animation: "nm-hello-wave 1.8s ease-in-out infinite", transformOrigin: "70% 70%" }}>👋</span>
+            <span>Say hi to {otherName}!</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Bottom action strip */}
+      <div style={{
+        flexShrink: 0,
+        backgroundColor: "#0b172e",
+        borderTop: "1px solid rgba(255,255,255,0.08)",
+        padding: "14px 16px 16px",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        gap: 10, flexWrap: "wrap",
+      }}>
+        {isNana ? (
+          <>
+            {onContinueHome && (
+              <button
+                onClick={onContinueHome}
+                style={{
+                  background: "rgba(255,255,255,0.06)",
+                  color: CREAM,
+                  border: "1px solid rgba(255,255,255,0.22)",
+                  borderRadius: 999,
+                  padding: "12px 22px",
+                  fontFamily: "DM Sans, sans-serif",
+                  fontSize: "clamp(13px, 1.55vw, 15px)",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  display: "inline-flex", alignItems: "center", gap: 8,
+                  minHeight: 48,
+                  touchAction: "manipulation",
+                }}
+              >
+                <span style={{ fontSize: 16 }}>🏠</span>
+                <span>Go to Home</span>
+              </button>
+            )}
+            {onStartReading && (
+              <button
+                onClick={onStartReading}
+                style={{
+                  background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+                  color: NAVY,
+                  border: "none",
+                  borderRadius: 999,
+                  padding: "13px 28px",
+                  fontFamily: "DM Sans, sans-serif",
+                  fontSize: "clamp(13px, 1.7vw, 16px)",
+                  fontWeight: 800,
+                  letterSpacing: "0.04em",
+                  cursor: "pointer",
+                  boxShadow: "0 6px 18px rgba(201,146,42,0.42)",
+                  display: "inline-flex", alignItems: "center", gap: 8,
+                  minHeight: 48,
+                  touchAction: "manipulation",
+                }}
+              >
+                <span style={{ fontSize: 17 }}>📚</span>
+                <span>Start Reading</span>
+                <span style={{ fontSize: 17 }}>→</span>
+              </button>
+            )}
+          </>
+        ) : (
+          <div style={{
+            color: "rgba(247,240,227,0.75)",
+            fontFamily: "Merriweather, serif",
+            fontSize: 15, fontStyle: "italic",
+            textAlign: "center", lineHeight: 1.5,
+          }}>
+            👋 {otherName} is here — wave hello! She'll pick a book when you're ready.
           </div>
         )}
       </div>
@@ -9714,6 +9962,62 @@ function DeviceFrame({
   // dialog that always renders.
   const [endCallConfirmOpen, setEndCallConfirmOpen] = useState(false);
 
+  // Rick's Jun 22 spec: "opening the session with a big video view —
+  // similar to Show & Tell — so Nana and the grandchild can see each
+  // other big and say hello before going to Home." Local state per
+  // DeviceFrame so each side dismisses independently. Resets to false
+  // whenever the partner-connected signal flips false so a fresh
+  // reconnect brings the hello back.
+  const [saidHello, setSaidHello] = useState<boolean>(false);
+  const partnerConnected = isNana ? perryConnected : perryAuthenticated;
+  useEffect(() => {
+    if (!partnerConnected) setSaidHello(false);
+  }, [partnerConnected]);
+  const showSayHello =
+    !isOnboarding &&
+    partnerConnected &&
+    !saidHello &&
+    (isHome || (!isNana && (isGreeting || isIcebreaker)));
+
+  // Rick's Jun 22 spec: replace the row of tiny top-bar icons with a
+  // single Menu button that opens a right-side drawer containing all
+  // cross-screen navigation. The drawer entries are computed per-role
+  // (Nana gets the full set; Perry sees only in-session moves she can
+  // trigger).
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuEntries: MenuEntry[] = useMemo(() => {
+    const es: MenuEntry[] = [];
+    if (isNana && onGoHome) {
+      es.push({ key: "home", label: "Home", icon: <HomeIcon size={16} strokeWidth={2} aria-hidden />, onClick: onGoHome, active: isHome });
+    }
+    if (!isReadingMode && (isChatMode || isShowAndTell || isParentCheck)) {
+      es.push({ key: "continue", label: "Continue Reading", sublabel: "Back to the book", icon: <BookOpen size={16} strokeWidth={2} aria-hidden />, onClick: onBackToReading });
+    }
+    if (isNana && onStartParentCheck) {
+      es.push({ key: "schedule", label: "Schedule", sublabel: "Book next reading", icon: <CalendarDays size={16} strokeWidth={2} aria-hidden />, onClick: onStartParentCheck, active: isParentCheck });
+    }
+    if (onStartShowAndTell) {
+      es.push({ key: "showandtell", label: "Show & Tell", sublabel: "Take turns sharing", icon: <SparklesIcon size={16} strokeWidth={2} aria-hidden />, onClick: onStartShowAndTell, active: isShowAndTell });
+    }
+    if (isNana && onStartSillyFaces) {
+      es.push({ key: "silly", label: "Silly Faces", sublabel: "Faces + reactions", icon: <Smile size={16} strokeWidth={2} aria-hidden />, onClick: onStartSillyFaces, active: isSillyFaces });
+    }
+    if (isNana && onStartGoodbye) {
+      es.push({ key: "goodbye", label: "Goodbye", sublabel: "Wrap up together", icon: <Hand size={16} strokeWidth={2} aria-hidden />, onClick: onStartGoodbye, active: isGoodbyeMode });
+    }
+    if (isNana) {
+      es.push({ divider: true, key: "d1", label: "Memories" });
+      if (onOpenVault) es.push({ key: "vault", label: "Memory Vault", sublabel: "Saved reading moments", icon: <Disc size={16} strokeWidth={2} aria-hidden />, onClick: onOpenVault, active: isVault });
+      if (onOpenFamilyStories) es.push({ key: "journal", label: "Family Journal", sublabel: "Notes about today", icon: <BookHeart size={16} strokeWidth={2} aria-hidden />, onClick: onOpenFamilyStories, active: isFamilyStories });
+    }
+    if (isNana) {
+      es.push({ divider: true, key: "d2" });
+      es.push({ key: "end", label: "End Call", sublabel: "Say goodbye and hang up", icon: <PhoneOff size={16} strokeWidth={2} aria-hidden />, onClick: () => setEndCallConfirmOpen(true), destructive: true });
+    }
+    return es;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isNana, isHome, isChatMode, isShowAndTell, isParentCheck, isSillyFaces, isGoodbyeMode, isVault, isFamilyStories, isReadingMode]);
+
   const modeLabel = isOnboarding ? "Setting Up" : isGreeting ? "Chat Mode 💬" : isIcebreaker ? "Conversation Starters 💬" : isLibrary ? "Book Library 📚" : isChatMode ? "Chat Mode" : isShowAndTell ? "Show & Tell" : isParentCheck ? "Quick Check-In 💬" : isSillyFaces ? "Silly Faces 🎭" : isGoodbyeMode ? "Goodbye 💕" : isVault ? "Memory Vault 📼" : isFamilyStories ? "Our Family Journal 📖" : "Reading Mode";
   // Include reading mode so the header consistently shows nav buttons (Home,
   // Family Journal, Vault, Hang up) — the dual face tile lives in the
@@ -9831,7 +10135,14 @@ function DeviceFrame({
             </span>
           </div>
 
-          {/* Right — Change Book + icon controls */}
+          {/* Right — Change Book (reading only) + Menu button.
+              Rick's Jun 22 spec: the top-bar icon cluster (Home /
+              Schedule / Vault / Family Journal / End Call) has been
+              consolidated into a single Menu drawer (see MenuDrawer
+              rendered below the top bar). One consistent target on
+              every screen instead of small icons that grandparents
+              miss. Change Book stays inline because it's a reading-
+              mode-only affordance that's needed at a glance. */}
           <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 6, flexShrink: 0 }}>
             {isReadingMode && isNana && (
               <button
@@ -9855,67 +10166,14 @@ function DeviceFrame({
                 Change Book
               </button>
             )}
-            {(modeHighlight && !isOnboarding) ? (
-              <>
-                {/* Global nav — Home / Schedule / Silly Faces / Goodbye,
-                    minus whichever destination this screen IS. Rick:
-                    "give almost every screen a consistent set of exit
-                    options … the app should feel much more fluid and
-                    less like you can get trapped in a mode." Centralized
-                    in NavStrip so every navigable mode renders the same
-                    cluster instead of each view rolling its own Home
-                    pill at different sizes. */}
-                {isNana && onGoHome && (
-                  <NavStrip
-                    variant="inline"
-                    currentDestination={
-                      isHome          ? "home"
-                      : isParentCheck ? "schedule"
-                      : isSillyFaces  ? "sillyfaces"
-                      : isGoodbyeMode ? "goodbye"
-                      : null
-                    }
-                    onGoHome={onGoHome}
-                    onStartParentCheck={onStartParentCheck}
-                    onStartSillyFaces={onStartSillyFaces}
-                    onStartGoodbye={onStartGoodbye}
-                  />
-                )}
-                {isNana && (
-                  <IconButton
-                    icon={isFamilyStories
-                      ? <XIcon size={15} strokeWidth={2.5} aria-hidden />
-                      : <BookHeart size={15} strokeWidth={2} aria-hidden />}
-                    label={isFamilyStories ? "Close Our Family Journal" : "Open Our Family Journal"}
-                    size="sm"
-                    active={isFamilyStories}
-                    onClick={isFamilyStories ? onCloseFamilyStories : onOpenFamilyStories}
-                  />
-                )}
-                {isNana && (
-                  <IconButton
-                    icon={isVault
-                      ? <XIcon size={15} strokeWidth={2.5} aria-hidden />
-                      : <Disc size={15} strokeWidth={2} aria-hidden />}
-                    label={isVault ? "Close Memory Vault" : "Open Memory Vault"}
-                    size="sm"
-                    active={isVault}
-                    onClick={isVault ? onCloseVault : onOpenVault}
-                  />
-                )}
-                {isNana && (
-                  <IconButton
-                    icon={<PhoneOff size={15} strokeWidth={2.2} aria-hidden />}
-                    label="End the call"
-                    size="sm"
-                    tone="danger"
-                    onClick={() => setEndCallConfirmOpen(true)}
-                  />
-                )}
-              </>
-            ) : null /* dual-face tile lives in the floating PiP during reading mode */}
+            {modeHighlight && !isOnboarding && menuEntries.length > 0 && (
+              <MenuButton onClick={() => setMenuOpen(true)} />
+            )}
           </div>
         </div>
+
+        {/* Slide-in menu drawer — see menuEntries above. */}
+        <MenuDrawer open={menuOpen} onClose={() => setMenuOpen(false)} entries={menuEntries} />
 
         {/* Phase intro card — shown to both Nana and Perry. Coaching-specific
             prompt language stays in Nana's reading-mode UI; this card is just
@@ -9931,7 +10189,15 @@ function DeviceFrame({
         )}
 
         {/* Content */}
-        {isOnboarding ? (
+        {showSayHello ? (
+          <SayHelloView
+            isNana={isNana}
+            childName={childName}
+            nanaName={nanaName}
+            onContinueHome={isNana ? () => setSaidHello(true) : undefined}
+            onStartReading={isNana && onStartReadingSession ? () => { setSaidHello(true); onStartReadingSession(); } : undefined}
+          />
+        ) : isOnboarding ? (
           <OnboardingView
             isNana={isNana}
             step={onboardingStep}
@@ -10083,8 +10349,13 @@ function DeviceFrame({
             progress={dashboardProgress}
             onCancel={isNana ? onGoHome : undefined}
             readOnly={!isNana}
-            onScroll={isNana ? onLibraryScroll : undefined}
-            scrollTop={!isNana ? libraryScrollTop : undefined}
+            // Both roles now publish AND receive scroll — Rick's Jun 22
+            // feedback: "when Perry scrolls, Nana's side does not
+            // update." The echo-suppression window inside LibraryView
+            // prevents ping-pong when both sides scroll near-
+            // simultaneously.
+            onScroll={onLibraryScroll}
+            scrollTop={libraryScrollTop}
           />
         ) : isShowAndTell ? (
           <ShowAndTellView
@@ -10737,22 +11008,20 @@ function ReadingPiPSidebar({
       role="complementary"
       aria-label="Reading session controls"
       style={{
-        // 130px wide — gives ~118px inner room, enough to fit two 52px
-        // compact buttons side-by-side with a 6px gap (110px total).
-        // Layout rule: face tiles flex-shrink to fill remaining space
-        // while controls stay fixed-size at the bottom. In Cozy mode
-        // (slightly shorter content area due to the warm-frame chrome),
-        // the faces shrink instead of forcing a scroll bar. Earlier
-        // attempt used overflowY:auto which surfaced a scroll bar in
-        // Cozy — Rick: "in cozy u added the scroll, maybe we should
-        // resize the icons a bit smaller so they can adjust or fix
-        // layout for these buttons."
-        width: 130,
+        // Widened from a fixed 130px to a responsive clamp — Rick
+        // (Jun 22 feedback): "Video panels render too small for the
+        // available space." On iPad landscape (~1180px viewport) this
+        // now claims ~180-200px of the right rail instead of a
+        // cramped 130px, so the faces read as a proper presence
+        // rather than thumbnails. Floor keeps iPad mini + Cozy
+        // (warm-frame chrome) fitting; ceiling stops the sidebar
+        // from swallowing book width on very wide tablets.
+        width: "clamp(160px, 17vw, 220px)",
         flexShrink: 0,
         display: "flex",
         flexDirection: "column",
-        gap: 6,
-        padding: "8px 6px",
+        gap: 8,
+        padding: "10px 8px",
         backgroundColor: "rgba(11,23,46,0.85)",
         borderLeft: "1px solid rgba(255,255,255,0.08)",
         boxShadow: "inset 4px 0 14px rgba(0,0,0,0.25)",
@@ -10760,11 +11029,10 @@ function ReadingPiPSidebar({
         minHeight: 0,
       }}
     >
-      {/* Face tiles share the elastic top region. Each takes equal share
-          and is allowed to shrink down to 56px when vertical space is
-          tight (Cozy). Capped at 96px so on tall frames the tiles
-          don't balloon. */}
-      <div style={{ flex: "1 1 0", minHeight: 56, maxHeight: 96, display: "flex", minWidth: 0 }}>
+      {/* Face tiles now allowed to grow — cap raised from 96 → 160 so
+          the wider rail actually shows a bigger face instead of
+          leaving vertical whitespace above the controls. */}
+      <div style={{ flex: "1 1 0", minHeight: 72, maxHeight: 160, display: "flex", minWidth: 0 }}>
         <FaceVideo
           person="nana"
           width="100%"
@@ -10777,7 +11045,7 @@ function ReadingPiPSidebar({
           isRecording={isRecording}
         />
       </div>
-      <div style={{ flex: "1 1 0", minHeight: 56, maxHeight: 96, display: "flex", minWidth: 0 }}>
+      <div style={{ flex: "1 1 0", minHeight: 72, maxHeight: 160, display: "flex", minWidth: 0 }}>
         <FaceVideo
           person="child"
           width="100%"
@@ -10895,16 +11163,183 @@ function EndCallConfirm({ onCancel, onConfirm }: { onCancel: () => void; onConfi
 
 type NavDestination = "home" | "schedule" | "sillyfaces" | "goodbye";
 
-function NavStrip({
-  currentDestination,
-  onGoHome,
-  onStartParentCheck,
-  onStartSillyFaces,
-  onStartGoodbye,
-  /** Renders inline (for the reading-mode chrome) vs absolute-positioned
-   *  floating top-right (the default for all other navigable modes). */
-  variant = "floating",
-}: {
+/**
+ * MenuDrawer — a right-side sheet that consolidates all cross-screen
+ * navigation into one grandparent-friendly list. Rick's Jun 22 spec:
+ * "The top toolbar icons aren't very useful as-is — consider a
+ * dropdown or side menu that includes Home / Schedule / Show & Tell /
+ * Continue Reading / Silly Faces / Goodbye / Memory Vault."
+ *
+ * Tap outside or tap any item closes the drawer. Big 56px+ rows with
+ * text labels (not just icons) to pass the grandparent-first
+ * one-tap-first-read heuristic.
+ */
+interface MenuItem {
+  key: string;
+  label: string;
+  sublabel?: string;
+  icon: ReactNode;
+  onClick: () => void;
+  active?: boolean;
+  destructive?: boolean;
+  divider?: never;
+}
+interface MenuDivider { divider: true; key: string; label?: string }
+type MenuEntry = MenuItem | MenuDivider;
+
+function MenuDrawer({ open, onClose, entries }: { open: boolean; onClose: () => void; entries: MenuEntry[] }) {
+  if (!open) return null;
+  return (
+    <>
+      <style>{`
+        @keyframes nm-drawer-slide { from { transform: translateX(100%); opacity: 0.4; } to { transform: translateX(0); opacity: 1; } }
+      `}</style>
+      <div
+        onClick={onClose}
+        aria-hidden
+        style={{
+          position: "absolute",
+          inset: 0,
+          zIndex: 60,
+          backgroundColor: "rgba(8,15,30,0.55)",
+          backdropFilter: "blur(2px)",
+          animation: "phase-intro-fade 0.2s ease-out",
+        }}
+      />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Menu"
+        style={{
+          position: "absolute",
+          top: 0, right: 0, bottom: 0,
+          width: "min(320px, 84%)",
+          zIndex: 70,
+          background: "linear-gradient(180deg, #14223e 0%, #0b172e 100%)",
+          borderLeft: "1px solid rgba(201,146,42,0.35)",
+          boxShadow: "-8px 0 32px rgba(0,0,0,0.65)",
+          display: "flex", flexDirection: "column",
+          padding: "12px 12px 16px",
+          animation: "nm-drawer-slide 0.24s cubic-bezier(0.22,1,0.36,1)",
+          overflowY: "auto",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 6px 10px", flexShrink: 0 }}>
+          <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase" }}>Menu</span>
+          <button
+            onClick={onClose}
+            aria-label="Close menu"
+            style={{
+              width: 36, height: 36, borderRadius: 999,
+              background: "rgba(255,255,255,0.06)",
+              border: "1px solid rgba(255,255,255,0.14)",
+              color: CREAM,
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+              cursor: "pointer", padding: 0,
+              touchAction: "manipulation",
+            }}
+          >
+            <XIcon size={18} strokeWidth={2.2} aria-hidden />
+          </button>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          {entries.map((entry) => {
+            if ("divider" in entry) {
+              return (
+                <div key={entry.key} style={{ margin: "8px 4px 4px", borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: 8 }}>
+                  {entry.label && (
+                    <span style={{ color: "rgba(247,240,227,0.4)", fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", paddingLeft: 8 }}>
+                      {entry.label}
+                    </span>
+                  )}
+                </div>
+              );
+            }
+            return (
+              <button
+                key={entry.key}
+                onClick={() => { entry.onClick(); onClose(); }}
+                style={{
+                  display: "flex", alignItems: "center", gap: 14,
+                  padding: "14px 12px",
+                  borderRadius: 12,
+                  backgroundColor: entry.active ? "rgba(201,146,42,0.14)" : "transparent",
+                  border: `1px solid ${entry.active ? "rgba(201,146,42,0.45)" : "transparent"}`,
+                  color: entry.destructive ? "#f87171" : (entry.active ? AMBER : CREAM),
+                  fontFamily: "DM Sans, sans-serif",
+                  fontSize: 15, fontWeight: 700,
+                  cursor: "pointer",
+                  textAlign: "left",
+                  minHeight: 52,
+                  touchAction: "manipulation",
+                  transition: "background-color 140ms ease",
+                }}
+              >
+                <span aria-hidden style={{
+                  width: 30, height: 30, borderRadius: 8,
+                  backgroundColor: entry.destructive
+                    ? "rgba(248,113,113,0.15)"
+                    : entry.active
+                      ? "rgba(201,146,42,0.18)"
+                      : "rgba(255,255,255,0.06)",
+                  display: "inline-flex", alignItems: "center", justifyContent: "center",
+                  flexShrink: 0,
+                }}>
+                  {entry.icon}
+                </span>
+                <span style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
+                  <span>{entry.label}</span>
+                  {entry.sublabel && (
+                    <span style={{ fontSize: 11, fontWeight: 500, opacity: 0.6 }}>{entry.sublabel}</span>
+                  )}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function MenuButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      aria-label="Open menu"
+      title="Menu"
+      style={{
+        display: "inline-flex", alignItems: "center", gap: 6,
+        background: "rgba(201,146,42,0.14)",
+        color: AMBER,
+        border: "1px solid rgba(201,146,42,0.45)",
+        borderRadius: 999,
+        padding: "6px 12px 6px 10px",
+        fontFamily: "DM Sans, sans-serif",
+        fontSize: 12, fontWeight: 800,
+        letterSpacing: "0.04em",
+        cursor: "pointer",
+        touchAction: "manipulation",
+        minHeight: 34,
+        flexShrink: 0,
+      }}
+    >
+      <span aria-hidden style={{ display: "inline-flex", flexDirection: "column", gap: 3 }}>
+        <span style={{ width: 16, height: 2, backgroundColor: AMBER, borderRadius: 1 }} />
+        <span style={{ width: 16, height: 2, backgroundColor: AMBER, borderRadius: 1 }} />
+        <span style={{ width: 16, height: 2, backgroundColor: AMBER, borderRadius: 1 }} />
+      </span>
+      <span>Menu</span>
+    </button>
+  );
+}
+
+// NavStrip retained as a thin compatibility shim so existing call sites
+// don't break, but the visual result is nothing (the new MenuDrawer is
+// rendered separately in DeviceFrame's top chrome). Kept because
+// removing it wholesale would require unwinding several props still
+// threading through.
+function NavStrip(_props: {
   currentDestination: NavDestination | null;
   onGoHome: () => void;
   onStartParentCheck: () => void;
@@ -10912,48 +11347,7 @@ function NavStrip({
   onStartGoodbye: () => void;
   variant?: "floating" | "inline";
 }) {
-  const items: Array<{ key: NavDestination; label: string; icon: ReactNode; onClick: () => void; tone?: "default" | "amber" | "good" | "danger" }> = [
-    { key: "home",       label: "Home",         icon: <HomeIcon size={15} strokeWidth={2} aria-hidden />,     onClick: onGoHome },
-    { key: "schedule",   label: "Schedule",     icon: <CalendarDays size={15} strokeWidth={2} aria-hidden />, onClick: onStartParentCheck },
-    { key: "sillyfaces", label: "Silly Faces",  icon: <Smile size={15} strokeWidth={2} aria-hidden />,        onClick: onStartSillyFaces },
-    { key: "goodbye",    label: "Goodbye",      icon: <Hand size={15} strokeWidth={2} aria-hidden />,         onClick: onStartGoodbye },
-  ];
-  const visible = items.filter((i) => i.key !== currentDestination);
-
-  return (
-    <div
-      role="navigation"
-      aria-label="Quick navigation"
-      style={{
-        position: variant === "floating" ? "absolute" : "static",
-        top: variant === "floating" ? 10 : undefined,
-        right: variant === "floating" ? 10 : undefined,
-        zIndex: variant === "floating" ? 20 : undefined,
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        // Subtle backdrop for the floating variant so the icons stay
-        // legible over varying view backgrounds (the bright Goodbye
-        // hand emojis, the gold ParentCheck gradient, etc.).
-        padding: variant === "floating" ? "6px" : 0,
-        borderRadius: variant === "floating" ? 999 : 0,
-        background: variant === "floating" ? "rgba(11,23,46,0.55)" : "transparent",
-        backdropFilter: variant === "floating" ? "blur(8px)" : undefined,
-        border: variant === "floating" ? "1px solid rgba(255,255,255,0.08)" : undefined,
-      }}
-    >
-      {visible.map((item) => (
-        <IconButton
-          key={item.key}
-          icon={item.icon}
-          label={item.label}
-          size="sm"
-          tone={item.tone ?? "default"}
-          onClick={item.onClick}
-        />
-      ))}
-    </div>
-  );
+  return null;
 }
 
 /* ─── Child Picker + Add-Sibling Modal ─────────────────────
@@ -12559,6 +12953,42 @@ export default function App() {
     return () => { sseRef.current?.close(); nanaSseRef.current?.close(); };
   }, []);
 
+  // iOS WebView viewport-height fix. Rick: "Book opens small, stays
+  // small — no longer needs a restart to trigger." On iPadOS Capacitor
+  // WKWebView, `100dvh` occasionally freezes at the pre-background value
+  // when the app is backgrounded and returned. We mirror the LIVE
+  // visualViewport height into a CSS variable and switch the outer
+  // container to use it, and re-write it on every visibility / focus /
+  // resize / orientation change so the layout always matches what the
+  // user actually sees.
+  useEffect(() => {
+    const setVh = () => {
+      const h = (window.visualViewport?.height ?? window.innerHeight) || 0;
+      if (h > 0) {
+        document.documentElement.style.setProperty("--nm-app-vh", `${h}px`);
+      }
+    };
+    setVh();
+    const onVisibility = () => { if (document.visibilityState === "visible") setVh(); };
+    window.addEventListener("resize", setVh);
+    window.addEventListener("orientationchange", setVh);
+    window.addEventListener("focus", setVh);
+    window.addEventListener("pageshow", setVh);
+    document.addEventListener("visibilitychange", onVisibility);
+    const vv = window.visualViewport;
+    vv?.addEventListener("resize", setVh);
+    vv?.addEventListener("scroll", setVh);
+    return () => {
+      window.removeEventListener("resize", setVh);
+      window.removeEventListener("orientationchange", setVh);
+      window.removeEventListener("focus", setVh);
+      window.removeEventListener("pageshow", setVh);
+      document.removeEventListener("visibilitychange", onVisibility);
+      vv?.removeEventListener("resize", setVh);
+      vv?.removeEventListener("scroll", setVh);
+    };
+  }, []);
+
   // Mobile-Safari resilience: when the tab returns to the foreground (or
   // regains focus after a network blip), force the SSE connection to re-open.
   // EventSource auto-reconnect is unreliable on iOS Safari after long
@@ -13380,10 +13810,20 @@ export default function App() {
             lastAppliedBookChangeTsRef.current = msg.serverTs;
           }
         } else if (msg.type === "library_scroll") {
-          // Mirror Nana's bookshelf scroll position on Perry's side.
-          // LibraryView applies it imperatively via useEffect.
+          // Bidirectional library scroll mirror. Either side's scroll
+          // travels through this handler. Guard against our own echo:
+          // if the incoming top matches what we last published (within
+          // an epsilon), it's the server bouncing our own broadcast
+          // back and we skip it. Prevents "Nana scrolls to 400 quickly
+          // after 200, then a delayed echo of 200 arrives and snaps
+          // her back."
           if (typeof msg.payload.top === "number") {
-            setLibraryScrollTop(msg.payload.top);
+            const incoming = msg.payload.top;
+            if (Math.abs(incoming - libraryScrollLatestRef.current) < 2) {
+              // ignore self-echo
+            } else {
+              setLibraryScrollTop(incoming);
+            }
           }
         } else if (msg.type === "session_reset") {
           // Nana refreshed / re-logged in. Server wiped its session state.
@@ -15936,7 +16376,12 @@ export default function App() {
 
   return (
     <div style={{
-      height: "100dvh",
+      // Use the tracked live viewport height (see setVh effect above) with
+      // 100dvh as fallback for browsers where the effect hasn't run yet
+      // or where visualViewport isn't available. Fixes the "book opens
+      // small, stays small" regression after iPad backgrounding.
+      height: "var(--nm-app-vh, 100dvh)",
+      minHeight: "100dvh",
       backgroundColor: NAVY,
       display: "flex",
       flexDirection: "column",
