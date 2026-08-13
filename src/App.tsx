@@ -1214,23 +1214,25 @@ function WordWrapped({
             key={`${side}-${idx}`}
             data-w={`${side}-${idx}`}
             style={{
-              // Brighter highlight in the night theme (suppression of
-              // the gold over very dark page backgrounds was visually
-              // ambiguous — Rick wondered if "nighttime theme affected
-              // the word tap targets").
               backgroundColor: active ? "rgba(255,201,80,0.78)" : "transparent",
               color: active ? "#1B2B4B" : undefined,
               borderRadius: 4,
-              padding: "2px 3px",
-              margin: "0 -1px",
+              // Vertical padding widened so each word's tap target
+              // extends into the leading between lines. Rick's Build 28
+              // feedback #3: "highlighting usually grabs the word
+              // BELOW the one pressed" — that was because with only
+              // 2px vertical padding and a line-height of 1.95, most
+              // of the visual line-gap belonged to no span at all, so
+              // elementFromPoint returned whichever word span's box
+              // the finger's centroid actually intersected (usually
+              // the line below). Bumping to 7px vertical padding +
+              // matching negative vertical margin means adjacent
+              // spans meet in the middle of the leading, tap always
+              // lands on the word above/at the finger.
+              padding: "7px 3px",
+              margin: "-5px -1px",
               cursor: "pointer",
               touchAction: "manipulation",
-              // We only suppress the iOS long-press callout (Look Up /
-              // Search Web). `user-select: none` is intentionally NOT
-              // set here because on iOS Safari it sometimes prevents
-              // click events from firing on `<span>` children of a
-              // tappable parent — which was the leading hypothesis for
-              // word taps "stopping working" mid-session.
               WebkitTouchCallout: "none",
               transition: "background-color 180ms ease, color 180ms ease",
               boxDecorationBreak: "clone",
@@ -2294,21 +2296,32 @@ function IcebreakerView({
             ))}
           </div>
 
-          {/* Toggle for Perry's questions */}
-          <div style={{ display: "flex", justifyContent: "center" }}>
+          {/* Toggle for Perry's questions. Rick's Build 28 #7 flagged
+              that this "did nothing on Perry's iPad" — the actual code
+              path IS wired (server persists, both sides receive via
+              SSE), the confusion was that the effect is only visible
+              on Perry when she's ALSO in Icebreaker mode. Label now
+              spells that out, and Perry gets an "always on" pulse
+              badge (see IcebreakerView Perry branch) so she can see
+              the flip land regardless of the timing. */}
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
             <button
               onClick={onToggleChildPrompts}
               style={{
                 backgroundColor: showChildPrompts ? "rgba(201,146,42,0.15)" : "transparent",
-                color: showChildPrompts ? AMBER : "rgba(247,240,227,0.38)",
-                border: `1px solid ${showChildPrompts ? AMBER : "rgba(255,255,255,0.13)"}`,
-                borderRadius: "20px", padding: "5px 14px",
-                fontSize: "10px", fontFamily: "DM Sans, sans-serif", fontWeight: 600,
+                color: showChildPrompts ? AMBER : "rgba(247,240,227,0.55)",
+                border: `1px solid ${showChildPrompts ? AMBER : "rgba(255,255,255,0.20)"}`,
+                borderRadius: "20px", padding: "8px 16px",
+                fontSize: "12px", fontFamily: "DM Sans, sans-serif", fontWeight: 700,
                 cursor: "pointer", letterSpacing: "0.04em", transition: "all 0.2s",
+                minHeight: 40, touchAction: "manipulation",
               }}
             >
-              {showChildPrompts ? "✓ Perry's questions on" : "Show Perry questions"}
+              {showChildPrompts ? `✓ ${childName || "Perry"} can ask questions` : `Let ${childName || "Perry"} ask questions`}
             </button>
+            <span style={{ color: "rgba(247,240,227,0.42)", fontFamily: "DM Sans, sans-serif", fontSize: 10, textAlign: "center" }}>
+              Shows an "Ask {nanaName || "Nana"}" prompt on {childName || "Perry"}'s screen
+            </span>
           </div>
 
           {/* NEED 1 — prominent Home escape so Nana isn't forced to keep
@@ -2761,22 +2774,28 @@ function BookSpread({
     // e.target inside the setTimeout closure.
     const target = e.target as HTMLElement | null;
     cancelLongPress();
+    // 400ms threshold — Rick's Build 28 #4 flagged that Perry (on iPad
+    // Mini) couldn't highlight at all. 500ms was long enough that
+    // natural finger release on a smaller device beat the timer.
+    // 400ms is still clearly distinct from a normal tap (~120ms) but
+    // more forgiving of held touches on the smaller screen.
     longPressTimerRef.current = window.setTimeout(() => {
       longPressTimerRef.current = null;
       if (justSwipedRef.current) return;
       if (doWordHighlight(target)) {
         longPressFiredRef.current = true;
       }
-    }, 500);
+    }, 400);
   };
 
   const handlePointerMoveForLongPress = (e: React.PointerEvent<HTMLDivElement>) => {
     const start = pointerDownXYRef.current;
     if (!start) return;
-    if (Math.abs(e.clientX - start.x) > 8 || Math.abs(e.clientY - start.y) > 8) {
-      // User is scrolling or swiping — cancel the pending long-press
-      // so a page-flip gesture doesn't accidentally leave a highlight
-      // on whatever word the finger started on.
+    // Threshold raised 8 → 16px. On iPad Mini the 8px window was
+    // getting tripped by ordinary finger jitter during a firm press,
+    // silently cancelling the long-press before it could fire —
+    // Rick's Build 28 #4 ("Perry highlight doesn't work at all").
+    if (Math.abs(e.clientX - start.x) > 16 || Math.abs(e.clientY - start.y) > 16) {
       cancelLongPress();
       pointerDownXYRef.current = null;
     }
@@ -2798,10 +2817,22 @@ function BookSpread({
     if (justSwipedRef.current) return;
 
     // Short tap: still try word highlight first (backup path if the
-    // long-press timing was off) then fall back to a pointer dot on
-    // non-word taps.
+    // long-press timing was off). Rick's Build 28 feedback #5: the
+    // gold-circle pointer fallback that used to fire when a tap MISSED
+    // a word (e.g. landed in the whitespace between words) has been
+    // removed — with real yellow highlighting working, the circle just
+    // reads as noise on the page. Circle is still available for taps
+    // on illustrations/margins via the isTextTapZone check below.
     const target = e.target as HTMLElement | null;
     if (doWordHighlight(target)) return;
+
+    // Suppress the circle if the tap landed anywhere inside the book
+    // text (paragraph, chapter heading, running header, page number).
+    // Only fire the pointer dot for taps on the illustration motif,
+    // margins, or the spine — places where a "look here" hint still
+    // makes sense.
+    const isInsideText = !!target?.closest?.(".book-body, .nm-book-body, .nm-book-dropcap");
+    if (isInsideText) return;
 
     if (!onPointer) return;
     const el = bookAreaRef.current;
@@ -3327,6 +3358,114 @@ function LibraryView({
         }}
         style={{ flex: 1, padding: "0 10px 0", overflow: "auto", display: "flex", flexDirection: "column", gap: "12px" }}
       >
+        {/* Continue Reading hero — Rick's Build 28 #6/#9: the
+            in-progress book is Nana's first tap target when she opens
+            the library. Instead of forcing her to scroll to the yellow
+            resume button at the bottom, we surface the most-recently-
+            read in-progress book as a distinct hero tile at the top
+            of the shelf. One tap = jumps straight into the book at
+            the saved page. Hidden in readOnly (Perry) and when there's
+            no in-progress book. */}
+        {!readOnly && (() => {
+          // Pick the most recently read book that isn't finished.
+          const inProgress = progress
+            .filter(pr => {
+              const b = booksLibrary[pr.bookId];
+              if (!b) return false;
+              return pr.currentPage >= 1 && pr.currentPage < b.pages.length;
+            })
+            .slice()
+            .sort((a, b) => new Date(b.lastReadAt).getTime() - new Date(a.lastReadAt).getTime());
+          const top = inProgress[0];
+          if (!top) return null;
+          const b = booksLibrary[top.bookId];
+          if (!b) return null;
+          const chapterInfo = getChapterForPage(b, top.currentPage);
+          const chapterLabel = chapterInfo
+            ? `Chapter ${chapterInfo.chapterIndex + 1} of ${b.chapters!.length}`
+            : `Page ${top.currentPage} of ${b.pages.length}`;
+          return (
+            <button
+              onClick={() => {
+                onSelectBook(b.id);
+                onConfirmBook(top.currentPage);
+              }}
+              aria-label={`Continue reading ${b.title}, ${chapterLabel}`}
+              style={{
+                display: "flex", alignItems: "center", gap: 16,
+                background: "linear-gradient(135deg, rgba(247,201,93,0.20) 0%, rgba(201,146,42,0.12) 100%)",
+                border: `2px solid ${AMBER}`,
+                borderLeft: `10px solid ${b.spineColor}`,
+                borderRadius: 16,
+                padding: "18px 20px 18px 16px",
+                cursor: "pointer",
+                textAlign: "left",
+                boxShadow: "0 10px 28px rgba(201,146,42,0.28), 0 0 0 1px rgba(247,201,93,0.20)",
+                width: "100%",
+                flexShrink: 0,
+                touchAction: "manipulation",
+                minHeight: 116,
+              }}
+            >
+              <div style={{
+                position: "relative",
+                width: 72, height: 100, flexShrink: 0,
+                borderRadius: 8, boxShadow: "3px 4px 12px rgba(0,0,0,0.55)",
+                border: `2px solid ${b.spineColor}`,
+                backgroundColor: b.spineColor,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 40,
+              }}>
+                {b.emoji}
+                <div
+                  aria-hidden
+                  style={{
+                    position: "absolute", top: -8, right: -8,
+                    padding: "2px 8px", borderRadius: 999,
+                    backgroundColor: AMBER, color: NAVY,
+                    fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800,
+                    letterSpacing: "0.10em",
+                    boxShadow: "0 2px 8px rgba(0,0,0,0.45), 0 0 0 2px rgba(11,23,46,0.85)",
+                  }}
+                >
+                  RESUME
+                </div>
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: "0.16em", marginBottom: 4 }}>
+                  📖 CONTINUE READING
+                </div>
+                <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 22, fontWeight: 700, lineHeight: 1.15, marginBottom: 4 }}>
+                  {b.title}
+                </div>
+                <div style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: 12, marginBottom: 8 }}>
+                  {chapterLabel}
+                </div>
+                {/* Slim progress bar */}
+                <div style={{ width: "100%", height: 4, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.10)", overflow: "hidden" }}>
+                  <div style={{
+                    width: `${Math.min(100, Math.round((top.currentPage / b.pages.length) * 100))}%`,
+                    height: "100%",
+                    background: `linear-gradient(90deg, ${AMBER} 0%, #f7c95d 100%)`,
+                    transition: "width 240ms ease",
+                  }} />
+                </div>
+              </div>
+              <div style={{
+                flexShrink: 0,
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                width: 44, height: 44, borderRadius: "50%",
+                background: "linear-gradient(135deg, #f7c95d, #C9922A)",
+                color: NAVY,
+                fontSize: 20, fontWeight: 800,
+                boxShadow: "0 4px 12px rgba(0,0,0,0.35)",
+              }}>
+                →
+              </div>
+            </button>
+          );
+        })()}
+
         {/* Empty-state when search/filter yields no matches. */}
         {filteredBooks.length === 0 && (
           <div style={{
@@ -8320,12 +8459,16 @@ function SillyFacesView({
           label={nanaLabel}
           showLabel
           borderRadius={16}
-          // CONTAIN — shows the natural source framing without
-          // cover-cropping. Face appears at its actual proportion in the
-          // source (~25-35% of tile) instead of being scaled up to fill
-          // tile width and creating the zoomed-face look. Dark padding
-          // around the video blends with the tile background.
-          objectFit="contain"
+          // COVER — Rick's Build 28 screenshot showed both tiles had
+          // ~45% empty black space at the bottom under the video
+          // (portrait tile + landscape video source + contain fit =
+          // letterbox). Silly Faces wants faces filling the tile so
+          // stickers + filters read at full size, so switched to
+          // cover here specifically. Reading-mode PiPs keep contain
+          // for the "natural framing" look; Silly Faces is a
+          // performance mode where big-face-fills-tile wins.
+          objectFit="cover"
+          objectPosition="center 35%"
           hideQualityDot={false}
           autoMirror={isNana}
           compact={false}
@@ -8335,14 +8478,6 @@ function SillyFacesView({
             mirrored={isNana}
             paused={sillyChallenge === "counting" || sillyChallenge === "flash" || sillyChallenge === "holding"}
           />}
-          // Aspect + max dims match reading-mode PiP characteristics
-          // (116x96 = aspect 1.21). Reading mode's "perfect" look is
-          // not about objectFit/objectPosition (those are inherited
-          // already) — it's about tile size + aspect. Big landscape
-          // tiles + portrait sources = aggressive crop. Squarer +
-          // smaller tile = face appears at proper proportion.
-          // Restored larger maxHeight now that contain is used — face
-          // shows at natural proportion regardless of tile size.
           style={{ flex: "1 1 0", maxWidth: "calc(50% - 6px)", maxHeight: 420, flexShrink: 1 }}
         />
         <FaceVideo
@@ -8352,6 +8487,10 @@ function SillyFacesView({
           label={childLabel}
           showLabel
           borderRadius={16}
+          // See Nana tile above — cover fit fixes the letterbox bug
+          // Rick flagged on Build 28.
+          objectFit="cover"
+          objectPosition="center 35%"
           hideQualityDot={false}
           autoMirror={!isNana}
           compact={false}
@@ -8361,14 +8500,6 @@ function SillyFacesView({
             mirrored={!isNana}
             paused={sillyChallenge === "counting" || sillyChallenge === "flash" || sillyChallenge === "holding"}
           />}
-          // Aspect + max dims match reading-mode PiP characteristics
-          // (116x96 = aspect 1.21). Reading mode's "perfect" look is
-          // not about objectFit/objectPosition (those are inherited
-          // already) — it's about tile size + aspect. Big landscape
-          // tiles + portrait sources = aggressive crop. Squarer +
-          // smaller tile = face appears at proper proportion.
-          // Restored larger maxHeight now that contain is used — face
-          // shows at natural proportion regardless of tile size.
           style={{ flex: "1 1 0", maxWidth: "calc(50% - 6px)", maxHeight: 420, flexShrink: 1 }}
         />
 
@@ -9566,42 +9697,83 @@ function ParentCheckView({
 function RecordingConsentOverlay({
   isNana, recordingOn, onToggleRecording, onDismiss,
 }: { isNana: boolean; recordingOn: boolean; onToggleRecording: () => void; onDismiss: () => void; }) {
+  // Rick's Build 28 feedback #1: "Memory Vault consent screen unclear
+  // — When it asks to accept recording, it's not obvious what action
+  // to take to proceed." Redesigned so the CTA reads unambiguously and
+  // the two decisions (record vs skip) are separate primary buttons
+  // instead of a tiny toggle + generic "Got it" button that could be
+  // mistaken for the whole answer.
   return (
-    <div style={{ position: "absolute", inset: 0, zIndex: 50, backgroundColor: "rgba(11,23,46,0.88)", backdropFilter: "blur(6px)", display: "flex", alignItems: "center", justifyContent: "center", padding: "16px" }}>
-      <div style={{ backgroundColor: "#0d1e38", border: "1px solid rgba(201,146,42,0.35)", borderRadius: "16px", padding: "22px 18px", width: "100%", textAlign: "center" }}>
+    <div style={{ position: "absolute", inset: 0, zIndex: 50, backgroundColor: "rgba(11,23,46,0.88)", backdropFilter: "blur(6px)", display: "flex", alignItems: "center", justifyContent: "center", padding: "20px" }}>
+      <div style={{ backgroundColor: "#0d1e38", border: "1px solid rgba(201,146,42,0.35)", borderRadius: "18px", padding: "24px 22px", width: "100%", maxWidth: 440, textAlign: "center", boxShadow: "0 18px 60px rgba(0,0,0,0.55)" }}>
         <div style={{
-          width: 56, height: 56, borderRadius: "50%",
+          width: 64, height: 64, borderRadius: "50%",
           backgroundColor: "rgba(201,146,42,0.15)",
           border: "1px solid rgba(201,146,42,0.45)",
           display: "inline-flex", alignItems: "center", justifyContent: "center",
-          color: AMBER, marginBottom: 10,
+          color: AMBER, marginBottom: 14,
         }} aria-hidden>
-          <VideoIcon size={26} strokeWidth={1.8} />
+          <VideoIcon size={30} strokeWidth={1.8} />
         </div>
-        <div style={{ color: "#C9922A", fontFamily: "Playfair Display, serif", fontSize: "14px", fontWeight: 700, marginBottom: "6px" }}>Memory Vault Recording</div>
-        <div style={{ color: "rgba(247,240,227,0.65)", fontFamily: "DM Sans, sans-serif", fontSize: "10px", lineHeight: 1.55, marginBottom: "16px" }}>
-          This session can be recorded and saved for future generations to watch.
+        <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 22, fontWeight: 700, marginBottom: 6 }}>
+          Save this session as a memory?
         </div>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", backgroundColor: "rgba(255,255,255,0.05)", borderRadius: "10px", padding: "10px 12px", marginBottom: "14px" }}>
-          <div style={{ textAlign: "left" }}>
-            <div style={{ color: "#F7F0E3", fontFamily: "DM Sans, sans-serif", fontSize: "11px", fontWeight: 700 }}>Record this session</div>
-            <div style={{ color: "rgba(247,240,227,0.4)", fontFamily: "DM Sans, sans-serif", fontSize: "9px", marginTop: "2px" }}>
-              {isNana ? "Nana's consent" : "Parent's consent"}
-            </div>
-          </div>
-          <div
-            onClick={onToggleRecording}
-            style={{ width: "38px", height: "21px", borderRadius: "11px", backgroundColor: recordingOn ? "#C9922A" : "rgba(255,255,255,0.14)", position: "relative", cursor: "pointer", transition: "background-color 0.2s", flexShrink: 0 }}
+        <div style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: 13, lineHeight: 1.55, marginBottom: 18 }}>
+          We can record your reading time so {isNana ? "your grandchild" : "your family"} can watch it back for years to come. Nothing gets shared outside the family.
+        </div>
+
+        {/* Two decisive primary buttons — Save + Skip. The old design
+            had a tiny toggle switch that read as "settings" plus a
+            generic Got-It button that didn't communicate what state
+            you'd started in. Now it's an unambiguous binary choice. */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <button
+            onClick={() => { if (!recordingOn) onToggleRecording(); onDismiss(); }}
+            style={{
+              width: "100%",
+              background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+              color: NAVY,
+              border: "none",
+              borderRadius: 999,
+              padding: "14px 18px",
+              fontSize: 15,
+              fontFamily: "DM Sans, sans-serif",
+              fontWeight: 800,
+              cursor: "pointer",
+              boxShadow: "0 8px 24px rgba(201,146,42,0.42)",
+              display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
+              minHeight: 52,
+              touchAction: "manipulation",
+              letterSpacing: "0.02em",
+            }}
           >
-            <div style={{ position: "absolute", top: "2.5px", left: recordingOn ? "19px" : "2.5px", width: "16px", height: "16px", borderRadius: "50%", backgroundColor: "white", transition: "left 0.2s", boxShadow: "0 1px 4px rgba(0,0,0,0.5)" }} />
-          </div>
+            <span aria-hidden style={{ fontSize: 18 }}>💾</span>
+            <span>Yes, save this session</span>
+          </button>
+          <button
+            onClick={() => { if (recordingOn) onToggleRecording(); onDismiss(); }}
+            style={{
+              width: "100%",
+              background: "rgba(255,255,255,0.05)",
+              color: CREAM,
+              border: "1px solid rgba(255,255,255,0.20)",
+              borderRadius: 999,
+              padding: "12px 16px",
+              fontSize: 14,
+              fontFamily: "DM Sans, sans-serif",
+              fontWeight: 700,
+              cursor: "pointer",
+              minHeight: 48,
+              touchAction: "manipulation",
+            }}
+          >
+            No, don't record this time
+          </button>
         </div>
-        <button
-          onClick={onDismiss}
-          style={{ width: "100%", backgroundColor: "#C9922A", color: "#1B2B4B", border: "none", borderRadius: "24px", padding: "10px", fontSize: "12px", fontFamily: "DM Sans, sans-serif", fontWeight: 700, cursor: "pointer" }}
-        >
-          Got it — Start Session →
-        </button>
+
+        <div style={{ color: "rgba(247,240,227,0.42)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 14, lineHeight: 1.5 }}>
+          You can change this any time from the Menu.
+        </div>
       </div>
     </div>
   );
@@ -9990,8 +10162,19 @@ function DeviceFrame({
     if (isNana && onGoHome) {
       es.push({ key: "home", label: "Home", icon: <HomeIcon size={16} strokeWidth={2} aria-hidden />, onClick: onGoHome, active: isHome });
     }
-    if (!isReadingMode && (isChatMode || isShowAndTell || isParentCheck)) {
-      es.push({ key: "continue", label: "Continue Reading", sublabel: "Back to the book", icon: <BookOpen size={16} strokeWidth={2} aria-hidden />, onClick: onBackToReading });
+    // "Continue Reading" — Rick's Build 28 #10: persistent access from
+    // anywhere in the app. Two flavors: from an in-session sub-mode
+    // (chat / show-and-tell / parent-check) it's a fast "back to
+    // book"; from a non-session screen (home / library / vault /
+    // family journal / silly faces / goodbye) it starts (or resumes)
+    // Nana's session with the last book.
+    if (!isReadingMode) {
+      const inSessionSub = isChatMode || isShowAndTell || isParentCheck;
+      if (inSessionSub) {
+        es.push({ key: "continue", label: "Continue Reading", sublabel: "Back to the book", icon: <BookOpen size={16} strokeWidth={2} aria-hidden />, onClick: onBackToReading });
+      } else if (isNana && onStartReadingSession && (isHome || isLibrary || isVault || isFamilyStories || isSillyFaces || isGoodbyeMode || isBookRequests || isSettings)) {
+        es.push({ key: "continue", label: "Continue Reading", sublabel: "Pick up where you left off", icon: <BookOpen size={16} strokeWidth={2} aria-hidden />, onClick: onStartReadingSession });
+      }
     }
     if (isNana && onStartParentCheck) {
       es.push({ key: "schedule", label: "Schedule", sublabel: "Book next reading", icon: <CalendarDays size={16} strokeWidth={2} aria-hidden />, onClick: onStartParentCheck, active: isParentCheck });
@@ -10016,13 +10199,13 @@ function DeviceFrame({
     }
     return es;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isNana, isHome, isChatMode, isShowAndTell, isParentCheck, isSillyFaces, isGoodbyeMode, isVault, isFamilyStories, isReadingMode]);
+  }, [isNana, isHome, isLibrary, isChatMode, isShowAndTell, isParentCheck, isSillyFaces, isGoodbyeMode, isVault, isFamilyStories, isReadingMode, isBookRequests, isSettings]);
 
-  const modeLabel = isOnboarding ? "Setting Up" : isGreeting ? "Chat Mode 💬" : isIcebreaker ? "Conversation Starters 💬" : isLibrary ? "Book Library 📚" : isChatMode ? "Chat Mode" : isShowAndTell ? "Show & Tell" : isParentCheck ? "Quick Check-In 💬" : isSillyFaces ? "Silly Faces 🎭" : isGoodbyeMode ? "Goodbye 💕" : isVault ? "Memory Vault 📼" : isFamilyStories ? "Our Family Journal 📖" : "Reading Mode";
+  const modeLabel = isOnboarding ? "Setting Up" : isHome ? "Home 🏠" : isGreeting ? "Chat Mode 💬" : isIcebreaker ? "Conversation Starters 💬" : isLibrary ? "Book Library 📚" : isChatMode ? "Chat Mode" : isShowAndTell ? "Show & Tell" : isParentCheck ? "Quick Check-In 💬" : isSillyFaces ? "Silly Faces 🎭" : isGoodbyeMode ? "Goodbye 💕" : isVault ? "Memory Vault 📼" : isFamilyStories ? "Our Family Journal 📖" : isBookRequests ? "Book Requests 📬" : isSettings ? "Settings ⚙️" : "Reading Mode";
   // Include reading mode so the header consistently shows nav buttons (Home,
   // Family Journal, Vault, Hang up) — the dual face tile lives in the
   // floating draggable PiP overlay during reading instead of the ribbon.
-  const modeHighlight = isReadingMode || isGreeting || isIcebreaker || isLibrary || isChatMode || isShowAndTell || isParentCheck || isSillyFaces || isGoodbyeMode || isVault || isFamilyStories;
+  const modeHighlight = isReadingMode || isHome || isGreeting || isIcebreaker || isLibrary || isChatMode || isShowAndTell || isParentCheck || isSillyFaces || isGoodbyeMode || isVault || isFamilyStories || isBookRequests || isSettings;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: 1, minWidth: 0 }}>
@@ -12953,17 +13136,24 @@ export default function App() {
     return () => { sseRef.current?.close(); nanaSseRef.current?.close(); };
   }, []);
 
-  // iOS WebView viewport-height fix. Rick: "Book opens small, stays
-  // small — no longer needs a restart to trigger." On iPadOS Capacitor
-  // WKWebView, `100dvh` occasionally freezes at the pre-background value
-  // when the app is backgrounded and returned. We mirror the LIVE
-  // visualViewport height into a CSS variable and switch the outer
-  // container to use it, and re-write it on every visibility / focus /
-  // resize / orientation change so the layout always matches what the
-  // user actually sees.
+  // iOS WebView viewport-height tracker. Rick's Build 27 fix for the
+  // "book opens small, stays small" backgrounding regression. Build 28
+  // #8 uncovered a regression from that fix: the book area gradually
+  // shrank over a session as `--nm-app-vh` accumulated smaller and
+  // smaller values from transient viewport events (notification pull,
+  // brief keyboard peek, iPad chrome shifts). Two changes:
+  //   1. Dropped `visualViewport.scroll` listener — that fired on
+  //      every viewport shift, not just meaningful resize events,
+  //      and every fire could ratchet the height DOWN a few px.
+  //   2. Take max(visualViewport.height, window.innerHeight) so we
+  //      never persist a smaller-than-window value. If VV is smaller
+  //      it's because chrome is temporarily in the way; the real
+  //      window still owns the height we should paint into.
   useEffect(() => {
     const setVh = () => {
-      const h = (window.visualViewport?.height ?? window.innerHeight) || 0;
+      const vvh = window.visualViewport?.height ?? 0;
+      const iwh = window.innerHeight ?? 0;
+      const h = Math.max(vvh, iwh);
       if (h > 0) {
         document.documentElement.style.setProperty("--nm-app-vh", `${h}px`);
       }
@@ -12977,7 +13167,6 @@ export default function App() {
     document.addEventListener("visibilitychange", onVisibility);
     const vv = window.visualViewport;
     vv?.addEventListener("resize", setVh);
-    vv?.addEventListener("scroll", setVh);
     return () => {
       window.removeEventListener("resize", setVh);
       window.removeEventListener("orientationchange", setVh);
@@ -12985,7 +13174,6 @@ export default function App() {
       window.removeEventListener("pageshow", setVh);
       document.removeEventListener("visibilitychange", onVisibility);
       vv?.removeEventListener("resize", setVh);
-      vv?.removeEventListener("scroll", setVh);
     };
   }, []);
 
@@ -14265,6 +14453,21 @@ export default function App() {
             const ts = Date.now();
             lastAppliedPointerTsRef.current = ts;
             setPointerHighlight({ x: p.x, y: p.y, page: p.page, ts });
+          }
+        } else if (msg.type === "library_scroll") {
+          // Bidirectional library scroll mirror on Nana's side.
+          // Rick's Build 28 #2: "Perry scrolling doesn't move Nana's."
+          // The Build 28 fix added the handler to Perry's SSE only —
+          // this handler on Nana's SSE was missing, so Perry's
+          // broadcasts never surfaced. Same echo-skip pattern used
+          // in the Perry-side handler.
+          if (typeof msg.payload.top === "number") {
+            const incoming = msg.payload.top;
+            if (Math.abs(incoming - libraryScrollLatestRef.current) < 2) {
+              // self-echo, ignore
+            } else {
+              setLibraryScrollTop(incoming);
+            }
           }
         } else if (msg.type === "word_highlight") {
           const p = msg.payload as { side: "L" | "R"; index: number; page: number };
