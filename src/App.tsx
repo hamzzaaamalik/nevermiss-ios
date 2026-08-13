@@ -1176,6 +1176,116 @@ const booksLibrary: Record<string, Book> = {
   ),
 };
 
+/**
+ * Merge server-managed catalog books into the hardcoded booksLibrary.
+ * Server ids override hardcoded ids of the same name, so Rick can edit
+ * "alice" in the admin dashboard and the change replaces the bundled
+ * version on next fetch. Missing client-only fields (ageRange, cue,
+ * nanaPrompt, etc.) are filled with defaults so the render never
+ * crashes on a partially-populated server book.
+ *
+ * Mutates the `booksLibrary` object in place — the calling component
+ * bumps a version counter so React re-renders every consumer.
+ */
+function mergeServerCatalog(serverBooks: unknown[]): void {
+  for (const raw of serverBooks) {
+    if (!raw || typeof raw !== "object") continue;
+    const b = raw as Record<string, unknown>;
+    const id = typeof b.id === "string" ? b.id : null;
+    const title = typeof b.title === "string" ? b.title : null;
+    if (!id || !title) continue;
+    // Server ships published books via the public /api/books endpoint;
+    // guard defensively in case an unpublished one slipped through
+    // (e.g. Rick fetched with ?all=1 during development).
+    if (b.published === false) continue;
+
+    // Normalize server pages → client BookPage shape (fill missing).
+    const serverPages = Array.isArray(b.pages) ? b.pages : [];
+    const pages: BookPage[] = serverPages
+      .filter(p => p && typeof p === "object")
+      .map((p: unknown) => {
+        const pp = p as Record<string, unknown>;
+        return {
+          leftEmoji:      typeof pp.leftEmoji === "string" ? pp.leftEmoji : "",
+          leftChapter:    typeof pp.leftChapter === "string" ? pp.leftChapter : "",
+          leftBody:       typeof pp.leftBody === "string" ? pp.leftBody : "",
+          rightTitle:     typeof pp.rightTitle === "string" ? pp.rightTitle : null,
+          rightTitleSub:  typeof pp.rightTitleSub === "string" ? pp.rightTitleSub : null,
+          rightBody:      typeof pp.rightBody === "string" ? pp.rightBody : "",
+          rightIsTitle:   !!pp.rightIsTitle,
+          cue:            typeof pp.cue === "string" ? pp.cue : "",
+          nanaPrompt:     typeof pp.nanaPrompt === "string" ? pp.nanaPrompt : "",
+          imageUrl:       typeof pp.imageUrl === "string" ? pp.imageUrl : undefined,
+        };
+      });
+
+    // Same normalization for chapter arrays if present.
+    let chapters: BookChapter[] | undefined = undefined;
+    if (Array.isArray(b.chapters)) {
+      chapters = (b.chapters as unknown[])
+        .filter(c => c && typeof c === "object")
+        .map((c: unknown) => {
+          const cc = c as Record<string, unknown>;
+          const chapterPages = Array.isArray(cc.pages) ? cc.pages : [];
+          return {
+            id:       typeof cc.id === "string" ? cc.id : `ch-${Math.random().toString(36).slice(2, 8)}`,
+            title:    typeof cc.title === "string" ? cc.title : "Chapter",
+            summary:  typeof cc.summary === "string" ? cc.summary : "",
+            question: typeof cc.question === "string" ? cc.question : undefined,
+            teaser:   typeof cc.teaser === "string" ? cc.teaser : undefined,
+            pages:    chapterPages
+              .filter(p => p && typeof p === "object")
+              .map((p: unknown) => {
+                const pp = p as Record<string, unknown>;
+                return {
+                  leftEmoji:     typeof pp.leftEmoji === "string" ? pp.leftEmoji : "",
+                  leftChapter:   typeof pp.leftChapter === "string" ? pp.leftChapter : "",
+                  leftBody:      typeof pp.leftBody === "string" ? pp.leftBody : "",
+                  rightTitle:    typeof pp.rightTitle === "string" ? pp.rightTitle : null,
+                  rightTitleSub: typeof pp.rightTitleSub === "string" ? pp.rightTitleSub : null,
+                  rightBody:     typeof pp.rightBody === "string" ? pp.rightBody : "",
+                  rightIsTitle:  !!pp.rightIsTitle,
+                  cue:           typeof pp.cue === "string" ? pp.cue : "",
+                  nanaPrompt:    typeof pp.nanaPrompt === "string" ? pp.nanaPrompt : "",
+                  imageUrl:      typeof pp.imageUrl === "string" ? pp.imageUrl : undefined,
+                };
+              }),
+          };
+        });
+    }
+
+    const existing = booksLibrary[id];
+    booksLibrary[id] = {
+      // Start from any existing hardcoded copy so we don't lose
+      // ageRange / coverUrl / gutenbergUrl / tier that the bundled
+      // catalog knew but the server never learned.
+      ...(existing ?? {
+        id,
+        title,
+        author:              "",
+        emoji:               "📖",
+        spineColor:          "#5C3A1E",
+        tagline:             "",
+        ageRange:            "",
+        readingLevel:        "",
+        coverUrl:            "",
+        gutenbergUrl:        "",
+        standardEbooksUrl:   "",
+        pages,
+      } satisfies Book),
+      // Overlay server-authoritative fields.
+      id,
+      title,
+      author:     typeof b.author === "string" ? b.author : (existing?.author ?? ""),
+      emoji:      typeof b.emoji === "string" && b.emoji.length > 0 ? b.emoji : (existing?.emoji ?? "📖"),
+      spineColor: typeof b.spineColor === "string" ? b.spineColor : (existing?.spineColor ?? "#5C3A1E"),
+      tagline:    typeof b.tagline === "string" ? b.tagline : (existing?.tagline ?? ""),
+      pages,
+      chapters,
+    };
+  }
+}
+
 /* ─── Book content — true two-page open-book spread ─────── */
 
 /**
@@ -15676,10 +15786,62 @@ export default function App() {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [selectedBookId, setSelectedBookId] = useState("alice");
+
+  // Server-owned catalog (admin.nevermiss.family manages this). Merged
+  // into the hardcoded booksLibrary on top so admin-created books
+  // appear in every family's library within seconds of publishing.
+  // `catalogVersion` state is bumped whenever the merge changes so
+  // every component that reads booksLibrary re-renders. Fetch runs
+  // once on mount + on window focus so a Nana who was on the app when
+  // Rick added a book sees it after switching back.
+  const [catalogVersion, setCatalogVersion] = useState(0);
+  useEffect(() => {
+    let alive = true;
+
+    // Instant paint from localStorage cache — the network fetch below
+    // will refresh it. Guards a Nana who opens the iPad offline: she
+    // still gets whatever books the server told her about last time.
+    try {
+      const cachedRaw = localStorage.getItem("nm_catalog_v1");
+      if (cachedRaw) {
+        const cached = JSON.parse(cachedRaw) as unknown[];
+        if (Array.isArray(cached) && cached.length > 0) {
+          mergeServerCatalog(cached);
+          setCatalogVersion(v => v + 1);
+        }
+      }
+    } catch {}
+
+    const refresh = () => {
+      api.catalog.listBooks()
+        .then(serverBooks => {
+          if (!alive) return;
+          mergeServerCatalog(serverBooks);
+          try { localStorage.setItem("nm_catalog_v1", JSON.stringify(serverBooks)); } catch {}
+          setCatalogVersion(v => v + 1);
+        })
+        .catch(() => { /* silent — hardcoded fallback still works */ });
+    };
+    refresh();
+    // Also refresh when the tab returns to foreground, so Rick's newest
+    // book shows up without a full app relaunch.
+    const onFocus = () => { if (document.visibilityState === "visible") refresh(); };
+    document.addEventListener("visibilitychange", onFocus);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      alive = false;
+      document.removeEventListener("visibilitychange", onFocus);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
+
   // Defensive: never let a stale or unknown bookId crash the render.
   // Falls back to the first book so the UI stays usable while the real
-  // bookId arrives via SSE / current_state.
-  const currentBook = booksLibrary[selectedBookId] ?? Object.values(booksLibrary)[0];
+  // bookId arrives via SSE / current_state. `catalogVersion` is a
+  // deliberate dependency so this re-derives after a catalog refresh.
+  const currentBook = catalogVersion >= 0
+    ? (booksLibrary[selectedBookId] ?? Object.values(booksLibrary)[0])
+    : Object.values(booksLibrary)[0];
   const sessionStartPageRef = useRef(1);
   const [preSelectedBook, setPreSelectedBook] = useState<{ bookId: string; startPage: number } | null>(null);
 

@@ -101,6 +101,26 @@ export interface ReadingSession {
   sessionDate: string;
 }
 
+/** Shape of a book coming from the server catalog. Matches the admin
+ *  dashboard's Book shape; a superset of what the client renderer
+ *  requires. Missing client-only fields (ageRange / cue / etc.) get
+ *  filled in with defaults by the merge helper in App.tsx. */
+export interface CatalogBook {
+  id: string;
+  title: string;
+  author: string;
+  tagline: string | null;
+  emoji: string;
+  spineColor: string;
+  tags: string[];
+  chapters: unknown | null;
+  pages: unknown[];
+  published: boolean;
+  displayOrder: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export const api = {
   auth: {
     me: () => req<{ user: SafeUser }>("GET", "/auth/me"),
@@ -281,6 +301,13 @@ export const api = {
    *  list (server picks the active child if `childId` omitted). Save
    *  is idempotent: re-saving the same word returns the existing row
    *  instead of creating a duplicate. */
+  /** Public server-managed book catalog. Populated by admins via
+   *  admin.nevermiss.family; the client merges these on top of the
+   *  hardcoded booksLibrary (server id wins on conflict). */
+  catalog: {
+    listBooks: () => req<{ books: CatalogBook[] }>("GET", "/books").then(r => r.books),
+  },
+
   learnedWords: {
     list: (connectionId: string, childId?: string) =>
       req<{ words: Array<{
