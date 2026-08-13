@@ -2728,28 +2728,92 @@ function BookSpread({
     }
   };
 
-  // Word highlight is triggered TWO ways for reliability:
-  //   1) A quick tap on a word (existing behavior)
-  //   2) A firm long-press (~500ms) on a word — Rick's Jun 22 spec:
-  //      "Pressing on a word (harder press, distinct from a normal
-  //      tap-to-select) should turn that word yellow." iOS's own
-  //      long-press callout is suppressed via CSS (WebkitTouchCallout +
-  //      user-select on the .book-body containers below), so neither
-  //      the Copy/Look Up menu nor a stray text selection can compete.
+  // Bulletproof word highlight — Rick's Build 28 #3/#4 flagged both
+  // "wrong word grabbed" and "Perry can't highlight at all". Previous
+  // long-press-only version was fragile: iPad Mini's finger jitter
+  // tripped the movement threshold, tight vertical padding meant taps
+  // in line-leading missed spans, and the long-press timing left a
+  // window where nothing happened at all.
+  //
+  // This version:
+  //   1. ANY tap on a word span (or nearest word to the tap point) →
+  //      instant highlight. iOS text-selection callout is already
+  //      disabled via CSS on the book area, so there's no OS UI to
+  //      compete with — the "distinct from tap-to-select" concern
+  //      from Rick's original spec is moot.
+  //   2. If the tap lands in whitespace between words, we find the
+  //      geometrically nearest [data-w] span within a small radius
+  //      and highlight THAT. Kills the "grabs word below" bug for
+  //      taps that land in line-leading.
+  //   3. Long-press (300ms hold) STILL works as a redundant path —
+  //      if the pointerup somehow gets dropped, the long-press
+  //      timer independently fires the same highlight code.
+  //   4. Diagnostic console.log so if this STILL fails on Perry's
+  //      iPad, the screen recording will surface the "why".
   const longPressTimerRef = useRef<number | null>(null);
   const longPressFiredRef = useRef<boolean>(false);
   const pointerDownXYRef = useRef<{ x: number; y: number } | null>(null);
 
-  const doWordHighlight = (target: HTMLElement | null): boolean => {
-    const closestWordEl = target?.closest?.("[data-w]") as HTMLElement | null;
-    const wordRef = target?.dataset?.w ?? closestWordEl?.dataset?.w;
-    const wordText = closestWordEl?.textContent ?? target?.textContent ?? "";
-    if (!wordRef || !onWord) return false;
+  const doWordHighlightAt = (target: HTMLElement | null, x: number, y: number, reason: string): boolean => {
+    // Direct hit: target already has data-w, or an ancestor does.
+    let wordEl = target?.closest?.("[data-w]") as HTMLElement | null;
+    // Fallback: use elementsFromPoint at the tap coord and pick the
+    // first one with a data-w attribute. Catches the case where the
+    // tap landed on a text node whose parent isn't a span (extremely
+    // rare) or on a decorative overlay that sits on top of the text.
+    if (!wordEl && typeof document.elementsFromPoint === "function") {
+      const stack = document.elementsFromPoint(x, y);
+      for (const el of stack) {
+        const w = (el as HTMLElement).closest?.("[data-w]") as HTMLElement | null;
+        if (w) { wordEl = w; break; }
+      }
+    }
+    // Geometric-nearest fallback: search the bookArea for every
+    // data-w span within a 40px radius and pick the one whose center
+    // is closest to (x, y). Kills "grabs word below/above" for taps
+    // in the line-leading gap between words. 40px covers the widest
+    // line-height on the largest font-scale.
+    if (!wordEl && bookAreaRef.current) {
+      const spans = bookAreaRef.current.querySelectorAll("[data-w]");
+      let best: HTMLElement | null = null;
+      let bestDist = Infinity;
+      for (let i = 0; i < spans.length; i++) {
+        const s = spans[i] as HTMLElement;
+        const r = s.getBoundingClientRect();
+        const cx = r.left + r.width / 2;
+        const cy = r.top + r.height / 2;
+        // Distance from tap point to span's center, biased so vertical
+        // gap counts double (a word directly above/below matters more
+        // than one to the side at the same distance).
+        const dx = cx - x;
+        const dy = (cy - y) * 2;
+        const d = Math.hypot(dx, dy);
+        if (d < bestDist && d < 80) {
+          bestDist = d;
+          best = s;
+        }
+      }
+      if (best) wordEl = best;
+    }
+
+    if (!wordEl || !onWord) {
+      if (import.meta.env.DEV || typeof window !== "undefined") {
+        // eslint-disable-next-line no-console
+        console.log("[nm-hl] miss", { reason, x: Math.round(x), y: Math.round(y), hasOnWord: !!onWord, isNana });
+      }
+      return false;
+    }
+    const wordRef = wordEl.dataset.w;
+    const wordText = wordEl.textContent ?? "";
+    if (!wordRef) return false;
     const dash = wordRef.indexOf("-");
     if (dash <= 0) return false;
     const side = wordRef.slice(0, dash) as "L" | "R";
     const idx = Number(wordRef.slice(dash + 1));
     if ((side !== "L" && side !== "R") || !Number.isFinite(idx)) return false;
+
+    // eslint-disable-next-line no-console
+    console.log("[nm-hl] fire", { reason, side, idx, page: displayPage, isNana, word: wordText.trim().slice(0, 20) });
     onWord(side, idx, displayPage);
     if (!isNana && wordText.trim()) speakWord(wordText.trim());
     if (typeof navigator !== "undefined" && "vibrate" in navigator) {
@@ -2769,44 +2833,44 @@ function BookSpread({
     if (justSwipedRef.current) return;
     longPressFiredRef.current = false;
     pointerDownXYRef.current = { x: e.clientX, y: e.clientY };
-    // Capture the DOM target NOW — by the time the timer fires the
-    // React SyntheticEvent has been recycled, so we can't safely read
-    // e.target inside the setTimeout closure.
+    // Capture the DOM target + coord NOW — the React SyntheticEvent
+    // is recycled before the timer fires.
     const target = e.target as HTMLElement | null;
+    const dx = e.clientX;
+    const dy = e.clientY;
     cancelLongPress();
-    // 400ms threshold — Rick's Build 28 #4 flagged that Perry (on iPad
-    // Mini) couldn't highlight at all. 500ms was long enough that
-    // natural finger release on a smaller device beat the timer.
-    // 400ms is still clearly distinct from a normal tap (~120ms) but
-    // more forgiving of held touches on the smaller screen.
+    // 300ms redundant-path timer. Backup only — the primary trigger
+    // is the immediate handleBookTap on pointerup. This fires only if
+    // pointerup doesn't reach us within 300ms (rare, mostly a safety
+    // net for touch events that get consumed by an intermediary).
     longPressTimerRef.current = window.setTimeout(() => {
       longPressTimerRef.current = null;
       if (justSwipedRef.current) return;
-      if (doWordHighlight(target)) {
+      if (doWordHighlightAt(target, dx, dy, "longpress")) {
         longPressFiredRef.current = true;
       }
-    }, 400);
+    }, 300);
   };
 
   const handlePointerMoveForLongPress = (e: React.PointerEvent<HTMLDivElement>) => {
     const start = pointerDownXYRef.current;
     if (!start) return;
-    // Threshold raised 8 → 16px. On iPad Mini the 8px window was
-    // getting tripped by ordinary finger jitter during a firm press,
-    // silently cancelling the long-press before it could fire —
-    // Rick's Build 28 #4 ("Perry highlight doesn't work at all").
-    if (Math.abs(e.clientX - start.x) > 16 || Math.abs(e.clientY - start.y) > 16) {
+    // Very generous 24px threshold — only real scrolling/swiping
+    // cancels the pending highlight. Static hold with normal finger
+    // jitter (even on iPad Mini) doesn't trip.
+    if (Math.abs(e.clientX - start.x) > 24 || Math.abs(e.clientY - start.y) > 24) {
       cancelLongPress();
       pointerDownXYRef.current = null;
     }
   };
 
   const handleBookTap = (e: React.PointerEvent<HTMLDivElement> | React.MouseEvent<HTMLDivElement>) => {
-    // Called on pointerup. If the long-press timer already fired the
-    // highlight, this is just the tail of that gesture — no-op.
+    // If the redundant long-press timer already fired the highlight,
+    // this pointerup is just the tail — no-op.
     if (longPressFiredRef.current) {
       longPressFiredRef.current = false;
       pointerDownXYRef.current = null;
+      cancelLongPress();
       return;
     }
     cancelLongPress();
@@ -2816,32 +2880,23 @@ function BookSpread({
     // tail-end as a tap on whatever word is now under the finger.
     if (justSwipedRef.current) return;
 
-    // Short tap: still try word highlight first (backup path if the
-    // long-press timing was off). Rick's Build 28 feedback #5: the
-    // gold-circle pointer fallback that used to fire when a tap MISSED
-    // a word (e.g. landed in the whitespace between words) has been
-    // removed — with real yellow highlighting working, the circle just
-    // reads as noise on the page. Circle is still available for taps
-    // on illustrations/margins via the isTextTapZone check below.
     const target = e.target as HTMLElement | null;
-    if (doWordHighlight(target)) return;
+    // PRIMARY path — any tap on / near a word highlights.
+    if (doWordHighlightAt(target, e.clientX, e.clientY, "tap")) return;
 
-    // Suppress the circle if the tap landed anywhere inside the book
-    // text (paragraph, chapter heading, running header, page number).
-    // Only fire the pointer dot for taps on the illustration motif,
-    // margins, or the spine — places where a "look here" hint still
-    // makes sense.
+    // No pointer-highlight circle on text taps — Rick's Build 28 #5.
     const isInsideText = !!target?.closest?.(".book-body, .nm-book-body, .nm-book-dropcap");
     if (isInsideText) return;
 
+    // Illustration / margin tap — soft look-here circle.
     if (!onPointer) return;
     const el = bookAreaRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = (e.clientY - rect.top) / rect.height;
-    if (x < 0 || x > 1 || y < 0 || y > 1) return;
-    onPointer(x, y, displayPage);
+    const nx = (e.clientX - rect.left) / rect.width;
+    const ny = (e.clientY - rect.top) / rect.height;
+    if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
+    onPointer(nx, ny, displayPage);
   };
   // The conversation prompt used to live as a 218px bookmark panel
   // floating in the book corner (with a minimize-to-badge toggle and a
@@ -12981,6 +13036,11 @@ export default function App() {
   // in-session mode — drives the "Nana stepped away" friendly card she
   // sees for ~2.5s before dropping to the PIN/onboarding screen.
   const [partnerLeftShown, setPartnerLeftShown] = useState(false);
+  // Perry-side transient toast for Rick's Build 28 #7 — when Nana
+  // flips the "let Perry ask questions" toggle, Perry might not be
+  // on the icebreaker screen where the effect lives. This toast
+  // appears on ANY of Perry's screens to confirm the flip landed.
+  const [childPromptsToast, setChildPromptsToast] = useState<{ on: boolean } | null>(null);
 
   // Last-applied timestamps per transient event, used by the polling fallback
   // so we don't re-fire stale reactions/highlights when SSE is healthy. The
@@ -13167,6 +13227,12 @@ export default function App() {
     document.addEventListener("visibilitychange", onVisibility);
     const vv = window.visualViewport;
     vv?.addEventListener("resize", setVh);
+    // Belt-and-suspenders heartbeat — even if every event listener
+    // above misses (some iPad WebView builds fire nothing when the
+    // status bar animates), a periodic re-check catches drift within
+    // 15s and restores full height. Cheap: one Math.max + one style
+    // write, no re-render.
+    const heartbeat = window.setInterval(setVh, 15_000);
     return () => {
       window.removeEventListener("resize", setVh);
       window.removeEventListener("orientationchange", setVh);
@@ -13174,6 +13240,7 @@ export default function App() {
       window.removeEventListener("pageshow", setVh);
       document.removeEventListener("visibilitychange", onVisibility);
       vv?.removeEventListener("resize", setVh);
+      window.clearInterval(heartbeat);
     };
   }, []);
 
@@ -13998,19 +14065,17 @@ export default function App() {
             lastAppliedBookChangeTsRef.current = msg.serverTs;
           }
         } else if (msg.type === "library_scroll") {
-          // Bidirectional library scroll mirror. Either side's scroll
-          // travels through this handler. Guard against our own echo:
-          // if the incoming top matches what we last published (within
-          // an epsilon), it's the server bouncing our own broadcast
-          // back and we skip it. Prevents "Nana scrolls to 400 quickly
-          // after 200, then a delayed echo of 200 arrives and snaps
-          // her back."
+          // Bidirectional library scroll mirror on Perry's side.
+          // Own-echo skip uses per-client origin ID (see
+          // myLibraryOriginRef) instead of fragile value-comparison —
+          // a value-based skip broke Rick's Build 28 case where Perry
+          // scrolled to a spot Nana's ref happened to be near.
           if (typeof msg.payload.top === "number") {
-            const incoming = msg.payload.top;
-            if (Math.abs(incoming - libraryScrollLatestRef.current) < 2) {
-              // ignore self-echo
+            const origin = msg.payload.origin as string | undefined;
+            if (origin && origin === myLibraryOriginRef.current) {
+              // own echo, ignore
             } else {
-              setLibraryScrollTop(incoming);
+              setLibraryScrollTop(msg.payload.top);
             }
           }
         } else if (msg.type === "session_reset") {
@@ -14363,7 +14428,13 @@ export default function App() {
         } else if (msg.type === "chapter_end_dismiss") {
           setChapterEndOverlay(null);
         } else if (msg.type === "toggle_child_prompts") {
-          setShowChildIcebreakerPrompts(msg.payload.show as boolean);
+          const on = !!msg.payload.show;
+          setShowChildIcebreakerPrompts(on);
+          // Cross-mode confirmation toast — regardless of what screen
+          // Perry is currently on, a small banner slides in for ~2.5s
+          // so she sees the flip landed. Rick's Build 28 #7.
+          setChildPromptsToast({ on });
+          window.setTimeout(() => setChildPromptsToast(null), 2800);
         } else if (msg.type === "goodbye_start") {
           // Convert the server-stamped startAt to THIS iPad's local
           // clock via the EMA-tracked offset. Guarded: if a local
@@ -14455,18 +14526,16 @@ export default function App() {
             setPointerHighlight({ x: p.x, y: p.y, page: p.page, ts });
           }
         } else if (msg.type === "library_scroll") {
-          // Bidirectional library scroll mirror on Nana's side.
-          // Rick's Build 28 #2: "Perry scrolling doesn't move Nana's."
-          // The Build 28 fix added the handler to Perry's SSE only —
-          // this handler on Nana's SSE was missing, so Perry's
-          // broadcasts never surfaced. Same echo-skip pattern used
-          // in the Perry-side handler.
+          // Bidirectional library scroll mirror on Nana's side —
+          // Rick's Build 28 #2 root cause was that this handler was
+          // missing entirely (Perry broadcasted into the void).
+          // Same per-client origin-ID skip as Perry's handler.
           if (typeof msg.payload.top === "number") {
-            const incoming = msg.payload.top;
-            if (Math.abs(incoming - libraryScrollLatestRef.current) < 2) {
-              // self-echo, ignore
+            const origin = msg.payload.origin as string | undefined;
+            if (origin && origin === myLibraryOriginRef.current) {
+              // own echo, ignore
             } else {
-              setLibraryScrollTop(incoming);
+              setLibraryScrollTop(msg.payload.top);
             }
           }
         } else if (msg.type === "word_highlight") {
@@ -15072,13 +15141,30 @@ export default function App() {
   const sessionStartPageRef = useRef(1);
   const [preSelectedBook, setPreSelectedBook] = useState<{ bookId: string; startPage: number } | null>(null);
 
-  // Library scroll sync — Rick: "as nana scrolls then child should
-  // also see scroll." Nana's scroll position publishes over SSE, Perry
-  // receives it and applies it to her mirrored bookshelf. rAF throttle
-  // so we don't fire dozens of publishes per scroll tick.
+  // Library scroll sync — bidirectional, with per-client origin ID for
+  // robust echo detection. Rick's Build 27 asked for scroll to travel
+  // both ways; Build 28 revealed the epsilon-based echo skip (compare
+  // incoming scrollTop against the last published value) ate small
+  // Perry-scrolls that happened to land near Nana's own last-published
+  // value, and vice versa. This version tags every publish with a
+  // stable random `origin` string per iPad; the SSE receiver just
+  // checks `payload.origin !== myLibraryOriginRef.current` to know
+  // it's a partner's event, no value comparison needed.
   const [libraryScrollTop, setLibraryScrollTop] = useState(0);
   const libraryScrollPendingRef = useRef(false);
   const libraryScrollLatestRef = useRef(0);
+  // Per-tab stable origin id — generated once on mount, included in
+  // every library_scroll publish. Random enough to never collide with
+  // a peer.
+  const myLibraryOriginRef = useRef<string>(
+    // Simple 12-char base36 identifier — the underlying values are
+    // unpredictable enough for echo-skip purposes. Not used for auth.
+    ((): string => {
+      let out = "lib_";
+      for (let i = 0; i < 12; i++) out += "abcdefghijklmnopqrstuvwxyz0123456789".charAt(Math.floor(Math.random() * 36));
+      return out;
+    })()
+  );
   const handleLibraryScroll = useCallback((top: number) => {
     libraryScrollLatestRef.current = top;
     if (libraryScrollPendingRef.current) return;
@@ -15086,7 +15172,10 @@ export default function App() {
     requestAnimationFrame(() => {
       libraryScrollPendingRef.current = false;
       if (!connectionId) return;
-      api.sessions.publishEvent(connectionId, "library_scroll", { top: libraryScrollLatestRef.current }).catch(() => {});
+      api.sessions.publishEvent(connectionId, "library_scroll", {
+        top: libraryScrollLatestRef.current,
+        origin: myLibraryOriginRef.current,
+      }).catch(() => {});
     });
   }, [connectionId]);
 
@@ -16601,6 +16690,40 @@ export default function App() {
       {perryJustLoggedIn && <PerryWelcomeOverlay name={(perryConnRef.current?.childName ?? "").trim()} />}
       {sessionBeginShown && <SessionBeginOverlay />}
       {partnerLeftShown && <PartnerLeftOverlay nanaName={nanaDisplayName.trim()} />}
+      {/* Perry-only toggle-flip toast — see Rick's Build 28 #7. */}
+      {childPromptsToast && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: "fixed",
+            top: 60,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 100,
+            background: childPromptsToast.on
+              ? "linear-gradient(135deg, rgba(201,146,42,0.96), rgba(141,98,28,0.96))"
+              : "rgba(11,23,46,0.92)",
+            color: childPromptsToast.on ? NAVY : CREAM,
+            fontFamily: "DM Sans, sans-serif",
+            fontSize: 14, fontWeight: 800,
+            letterSpacing: "0.02em",
+            padding: "12px 20px",
+            borderRadius: 999,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(247,201,93,0.35)",
+            display: "inline-flex", alignItems: "center", gap: 10,
+            maxWidth: "calc(100% - 40px)",
+            animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
+          }}
+        >
+          <span style={{ fontSize: 18 }}>{childPromptsToast.on ? "✅" : "🚫"}</span>
+          <span>
+            {childPromptsToast.on
+              ? `${nanaDisplayName.trim() || "Nana"} turned on your questions!`
+              : `${nanaDisplayName.trim() || "Nana"} turned off your questions.`}
+          </span>
+        </div>
+      )}
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=Merriweather:ital,wght@0,400;0,700;1,400&family=DM+Sans:wght@400;500;700&display=swap');
 
