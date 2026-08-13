@@ -276,6 +276,41 @@ export const api = {
     remove: (sessionId: string) =>
       req<{ ok: boolean; sessionId: string }>("DELETE", `/session-log/${sessionId}`),
   },
+  /** Rick's Aug 8 feature — words either Nana or Perry save from the
+   *  floating action bar during reading, for later review. Per-child
+   *  list (server picks the active child if `childId` omitted). Save
+   *  is idempotent: re-saving the same word returns the existing row
+   *  instead of creating a duplicate. */
+  learnedWords: {
+    list: (connectionId: string, childId?: string) =>
+      req<{ words: Array<{
+        id: string;
+        connectionId: string;
+        childId: string | null;
+        word: string;
+        sentence: string | null;
+        bookId: string | null;
+        page: number | null;
+        createdAt: string;
+      }> }>(
+        "GET",
+        `/learned-words/${connectionId}${childId ? `?childId=${encodeURIComponent(childId)}` : ""}`,
+      ),
+    save: (connectionId: string, body: { word: string; sentence?: string; bookId?: string; page?: number; childId?: string }) =>
+      req<{ word: {
+        id: string;
+        connectionId: string;
+        childId: string | null;
+        word: string;
+        sentence: string | null;
+        bookId: string | null;
+        page: number | null;
+        createdAt: string;
+      }; created: boolean }>("POST", `/learned-words/${connectionId}`, body),
+    remove: (wordId: string) =>
+      req<{ ok: boolean; wordId: string }>("DELETE", `/learned-words/${wordId}`),
+  },
+
   /** Memory Vault audio recordings. Capture pipeline is still being
    *  built — this client surface is wired now so the policy-required
    *  delete + listing flows work end-to-end the moment recordings start

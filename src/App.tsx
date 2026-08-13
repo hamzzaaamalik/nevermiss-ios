@@ -67,7 +67,7 @@ const BOOK_TEXT = "#2D1A08";
 // Phases 5 = Blow kisses, 6 = I love you, 7 = final Goodbye screen.
 const GOODBYE_PHASE_DURATIONS = [1000, 1000, 1000, 1000, 1000, 3000, 2500];
 
-type Mode = "home" | "greeting" | "icebreaker" | "library" | "reading" | "chat" | "showandtell" | "parentcheck" | "sillyfaces" | "goodbye" | "vault" | "familystories" | "onboarding" | "bookrequests" | "settings";
+type Mode = "home" | "greeting" | "icebreaker" | "library" | "reading" | "chat" | "showandtell" | "parentcheck" | "sillyfaces" | "goodbye" | "vault" | "familystories" | "onboarding" | "bookrequests" | "settings" | "learnedwords";
 
 // Reading-mode layout variations. Nana picks; the chosen layout is
 // broadcast to Perry so both iPads render the same arrangement.
@@ -1252,6 +1252,222 @@ interface WordHighlightState {
   side: "L" | "R";
   index: number;
   ts: number;
+}
+
+/**
+ * Simple syllable splitter for the "Sound it out" action. Not a real
+ * phonemic parser — just breaks at vowel-consonant-vowel transitions
+ * with a few common cluster exceptions kept together (ch/sh/th/ph/tr/...
+ * ).  Works well enough for the early-reader vocabulary that shows up
+ * in NeverMiss's book library. Fallback for unknown words is the
+ * whole word spoken slowly.
+ */
+function splitIntoSyllables(word: string): string[] {
+  const w = word.toLowerCase().replace(/[^a-z']/g, "");
+  if (w.length <= 3) return [w];
+  const isVowel = (c: string) => "aeiouy".includes(c);
+  const clusters = new Set(["ch","sh","th","ph","wh","tr","dr","pr","br","gr","cr","fr","st","sp","sk","sl","pl","cl","fl","gl","bl","sm","sn","sw","tw","qu"]);
+  const parts: string[] = [];
+  let cur = "";
+  for (let i = 0; i < w.length; i++) {
+    cur += w[i];
+    if (i < w.length - 1 && isVowel(w[i]) && !isVowel(w[i + 1])) {
+      // Look ahead: if the next 2 chars are a consonant cluster
+      // followed by a vowel, split before the cluster. Otherwise
+      // split after the consonant so a short vowel stays closed.
+      const next2 = w.slice(i + 1, i + 3);
+      const next3 = w.slice(i + 1, i + 4);
+      if (isVowel(w[i + 2] ?? "")) {
+        // V C V — split before the C so C starts next syllable
+        parts.push(cur);
+        cur = "";
+      } else if (clusters.has(next2) && isVowel(w[i + 3] ?? "")) {
+        parts.push(cur);
+        cur = "";
+      } else if (!isVowel(w[i + 2] ?? "") && isVowel(w[i + 3] ?? "")) {
+        // V C C V — split between the two consonants
+        cur += w[i + 1];
+        parts.push(cur);
+        cur = "";
+        i += 1;
+      }
+    }
+  }
+  if (cur) parts.push(cur);
+  return parts.filter(Boolean);
+}
+
+/**
+ * WordActionBar — floating action popup that appears above the
+ * currently-highlighted word, offering four reading-support actions:
+ * Say it (slow TTS), Sound it out (syllable-by-syllable), What it
+ * means (Free Dictionary API lookup), and Save word (persist to the
+ * per-child "Words We're Learning" list). Every action broadcasts
+ * via SSE so both iPads share the audio / definition moment.
+ *
+ * Position tracked from the word span's bounding rect within the
+ * book area. Falls back gracefully if the span can't be located
+ * (page turned, chunk changed, etc.).
+ */
+function WordActionBar({
+  wordHighlight,
+  bookAreaRef,
+  onSay,
+  onSoundOut,
+  onDefine,
+  onSave,
+  onClose,
+  currentDefinition,
+  saveState,
+}: {
+  wordHighlight: WordHighlightState | null;
+  bookAreaRef: React.RefObject<HTMLDivElement | null>;
+  onSay: (word: string) => void;
+  onSoundOut: (word: string) => void;
+  onDefine: (word: string) => void;
+  onSave: (word: string, sentence: string) => void;
+  onClose: () => void;
+  currentDefinition: { word: string; text: string } | null;
+  saveState: { word: string; status: "saving" | "saved" | "already" } | null;
+}) {
+  const [pos, setPos] = useState<{ top: number; left: number; word: string; sentence: string } | null>(null);
+
+  useLayoutEffect(() => {
+    if (!wordHighlight || !bookAreaRef.current) { setPos(null); return; }
+    const selector = `[data-w="${wordHighlight.side}-${wordHighlight.index}"]`;
+    const el = bookAreaRef.current.querySelector(selector) as HTMLElement | null;
+    if (!el) { setPos(null); return; }
+    const bookRect = bookAreaRef.current.getBoundingClientRect();
+    const wordRect = el.getBoundingClientRect();
+    // Grab the whole paragraph text as the sentence-context for the
+    // saved word — good-enough tokenization would need punctuation
+    // splitting; the full paragraph gives Perry a rich review card.
+    const paraEl = el.closest("p") as HTMLElement | null;
+    const sentence = (paraEl?.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 400);
+    setPos({
+      top: wordRect.top - bookRect.top,
+      left: wordRect.left + wordRect.width / 2 - bookRect.left,
+      word: (el.textContent ?? "").trim().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ""),
+      sentence,
+    });
+  }, [wordHighlight, bookAreaRef]);
+
+  if (!wordHighlight || !pos || !pos.word) return null;
+
+  const barW = 320;
+  const barH = 56;
+  const bookRectW = bookAreaRef.current?.getBoundingClientRect().width ?? 999;
+  // Anchor bar centered on the word, but keep it inside the book area
+  // horizontally (16px inset). Vertically: sit ABOVE the word if there's
+  // room; otherwise flip below.
+  const rawLeft = pos.left - barW / 2;
+  const clampedLeft = Math.max(8, Math.min(bookRectW - barW - 8, rawLeft));
+  const above = pos.top >= barH + 18;
+  const top = above ? pos.top - barH - 14 : pos.top + 34;
+
+  const btnStyle: React.CSSProperties = {
+    display: "inline-flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+    gap: 2, flex: 1, minWidth: 0,
+    padding: "6px 4px",
+    background: "transparent",
+    color: "#F7F0E3",
+    border: "none",
+    borderRadius: 10,
+    fontFamily: "DM Sans, sans-serif",
+    fontSize: 10, fontWeight: 700, letterSpacing: "0.04em",
+    cursor: "pointer",
+    touchAction: "manipulation",
+    minHeight: 48,
+  };
+  const iconStyle: React.CSSProperties = { fontSize: 18, lineHeight: 1 };
+  const savedLabel = saveState && saveState.word.toLowerCase() === pos.word.toLowerCase()
+    ? (saveState.status === "saving" ? "…" : saveState.status === "already" ? "★ Saved" : "★ Saved!")
+    : "Save";
+  const savedTone = saveState && saveState.word.toLowerCase() === pos.word.toLowerCase() && saveState.status !== "saving"
+    ? "#f7c95d" : "#F7F0E3";
+
+  return (
+    <>
+      <div
+        role="dialog"
+        aria-label={`Actions for the word ${pos.word}`}
+        style={{
+          position: "absolute",
+          top, left: clampedLeft,
+          width: barW,
+          zIndex: 50,
+          display: "flex", alignItems: "stretch",
+          padding: "4px 4px",
+          background: "linear-gradient(180deg, rgba(11,23,46,0.98) 0%, rgba(11,23,46,0.94) 100%)",
+          border: "1px solid rgba(247,201,93,0.55)",
+          borderRadius: 14,
+          boxShadow: "0 12px 32px rgba(0,0,0,0.55), 0 0 0 1px rgba(0,0,0,0.35)",
+          animation: "phase-card-up 0.22s cubic-bezier(0.22,1,0.36,1)",
+        }}
+      >
+        <button style={btnStyle} onClick={() => onSay(pos.word)} aria-label={`Say the word ${pos.word}`}>
+          <span aria-hidden style={iconStyle}>🔊</span>
+          <span>Say it</span>
+        </button>
+        <button style={btnStyle} onClick={() => onSoundOut(pos.word)} aria-label={`Sound out ${pos.word}`}>
+          <span aria-hidden style={iconStyle}>🔤</span>
+          <span>Sound out</span>
+        </button>
+        <button style={btnStyle} onClick={() => onDefine(pos.word)} aria-label={`Define ${pos.word}`}>
+          <span aria-hidden style={iconStyle}>📖</span>
+          <span>Meaning</span>
+        </button>
+        <button style={{ ...btnStyle, color: savedTone }} onClick={() => onSave(pos.word, pos.sentence)} aria-label={`Save ${pos.word} for review`}>
+          <span aria-hidden style={iconStyle}>⭐</span>
+          <span>{savedLabel}</span>
+        </button>
+        <button
+          onClick={onClose}
+          aria-label="Close word actions"
+          style={{
+            position: "absolute", top: -10, right: -10,
+            width: 22, height: 22, borderRadius: 999,
+            background: "#0b172e", color: CREAM,
+            border: "1px solid rgba(255,255,255,0.35)",
+            fontSize: 12, lineHeight: 1, fontWeight: 700,
+            cursor: "pointer", padding: 0,
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+            touchAction: "manipulation",
+          }}
+        >×</button>
+      </div>
+
+      {/* Definition popup — anchored to the same word position but
+          below the action bar. Auto-dismisses via parent's timer. */}
+      {currentDefinition && currentDefinition.word.toLowerCase() === pos.word.toLowerCase() && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: "absolute",
+            top: above ? pos.top + 38 : pos.top - 120,
+            left: clampedLeft,
+            width: barW,
+            zIndex: 49,
+            padding: "10px 14px",
+            background: "#f7ecd1",
+            color: "#3a2a14",
+            border: "1px solid #c9922a",
+            borderRadius: 12,
+            boxShadow: "0 10px 24px rgba(0,0,0,0.45)",
+            fontFamily: "Merriweather, serif",
+            fontSize: 13, lineHeight: 1.45,
+            animation: "phase-card-up 0.24s cubic-bezier(0.22,1,0.36,1)",
+          }}
+        >
+          <div style={{ fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: "0.14em", color: "#5C3A1E", marginBottom: 4 }}>
+            📖 {currentDefinition.word.toUpperCase()}
+          </div>
+          <div>{currentDefinition.text}</div>
+        </div>
+      )}
+    </>
+  );
 }
 
 function BookContent({
@@ -2643,6 +2859,14 @@ function BookSpread({
   pageMode = "double",
   pageSide = "L",
   chunkSize = 1,
+  // Word action bar wiring — Rick's Aug 8 feature.
+  onWordSay,
+  onWordSoundOut,
+  onWordDefine,
+  onWordSave,
+  wordDefinition,
+  wordSaveState,
+  onWordActionsClose,
 }: {
   displayPage: number;
   isNana: boolean;
@@ -2665,9 +2889,14 @@ function BookSpread({
   readingStartedAt?: number;
   pageMode?: "single" | "double";
   pageSide?: "L" | "R";
-  /** Wish 2: passed straight through to BookContent so chapter books
-   *  pack multiple source pages per displayed spread at smaller fonts. */
   chunkSize?: number;
+  onWordSay?: (word: string) => void;
+  onWordSoundOut?: (word: string) => void;
+  onWordDefine?: (word: string) => void;
+  onWordSave?: (word: string, sentence: string) => void;
+  wordDefinition?: { word: string; text: string } | null;
+  wordSaveState?: { word: string; status: "saving" | "saved" | "already" } | null;
+  onWordActionsClose?: () => void;
 }) {
   // Clamp the requested page so we never deref past the end of the book.
   // Cached `displayPage` from a previous session (or pre-Phase-C splits)
@@ -2991,6 +3220,24 @@ function BookSpread({
         onPointerCancel={() => { cancelLongPress(); pointerDownXYRef.current = null; }}
         onPointerLeave={() => { cancelLongPress(); pointerDownXYRef.current = null; }}
       >
+        {/* Word action bar — Rick's Aug 8 feature. Anchors to the
+            currently-highlighted word's DOM rect and offers Say / Sound
+            out / Meaning / Save actions. Rendered inside the book area
+            so its coordinates are relative to `bookAreaRef`. */}
+        {onWordSay && onWordSoundOut && onWordDefine && onWordSave && onWordActionsClose && (
+          <WordActionBar
+            wordHighlight={wordHighlight && wordHighlight.page === displayPage ? wordHighlight : null}
+            bookAreaRef={bookAreaRef}
+            onSay={onWordSay}
+            onSoundOut={onWordSoundOut}
+            onDefine={onWordDefine}
+            onSave={onWordSave}
+            onClose={onWordActionsClose}
+            currentDefinition={wordDefinition ?? null}
+            saveState={wordSaveState ?? null}
+          />
+        )}
+
         {/* Pointer highlight ring — visible on both devices when Nana taps the book */}
         {pointerHighlight && pointerHighlight.page === displayPage && (
           <div
@@ -7353,6 +7600,229 @@ function StubScreen({ icon, title, subtitle, onBack }: { icon: string; title: st
   );
 }
 
+/**
+ * LearnedWordsView — Rick's Aug 8 feature: per-child review list of
+ * every word saved from the reading-mode action bar. Grouped by book,
+ * most-recent first within each group. Tapping a row plays the word
+ * aloud (Web Speech API); trash button removes the row.
+ */
+function LearnedWordsView({
+  onGoHome,
+  connectionId,
+  activeChildId,
+  childName,
+}: {
+  onGoHome: () => void;
+  connectionId?: string;
+  activeChildId?: string | null;
+  childName: string;
+}) {
+  const [words, setWords] = useState<Array<{
+    id: string;
+    word: string;
+    sentence: string | null;
+    bookId: string | null;
+    page: number | null;
+    createdAt: string;
+  }> | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!connectionId) { setWords([]); return; }
+    setLoadErr(null);
+    try {
+      const res = await api.learnedWords.list(connectionId, activeChildId ?? undefined);
+      setWords(res.words.map(w => ({
+        id: w.id, word: w.word, sentence: w.sentence, bookId: w.bookId, page: w.page, createdAt: w.createdAt,
+      })));
+    } catch (err) {
+      setLoadErr(err instanceof Error ? err.message : "Couldn't load your words.");
+      setWords([]);
+    }
+  }, [connectionId, activeChildId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const speak = (word: string) => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+    try {
+      const synth = window.speechSynthesis;
+      if (synth.paused) synth.resume();
+      synth.cancel();
+      const u = new SpeechSynthesisUtterance(word);
+      u.rate = 0.85; u.pitch = 1.0; u.lang = "en-US";
+      const en = synth.getVoices().find(v => v.lang.startsWith("en"));
+      if (en) u.voice = en;
+      synth.speak(u);
+    } catch {}
+  };
+
+  const remove = async (id: string) => {
+    setRemoving(id);
+    try {
+      await api.learnedWords.remove(id);
+      setWords(cur => (cur ?? []).filter(w => w.id !== id));
+    } catch {} finally {
+      setRemoving(null);
+    }
+  };
+
+  // Group by book (books not in the local library go to "Other").
+  const grouped = (() => {
+    const m = new Map<string, { title: string; emoji: string; spineColor: string; items: typeof words extends null ? never : NonNullable<typeof words> }>();
+    for (const w of words ?? []) {
+      const b = w.bookId ? booksLibrary[w.bookId] : null;
+      const key = w.bookId ?? "_other";
+      if (!m.has(key)) {
+        m.set(key, {
+          title: b?.title ?? "Other words",
+          emoji: b?.emoji ?? "📚",
+          spineColor: b?.spineColor ?? "#5C3A1E",
+          items: [],
+        });
+      }
+      m.get(key)!.items.push(w);
+    }
+    return Array.from(m.values());
+  })();
+
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#0b172e", overflow: "hidden" }}>
+      <div style={{ padding: "12px 14px 10px", borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0, display: "grid", gridTemplateColumns: "32px 1fr 32px", alignItems: "center" }}>
+        <button
+          onClick={onGoHome}
+          aria-label="Back"
+          style={{ width: 28, height: 28, borderRadius: "50%", backgroundColor: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.10)", color: "rgba(247,240,227,0.7)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", padding: 0 }}
+        >
+          <ChevronLeft size={15} strokeWidth={2.2} aria-hidden />
+        </button>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 15, fontWeight: 700 }}>
+            Words We're Learning
+          </div>
+          <div style={{ color: "rgba(247,240,227,0.45)", fontFamily: "Inter, DM Sans, sans-serif", fontSize: 11, marginTop: 2, letterSpacing: "0.04em" }}>
+            {childName ? `Saved together with ${childName}` : "Saved during reading"}
+          </div>
+        </div>
+        <span />
+      </div>
+
+      <div style={{ flex: 1, overflowY: "auto", padding: "12px 12px 20px" }}>
+        {words === null ? (
+          <div style={{ padding: "32px 16px", textAlign: "center", color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 13 }}>Loading…</div>
+        ) : loadErr ? (
+          <div style={{ padding: "24px 16px", textAlign: "center", color: "#f87171", fontFamily: "DM Sans, sans-serif", fontSize: 13 }}>{loadErr}</div>
+        ) : words.length === 0 ? (
+          <div style={{
+            margin: "32px auto",
+            maxWidth: 380,
+            textAlign: "center",
+            color: "rgba(247,240,227,0.65)",
+            fontFamily: "DM Sans, sans-serif",
+            padding: "22px 18px",
+            border: "1px dashed rgba(255,255,255,0.14)",
+            borderRadius: 14,
+            background: "rgba(255,255,255,0.03)",
+          }}>
+            <div style={{ fontSize: 38, marginBottom: 10 }}>⭐</div>
+            <div style={{ color: CREAM, fontSize: 15, fontWeight: 700, marginBottom: 6 }}>No saved words yet</div>
+            <div style={{ fontSize: 12, lineHeight: 1.55 }}>
+              While reading a book together, tap any word to bring up the action bar, then tap <b>Save</b>. The words you save will appear here for review.
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+            {grouped.map(group => (
+              <div key={group.title}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, padding: "0 4px" }}>
+                  <span style={{
+                    width: 28, height: 36, borderRadius: 4,
+                    backgroundColor: group.spineColor,
+                    border: `1.5px solid ${group.spineColor}`,
+                    display: "inline-flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 18,
+                    flexShrink: 0,
+                    boxShadow: "1px 2px 6px rgba(0,0,0,0.4)",
+                  }}>{group.emoji}</span>
+                  <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 16, fontWeight: 700 }}>
+                    {group.title}
+                  </div>
+                  <span style={{ color: "rgba(247,240,227,0.4)", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 600 }}>
+                    · {group.items.length} word{group.items.length === 1 ? "" : "s"}
+                  </span>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {group.items.map(w => (
+                    <div
+                      key={w.id}
+                      style={{
+                        display: "flex", alignItems: "flex-start", gap: 12,
+                        background: "rgba(255,255,255,0.04)",
+                        border: "1px solid rgba(255,255,255,0.08)",
+                        borderRadius: 12,
+                        padding: "12px 14px",
+                      }}
+                    >
+                      <button
+                        onClick={() => speak(w.word)}
+                        aria-label={`Play the word ${w.word}`}
+                        style={{
+                          flexShrink: 0,
+                          width: 44, height: 44, borderRadius: "50%",
+                          background: "linear-gradient(135deg, #f7c95d, #C9922A)",
+                          color: NAVY,
+                          border: "none",
+                          display: "inline-flex", alignItems: "center", justifyContent: "center",
+                          fontSize: 20,
+                          cursor: "pointer",
+                          boxShadow: "0 3px 10px rgba(0,0,0,0.35)",
+                          touchAction: "manipulation",
+                        }}
+                      >🔊</button>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 20, fontWeight: 700, lineHeight: 1.2 }}>
+                          {w.word}
+                        </div>
+                        {w.sentence && (
+                          <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "Merriweather, serif", fontStyle: "italic", fontSize: 12, lineHeight: 1.5, marginTop: 4 }}>
+                            "{w.sentence.length > 160 ? w.sentence.slice(0, 157) + "…" : w.sentence}"
+                          </div>
+                        )}
+                        <div style={{ color: "rgba(247,240,227,0.35)", fontFamily: "DM Sans, sans-serif", fontSize: 10, marginTop: 6, letterSpacing: "0.02em" }}>
+                          {w.page ? `Page ${w.page} · ` : ""}
+                          {new Date(w.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => remove(w.id)}
+                        disabled={removing === w.id}
+                        aria-label={`Remove ${w.word} from list`}
+                        style={{
+                          flexShrink: 0,
+                          width: 34, height: 34, borderRadius: "50%",
+                          background: "transparent",
+                          color: "rgba(247,240,227,0.5)",
+                          border: "1px solid rgba(255,255,255,0.14)",
+                          cursor: removing === w.id ? "default" : "pointer",
+                          padding: 0,
+                          display: "inline-flex", alignItems: "center", justifyContent: "center",
+                          opacity: removing === w.id ? 0.4 : 1,
+                          touchAction: "manipulation",
+                        }}
+                      >🗑</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function VaultView({ onGoHome, connectionId, activeChildId }: { onGoHome: () => void; connectionId?: string; activeChildId?: string | null }) {
   const [loading, setLoading] = useState(true);
   const [sessions, setSessions] = useState<ReadingSession[]>([]);
@@ -9897,6 +10367,7 @@ function DeviceFrame({
   bookPages,
   onOpenVault,
   onCloseVault,
+  onOpenLearnedWords,
   onStartReadingSession,
   onOpenLibraryFromHome,
   onOpenScheduleFromHome,
@@ -9962,6 +10433,13 @@ function DeviceFrame({
   onPointer,
   wordHighlight = null,
   onWord,
+  onWordSay,
+  onWordSoundOut,
+  onWordDefine,
+  onWordSave,
+  wordDefinition = null,
+  wordSaveState = null,
+  onWordActionsClose,
   readingTheme = "day",
   onThemeChange,
   readingLayout,
@@ -10055,6 +10533,8 @@ function DeviceFrame({
   bookPages: BookPage[];
   onOpenVault: () => void;
   onCloseVault: () => void;
+  /** Rick's Aug 8 feature — open the per-child Words We're Learning review. */
+  onOpenLearnedWords?: () => void;
   // Home-screen wiring (Nana side only; Perry never lands on home).
   onStartReadingSession?: () => void;
   onOpenLibraryFromHome?: () => void;
@@ -10131,6 +10611,14 @@ function DeviceFrame({
   onPointer?: (x: number, y: number, page: number) => void;
   wordHighlight?: WordHighlightState | null;
   onWord?: (side: "L" | "R", index: number, page: number) => void;
+  /** Word action bar wiring — Rick's Aug 8 phonics + review feature. */
+  onWordSay?: (word: string) => void;
+  onWordSoundOut?: (word: string) => void;
+  onWordDefine?: (word: string) => void;
+  onWordSave?: (word: string, sentence: string) => void;
+  wordDefinition?: { word: string; text: string } | null;
+  wordSaveState?: { word: string; status: "saving" | "saved" | "already" } | null;
+  onWordActionsClose?: () => void;
   readingTheme?: ReadingTheme;
   onThemeChange?: (t: ReadingTheme) => void;
   readingLayout?: ReadingLayout;
@@ -10176,6 +10664,7 @@ function DeviceFrame({
   const isVault           = mode === "vault";
   const isBookRequests    = mode === "bookrequests";
   const isSettings        = mode === "settings";
+  const isLearnedWords    = mode === "learnedwords";
   // Unified child name. Nana side gets it from the dashboard; Perry side
   // gets it from her cached connection. Falls back to the generic role label.
   const childName = (perryPinChildName || dashboardPerryName || "").trim();
@@ -10247,6 +10736,7 @@ function DeviceFrame({
       es.push({ divider: true, key: "d1", label: "Memories" });
       if (onOpenVault) es.push({ key: "vault", label: "Memory Vault", sublabel: "Saved reading moments", icon: <Disc size={16} strokeWidth={2} aria-hidden />, onClick: onOpenVault, active: isVault });
       if (onOpenFamilyStories) es.push({ key: "journal", label: "Family Journal", sublabel: "Notes about today", icon: <BookHeart size={16} strokeWidth={2} aria-hidden />, onClick: onOpenFamilyStories, active: isFamilyStories });
+      if (onOpenLearnedWords) es.push({ key: "learnedwords", label: "Words We're Learning", sublabel: `${childName || "Perry"}'s saved words`, icon: <StarIcon size={16} strokeWidth={2} aria-hidden />, onClick: onOpenLearnedWords, active: isLearnedWords });
     }
     if (isNana) {
       es.push({ divider: true, key: "d2" });
@@ -10254,13 +10744,13 @@ function DeviceFrame({
     }
     return es;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isNana, isHome, isLibrary, isChatMode, isShowAndTell, isParentCheck, isSillyFaces, isGoodbyeMode, isVault, isFamilyStories, isReadingMode, isBookRequests, isSettings]);
+  }, [isNana, isHome, isLibrary, isChatMode, isShowAndTell, isParentCheck, isSillyFaces, isGoodbyeMode, isVault, isFamilyStories, isReadingMode, isBookRequests, isSettings, isLearnedWords]);
 
-  const modeLabel = isOnboarding ? "Setting Up" : isHome ? "Home 🏠" : isGreeting ? "Chat Mode 💬" : isIcebreaker ? "Conversation Starters 💬" : isLibrary ? "Book Library 📚" : isChatMode ? "Chat Mode" : isShowAndTell ? "Show & Tell" : isParentCheck ? "Quick Check-In 💬" : isSillyFaces ? "Silly Faces 🎭" : isGoodbyeMode ? "Goodbye 💕" : isVault ? "Memory Vault 📼" : isFamilyStories ? "Our Family Journal 📖" : isBookRequests ? "Book Requests 📬" : isSettings ? "Settings ⚙️" : "Reading Mode";
+  const modeLabel = isOnboarding ? "Setting Up" : isHome ? "Home 🏠" : isGreeting ? "Chat Mode 💬" : isIcebreaker ? "Conversation Starters 💬" : isLibrary ? "Book Library 📚" : isChatMode ? "Chat Mode" : isShowAndTell ? "Show & Tell" : isParentCheck ? "Quick Check-In 💬" : isSillyFaces ? "Silly Faces 🎭" : isGoodbyeMode ? "Goodbye 💕" : isVault ? "Memory Vault 📼" : isFamilyStories ? "Our Family Journal 📖" : isBookRequests ? "Book Requests 📬" : isSettings ? "Settings ⚙️" : isLearnedWords ? "Words We're Learning ⭐" : "Reading Mode";
   // Include reading mode so the header consistently shows nav buttons (Home,
   // Family Journal, Vault, Hang up) — the dual face tile lives in the
   // floating draggable PiP overlay during reading instead of the ribbon.
-  const modeHighlight = isReadingMode || isHome || isGreeting || isIcebreaker || isLibrary || isChatMode || isShowAndTell || isParentCheck || isSillyFaces || isGoodbyeMode || isVault || isFamilyStories || isBookRequests || isSettings;
+  const modeHighlight = isReadingMode || isHome || isGreeting || isIcebreaker || isLibrary || isChatMode || isShowAndTell || isParentCheck || isSillyFaces || isGoodbyeMode || isVault || isFamilyStories || isBookRequests || isSettings || isLearnedWords;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: 1, minWidth: 0 }}>
@@ -10547,6 +11037,13 @@ function DeviceFrame({
           />
         ) : isVault ? (
           <VaultView onGoHome={onCloseVault} connectionId={vaultConnectionId} activeChildId={activeChildId} />
+        ) : isLearnedWords ? (
+          <LearnedWordsView
+            onGoHome={onGoHome ?? (() => {})}
+            connectionId={vaultConnectionId}
+            activeChildId={activeChildId}
+            childName={childName}
+          />
         ) : isGreeting ? (
           <GreetingView
             isNana={isNana}
@@ -10695,6 +11192,13 @@ function DeviceFrame({
                 onPointer={onPointer}
                 wordHighlight={wordHighlight}
                 onWord={onWord}
+                onWordSay={onWordSay}
+                onWordSoundOut={onWordSoundOut}
+                onWordDefine={onWordDefine}
+                onWordSave={onWordSave}
+                wordDefinition={wordDefinition}
+                wordSaveState={wordSaveState}
+                onWordActionsClose={onWordActionsClose}
                 readingTheme={readingTheme}
                 readingStartedAt={readingStartedAt}
                 pageMode={pageMode}
@@ -14231,6 +14735,25 @@ export default function App() {
             lastAppliedWordTsRef.current = ts;
             setWordHighlight({ side: p.side, index: p.index, page: p.page, ts });
           }
+        } else if (msg.type === "word_action") {
+          // Rick's Aug 8 shared word-action broadcast. When one side
+          // taps Say / Sound out / Meaning, the other side performs
+          // the same action locally so both hear/see it together.
+          // Save is intentionally NOT broadcast — it's a per-user
+          // review-list action, saved server-side via the REST call
+          // and picked up via the LearnedWordsView list on either side.
+          const action = msg.payload?.action as string | undefined;
+          const word = msg.payload?.word as string | undefined;
+          if (typeof word === "string" && word.length > 0) {
+            if (action === "say") {
+              speakTts(word, 0.75);
+            } else if (action === "sound_out") {
+              soundOutWord(word);
+            } else if (action === "define") {
+              const text = typeof msg.payload?.text === "string" ? msg.payload.text : "";
+              if (text) showDefinitionTransient(word, text);
+            }
+          }
         } else if (msg.type === "layout_change") {
           const l = msg.payload?.layout as ReadingLayout | undefined;
           if (l && (READING_LAYOUTS as readonly string[]).includes(l)) {
@@ -14544,6 +15067,25 @@ export default function App() {
             const ts = Date.now();
             lastAppliedWordTsRef.current = ts;
             setWordHighlight({ side: p.side, index: p.index, page: p.page, ts });
+          }
+        } else if (msg.type === "word_action") {
+          // Rick's Aug 8 shared word-action broadcast. When one side
+          // taps Say / Sound out / Meaning, the other side performs
+          // the same action locally so both hear/see it together.
+          // Save is intentionally NOT broadcast — it's a per-user
+          // review-list action, saved server-side via the REST call
+          // and picked up via the LearnedWordsView list on either side.
+          const action = msg.payload?.action as string | undefined;
+          const word = msg.payload?.word as string | undefined;
+          if (typeof word === "string" && word.length > 0) {
+            if (action === "say") {
+              speakTts(word, 0.75);
+            } else if (action === "sound_out") {
+              soundOutWord(word);
+            } else if (action === "define") {
+              const text = typeof msg.payload?.text === "string" ? msg.payload.text : "";
+              if (text) showDefinitionTransient(word, text);
+            }
           }
         } else if (msg.type === "layout_change") {
           const l = msg.payload?.layout as ReadingLayout | undefined;
@@ -15204,7 +15746,11 @@ export default function App() {
   const [wordHighlight, setWordHighlight] = useState<WordHighlightState | null>(null);
   useEffect(() => {
     if (!wordHighlight) return;
-    const t = setTimeout(() => setWordHighlight(null), 2500);
+    // Rick's Aug 8: the word action bar depends on this timer to stay
+    // visible while Nana / Perry decide whether to say / sound-out /
+    // save the word. 2.5s was too aggressive; 8s gives the bar room
+    // to be used and matches the standard "long-hover" pattern.
+    const t = setTimeout(() => setWordHighlight(null), 8000);
     return () => clearTimeout(t);
   }, [wordHighlight]);
   const handleBookWord = (side: "L" | "R", index: number, page: number) => {
@@ -15214,6 +15760,140 @@ export default function App() {
       api.sessions.publishEvent(connectionId, "word_highlight", payload).catch(() => {});
     }
   };
+
+  // ── Word action bar state + handlers ─────────────────────────────
+  // Rick's Aug 8 feature: floating action popup on a highlighted word
+  // with Say / Sound out / Meaning / Save actions. Say + Sound out +
+  // Define broadcast so BOTH iPads hear the audio / see the meaning
+  // simultaneously. Save persists to the per-child learned_words
+  // table via api.learnedWords.
+  const [wordDefinition, setWordDefinition] = useState<{ word: string; text: string } | null>(null);
+  const [wordSaveState, setWordSaveState] = useState<{ word: string; status: "saving" | "saved" | "already" } | null>(null);
+  const wordDefinitionTimerRef = useRef<number | null>(null);
+  const wordSaveTimerRef = useRef<number | null>(null);
+
+  // Prime + play a TTS utterance. Reused for Say and Sound-out. Same
+  // safety net as speakWord in BookSpread: resume the synth if Safari
+  // paused it silently, wait for voices to load on the first call.
+  const speakTts = useCallback((text: string, rate = 0.85) => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+    try {
+      const synth = window.speechSynthesis;
+      if (synth.paused) synth.resume();
+      synth.cancel();
+      const say = () => {
+        const u = new SpeechSynthesisUtterance(text);
+        u.rate = rate;
+        u.pitch = 1.0;
+        u.lang = "en-US";
+        const voices = synth.getVoices();
+        const en = voices.find(v => v.lang.startsWith("en"));
+        if (en) u.voice = en;
+        synth.speak(u);
+      };
+      if (synth.getVoices().length === 0) {
+        const onVoices = () => { synth.removeEventListener("voiceschanged", onVoices); say(); };
+        synth.addEventListener("voiceschanged", onVoices);
+        window.setTimeout(() => { synth.removeEventListener("voiceschanged", onVoices); if (!synth.speaking) say(); }, 150);
+      } else {
+        say();
+      }
+    } catch {}
+  }, []);
+
+  // Sound-out: split into syllables and speak each with a short pause
+  // between, then the whole word at normal pace.
+  const soundOutWord = useCallback((word: string) => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+    const parts = splitIntoSyllables(word);
+    const synth = window.speechSynthesis;
+    try { synth.cancel(); if (synth.paused) synth.resume(); } catch {}
+    const queue = [
+      ...parts.map(p => ({ text: p, rate: 0.55, gap: 350 })),
+      { text: word, rate: 0.9, gap: 0 },
+    ];
+    const runAt = (i: number) => {
+      if (i >= queue.length) return;
+      const { text, rate, gap } = queue[i];
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = rate;
+      u.pitch = 1.0;
+      u.lang = "en-US";
+      u.onend = () => window.setTimeout(() => runAt(i + 1), gap);
+      try { synth.speak(u); } catch {}
+    };
+    runAt(0);
+  }, []);
+
+  // Fetch a child-friendly definition. Uses the free Dictionary API;
+  // silent fallback if the network / word lookup fails.
+  const fetchDefinition = useCallback(async (word: string): Promise<string | null> => {
+    try {
+      const res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (!Array.isArray(data) || !data[0]?.meanings?.length) return null;
+      // Prefer the first noun definition, fall back to the first of any type.
+      const meanings = data[0].meanings as Array<{ partOfSpeech: string; definitions: Array<{ definition: string }> }>;
+      const preferred = meanings.find(m => m.partOfSpeech === "noun") ?? meanings[0];
+      const first = preferred?.definitions?.[0]?.definition;
+      if (typeof first === "string" && first.length > 0) {
+        // Keep it short so the popup stays legible on iPad.
+        return first.length > 220 ? first.slice(0, 217) + "…" : first;
+      }
+      return null;
+    } catch { return null; }
+  }, []);
+
+  const showDefinitionTransient = useCallback((word: string, text: string) => {
+    if (wordDefinitionTimerRef.current) window.clearTimeout(wordDefinitionTimerRef.current);
+    setWordDefinition({ word, text });
+    wordDefinitionTimerRef.current = window.setTimeout(() => setWordDefinition(null), 9000);
+  }, []);
+
+  const handleWordSay = useCallback((word: string) => {
+    speakTts(word, 0.75);
+    if (connectionId) api.sessions.publishEvent(connectionId, "word_action", { action: "say", word }).catch(() => {});
+  }, [speakTts, connectionId]);
+
+  const handleWordSoundOut = useCallback((word: string) => {
+    soundOutWord(word);
+    if (connectionId) api.sessions.publishEvent(connectionId, "word_action", { action: "sound_out", word }).catch(() => {});
+  }, [soundOutWord, connectionId]);
+
+  const handleWordDefine = useCallback(async (word: string) => {
+    // Optimistic placeholder so the user gets immediate feedback.
+    showDefinitionTransient(word, "Looking it up…");
+    const def = await fetchDefinition(word);
+    const text = def ?? "No definition found for this word.";
+    showDefinitionTransient(word, text);
+    if (connectionId) api.sessions.publishEvent(connectionId, "word_action", { action: "define", word, text }).catch(() => {});
+  }, [fetchDefinition, showDefinitionTransient, connectionId]);
+
+  const handleWordSave = useCallback(async (word: string, sentence: string) => {
+    if (!connectionId) return;
+    if (wordSaveTimerRef.current) window.clearTimeout(wordSaveTimerRef.current);
+    setWordSaveState({ word, status: "saving" });
+    try {
+      const res = await api.learnedWords.save(connectionId, {
+        word,
+        sentence,
+        bookId: selectedBookId || undefined,
+        page: nanaPageRef.current,
+        childId: activeChildId || undefined,
+      });
+      setWordSaveState({ word, status: res.created ? "saved" : "already" });
+    } catch {
+      setWordSaveState({ word, status: "saved" });
+    }
+    wordSaveTimerRef.current = window.setTimeout(() => setWordSaveState(null), 2500);
+  }, [connectionId, selectedBookId, activeChildId]);
+
+  const handleWordActionsClose = useCallback(() => {
+    setWordHighlight(null);
+    if (wordDefinitionTimerRef.current) window.clearTimeout(wordDefinitionTimerRef.current);
+    setWordDefinition(null);
+  }, []);
 
   // Reading theme — synced both sides. Nana cycles day → sepia → night, the
   // page colors update on Perry's screen at the same time. Persists per-user
@@ -15875,6 +16555,7 @@ export default function App() {
   const handleOpenScheduleFromHome = () => { setCloseReturnsTo("home"); setMode("parentcheck"); };
   const handleOpenBookRequests = () => setMode("bookrequests");
   const handleOpenSettings = () => setMode("settings");
+  const handleOpenLearnedWords = () => { setCloseReturnsTo(modeRef.current === "home" ? "home" : "icebreaker"); setMode("learnedwords"); };
   const handleGoHome = () => setMode("home");
   const handleCloseVault  = () => {
     // Single-tap exit straight to home. Rick: "Memory Vault back button
@@ -16887,6 +17568,7 @@ export default function App() {
           bookPages={currentBook.pages}
           onOpenVault={handleOpenVault}
           onCloseVault={handleCloseVault}
+          onOpenLearnedWords={handleOpenLearnedWords}
           onStartReadingSession={handleStartReadingSession}
           onOpenLibraryFromHome={handleOpenLibraryFromHome}
           onOpenScheduleFromHome={handleOpenScheduleFromHome}
@@ -16958,6 +17640,13 @@ export default function App() {
           onPointer={handleBookPointer}
           wordHighlight={wordHighlight}
           onWord={handleBookWord}
+          onWordSay={handleWordSay}
+          onWordSoundOut={handleWordSoundOut}
+          onWordDefine={handleWordDefine}
+          onWordSave={handleWordSave}
+          wordDefinition={wordDefinition}
+          wordSaveState={wordSaveState}
+          onWordActionsClose={handleWordActionsClose}
           readingTheme={readingTheme}
           onThemeChange={handleThemeChange}
           readingLayout={readingLayout}
@@ -17037,6 +17726,7 @@ export default function App() {
           bookPages={currentBook.pages}
           onOpenVault={handleOpenVault}
           onCloseVault={handleCloseVault}
+          onOpenLearnedWords={handleOpenLearnedWords}
           onStartReadingSession={handleStartReadingSession}
           onOpenLibraryFromHome={handleOpenLibraryFromHome}
           onOpenScheduleFromHome={handleOpenScheduleFromHome}
@@ -17103,6 +17793,13 @@ export default function App() {
           onPointer={handleBookPointer}
           wordHighlight={wordHighlight}
           onWord={handleBookWord}
+          onWordSay={handleWordSay}
+          onWordSoundOut={handleWordSoundOut}
+          onWordDefine={handleWordDefine}
+          onWordSave={handleWordSave}
+          wordDefinition={wordDefinition}
+          wordSaveState={wordSaveState}
+          onWordActionsClose={handleWordActionsClose}
           readingTheme={readingTheme}
           readingLayout={readingLayout}
           pageMode={pageMode}
