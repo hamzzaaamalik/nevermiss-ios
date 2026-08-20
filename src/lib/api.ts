@@ -308,6 +308,29 @@ export const api = {
     listBooks: () => req<{ books: CatalogBook[] }>("GET", "/books").then(r => r.books),
   },
 
+  /** Dictionary lookup — server proxies dictionaryapi.dev with a
+   *  30-day cache so we hit each word at most once ever. Used by the
+   *  Pronunciation action in the SelectionActionMenu and by Word-Save
+   *  enrichment. Never throws — resolves to nulls on any error so the
+   *  caller can degrade gracefully to local TTS. */
+  dictionary: {
+    lookup: (word: string) =>
+      req<{ audioUrl: string | null; ipa: string | null; definition: string | null; source: string }>(
+        "GET", `/dictionary/${encodeURIComponent(word)}`,
+      ),
+  },
+
+  /** Phonics classification — static Orton-Gillingham rules first,
+   *  gpt-4o-mini fallback for the tail. Server caches every response
+   *  in the phonics_cache table so each unique word costs at most one
+   *  OpenAI call ever. */
+  phonics: {
+    classify: (word: string) =>
+      req<{ rule: string; ruleLabel: string; nanaCue: string; perryHint: string; source: string }>(
+        "POST", "/ai/phonics", { word },
+      ),
+  },
+
   learnedWords: {
     list: (connectionId: string, childId?: string) =>
       req<{ words: Array<{

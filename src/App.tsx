@@ -1462,15 +1462,20 @@ function SelectionActionMenu({
       const anchor = range.commonAncestorContainer as Node;
       const paraEl = (anchor.nodeType === 1 ? anchor as Element : anchor.parentElement)?.closest?.("p") as HTMLElement | null;
       const sentence = (paraEl?.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 400);
-      // Position menu just above the selection.
+      // Position: prefer BELOW the selection so we don't collide with
+      // iOS's native Copy / Look Up bar which sits ABOVE the selection.
+      // Flip above if there's no room below.
       const rect = range.getBoundingClientRect();
       const bookRect = bookArea.getBoundingClientRect();
       const menuW = 300;
       const menuH = 58;
       const rawLeft = rect.left + rect.width / 2 - bookRect.left - menuW / 2;
       const clampedLeft = Math.max(8, Math.min(bookArea.clientWidth - menuW - 8, rawLeft));
-      const above = (rect.top - bookRect.top) >= menuH + 12;
-      const top = above ? (rect.top - bookRect.top - menuH - 8) : (rect.bottom - bookRect.top + 8);
+      const spaceBelow = bookArea.clientHeight - (rect.bottom - bookRect.top);
+      const preferBelow = spaceBelow >= menuH + 12;
+      const top = preferBelow
+        ? (rect.bottom - bookRect.top + 8)
+        : Math.max(4, rect.top - bookRect.top - menuH - 8);
       setState({ top, left: clampedLeft, word, sentence });
     };
     document.addEventListener("selectionchange", onChange);
@@ -8055,7 +8060,19 @@ function LearnedWordsView({
                       }}
                     >
                       <button
-                        onClick={() => w.audioUrl ? (() => { try { new Audio(w.audioUrl!).play(); } catch { speak(w.word); } })() : speak(w.word)}
+                        onClick={() => {
+                          // Prefer the persisted dictionary audio (real
+                          // voice); fall back to Web Speech TTS on any
+                          // error (mp3 blocked, offline, etc.).
+                          if (w.audioUrl) {
+                            try {
+                              const a = new Audio(w.audioUrl);
+                              a.play().catch(() => speak(w.word));
+                              return;
+                            } catch { /* fall through to TTS */ }
+                          }
+                          speak(w.word);
+                        }}
                         aria-label={`Play the word ${w.word}`}
                         style={{
                           flexShrink: 0,
@@ -8873,6 +8890,7 @@ function GoodbyeView({
   onBeginCountdown,
   onSkipToGoodbye,
   onEndSession,
+  onHangUp,
   childName,
   nanaName,
   sessionSummary,
@@ -8885,6 +8903,8 @@ function GoodbyeView({
   onBeginCountdown: () => void;
   onSkipToGoodbye: () => void;
   onEndSession: () => void;
+  /** Rick's Aug 14 #8 — quick hang-up path that skips memory-save. */
+  onHangUp?: () => void;
   childName: string;
   nanaName: string;
   /** Optional per-session stats shown in the top "wonderful reading session"
@@ -9192,14 +9212,7 @@ function GoodbyeView({
               Save a Memory →
             </button>
             <button
-              onClick={() => {
-                // Skip the memory-save prompt and end the call outright.
-                // Reuses the same handler downstream so audio/video
-                // teardown is identical; only the write-screen detour
-                // is skipped by publishing session_complete before we
-                // route.
-                onEndSession();
-              }}
+              onClick={() => (onHangUp ?? onEndSession)()}
               style={{
                 background: "rgba(255,255,255,0.06)",
                 color: CREAM,
@@ -10706,6 +10719,7 @@ function DeviceFrame({
   onBeginGoodbyeCountdown,
   onSkipToGoodbye,
   onEndSession,
+  onHangUp,
   showConsentOverlay,
   recordingOn,
   onToggleRecording,
@@ -10872,6 +10886,8 @@ function DeviceFrame({
   onSkipToGoodbye: () => void;
   onEndChallenge: () => void;
   onEndSession: () => void;
+  /** Rick's Aug 14 #8 — hang up without memory-save detour. */
+  onHangUp?: () => void;
   showConsentOverlay: boolean;
   recordingOn: boolean;
   onToggleRecording: () => void;
@@ -11521,6 +11537,7 @@ function DeviceFrame({
             onBeginCountdown={onBeginGoodbyeCountdown}
             onSkipToGoodbye={onSkipToGoodbye}
             onEndSession={onEndSession}
+            onHangUp={onHangUp}
             childName={childName}
             nanaName={nanaName}
             sessionSummary={sessionSummary}
@@ -16405,10 +16422,10 @@ export default function App() {
     const cached = selPronCacheRef.current.get(word.toLowerCase());
     if (cached) return cached;
     try {
-      // Server proxy caches too and avoids CORS in Capacitor WebView.
-      const res = await fetch(`/api/dictionary/${encodeURIComponent(word)}`);
-      if (!res.ok) return null;
-      const data = await res.json() as { audioUrl?: string | null; ipa?: string | null; definition?: string | null };
+      // Uses api.dictionary.lookup which routes through the correct
+      // API base (relative /api in dev, absolute api.nevermiss.family
+      // in prod on iPad). Server-side cache + CORS handled there.
+      const data = await api.dictionary.lookup(word);
       const result = { audioUrl: data.audioUrl ?? null, ipa: data.ipa ?? null, definition: data.definition ?? null };
       selPronCacheRef.current.set(word.toLowerCase(), result);
       return result;
@@ -16447,18 +16464,20 @@ export default function App() {
     }
     setSelPhoState({ word, status: "loading" });
     try {
-      const res = await fetch(`/api/ai/phonics`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ word }),
-      });
-      if (!res.ok) throw new Error("phonics fetch failed");
-      const data = await res.json() as { rule: string; ruleLabel: string; nanaCue: string; perryHint: string };
-      selPhoCacheRef.current.set(word.toLowerCase(), data);
-      setSelPhonicsCard({ word, ...data });
+      // Uses api.phonics.classify which routes through the correct
+      // API base for both dev and iPad prod builds.
+      const data = await api.phonics.classify(word);
+      const payload = {
+        rule: data.rule,
+        ruleLabel: data.ruleLabel,
+        nanaCue: data.nanaCue,
+        perryHint: data.perryHint,
+      };
+      selPhoCacheRef.current.set(word.toLowerCase(), payload);
+      setSelPhonicsCard({ word, ...payload });
       setSelPhoState({ word, status: "done" });
       // Broadcast so both iPads see the same coaching card.
-      if (connectionId) api.sessions.publishEvent(connectionId, "phonics_card", { word, ...data }).catch(() => {});
+      if (connectionId) api.sessions.publishEvent(connectionId, "phonics_card", { word, ...payload }).catch(() => {});
     } catch {
       setSelPhoState({ word, status: "err" });
     }
@@ -17713,13 +17732,10 @@ export default function App() {
     setNanaScheduleAccepted(false);
     setPerryScheduleAccepted(false);
   };
-  const handleEndSession = () => {
+  // Session-end persistence + broadcast — shared by handleEndSession
+  // (routes to memory-save) and handleHangUp (skips memory-save).
+  const finalizeSession = () => {
     if (connectionId && selectedBookId && nanaPage > 1) {
-      // For chapter books, also persist which chapter the family ended
-      // in. Picture books / flat books have no chapters, so chapterIndex
-      // stays undefined and the server stores null. Used later by the
-      // Library Continue widget to show "Chapter 3 of 12" without the
-      // legacy leftChapter string-parsing.
       const chapterIdx = getChapterForPage(currentBook, nanaPage)?.chapterIndex;
       api.sessionLog.save(connectionId, {
         bookId: selectedBookId,
@@ -17732,12 +17748,36 @@ export default function App() {
     if (connectionId) {
       api.sessions.publishEvent(connectionId, "session_end", {}).catch(() => {});
     }
-    // Clear so the next session re-fires session_started when Nana navigates
-    // back into an in-session mode after the post-session vault.
     sessionStartedFiredRef.current = false;
+  };
+
+  const handleEndSession = () => {
+    finalizeSession();
+    // Rick's Aug 14 #8: this is the "Save a Memory" path. Route to
+    // the family-stories write screen so Nana can save a note.
     setPostEndCall(true);
     setFamilyStoriesSubMode("write");
     setMode("familystories");
+  };
+
+  const handleHangUp = () => {
+    // Rick's Aug 14 #8: quick-exit without the memory-save detour.
+    // Same session persistence + broadcast, but land Nana back on
+    // home directly. Also broadcast session_complete so Perry's iPad
+    // returns to the PIN screen cleanly instead of sitting on a
+    // dead goodbye view.
+    finalizeSession();
+    if (connectionId) {
+      api.sessions.publishEvent(connectionId, "session_complete", {}).catch(() => {});
+    }
+    setPostEndCall(true);
+    // Reset transient reading UI so the next session starts clean.
+    setWordHighlight(null);
+    setSelPhonicsCard(null);
+    setSelPronState(null);
+    setSelPhoState(null);
+    setSelSaveState(null);
+    setMode("home");
   };
 
   const btnStyle = (disabled: boolean) => ({
@@ -18213,6 +18253,7 @@ export default function App() {
           onBeginGoodbyeCountdown={handleBeginGoodbyeCountdown}
           onSkipToGoodbye={handleSkipToGoodbye}
           onEndSession={handleEndSession}
+          onHangUp={handleHangUp}
           showConsentOverlay={!nanaConsentSeen}
           recordingOn={nanaRecordingOn}
           onToggleRecording={() => setNanaRecordingOn(v => !v)}
@@ -18377,6 +18418,7 @@ export default function App() {
           onBeginGoodbyeCountdown={handleBeginGoodbyeCountdown}
           onSkipToGoodbye={handleSkipToGoodbye}
           onEndSession={handleEndSession}
+          onHangUp={handleHangUp}
           showConsentOverlay={!childConsentSeen}
           recordingOn={childRecordingOn}
           onToggleRecording={() => setChildRecordingOn(v => !v)}
