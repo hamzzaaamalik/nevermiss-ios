@@ -15390,6 +15390,11 @@ export default function App() {
           });
         } else if (msg.type === "chapter_end_dismiss") {
           setChapterEndOverlay(null);
+        } else if (msg.type === "catalog_updated") {
+          // Rick's Aug 14: admin created/edited/deleted a book. Refetch
+          // the public catalog so this iPad's library reflects the
+          // change within the same second.
+          try { refreshCatalogRef.current?.(); } catch {}
         } else if (msg.type === "toggle_child_prompts") {
           const on = !!msg.payload.show;
           setShowChildIcebreakerPrompts(on);
@@ -16140,6 +16145,10 @@ export default function App() {
   // once on mount + on window focus so a Nana who was on the app when
   // Rick added a book sees it after switching back.
   const [catalogVersion, setCatalogVersion] = useState(0);
+  // Ref-held so the SSE catalog_updated handler can call the latest
+  // refresh function without needing to close over it (avoids
+  // "refetch uses stale state" pitfalls in the SSE listener).
+  const refreshCatalogRef = useRef<() => void>(() => {});
   useEffect(() => {
     let alive = true;
 
@@ -16167,6 +16176,7 @@ export default function App() {
         })
         .catch(() => { /* silent — hardcoded fallback still works */ });
     };
+    refreshCatalogRef.current = refresh;
     refresh();
     // Also refresh when the tab returns to foreground, so Rick's newest
     // book shows up without a full app relaunch.
