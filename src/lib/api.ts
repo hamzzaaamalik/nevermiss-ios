@@ -318,12 +318,31 @@ export const api = {
         sentence: string | null;
         bookId: string | null;
         page: number | null;
+        definition: string | null;
+        ipa: string | null;
+        audioUrl: string | null;
+        phonicsRule: string | null;
+        phonicsRuleLabel: string | null;
+        phonicsCue: string | null;
         createdAt: string;
       }> }>(
         "GET",
         `/learned-words/${connectionId}${childId ? `?childId=${encodeURIComponent(childId)}` : ""}`,
       ),
-    save: (connectionId: string, body: { word: string; sentence?: string; bookId?: string; page?: number; childId?: string }) =>
+    save: (connectionId: string, body: {
+      word: string;
+      sentence?: string;
+      bookId?: string;
+      page?: number;
+      childId?: string;
+      /** Rick's Aug 14: enrichment persisted alongside the word. */
+      definition?: string;
+      ipa?: string;
+      audioUrl?: string;
+      phonicsRule?: string;
+      phonicsRuleLabel?: string;
+      phonicsCue?: string;
+    }) =>
       req<{ word: {
         id: string;
         connectionId: string;
@@ -332,6 +351,12 @@ export const api = {
         sentence: string | null;
         bookId: string | null;
         page: number | null;
+        definition: string | null;
+        ipa: string | null;
+        audioUrl: string | null;
+        phonicsRule: string | null;
+        phonicsRuleLabel: string | null;
+        phonicsCue: string | null;
         createdAt: string;
       }; created: boolean }>("POST", `/learned-words/${connectionId}`, body),
     remove: (wordId: string) =>

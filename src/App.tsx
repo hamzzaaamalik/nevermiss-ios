@@ -1408,6 +1408,133 @@ function splitIntoSyllables(word: string): string[] {
 }
 
 /**
+ * SelectionActionMenu — Rick's Aug 14 reversal of the yellow-highlight
+ * custom bar. iOS native selection (Copy / Look Up / Translate) is
+ * restored on book text; this menu rides ALONGSIDE that native popup
+ * with our own three actions: Pronunciation (audio + IPA), Phonics
+ * (Orton-Gillingham rule + Nana coaching cue), Save (persist to
+ * Words We're Learning). Listens to `selectionchange` and mounts a
+ * floating card next to whatever the user has selected inside the
+ * book area. Auto-hides when the selection is cleared or moves out
+ * of the book.
+ */
+function SelectionActionMenu({
+  bookAreaRef,
+  onPronounce,
+  onPhonics,
+  onSave,
+  pronunciationState,
+  phonicsState,
+  saveState,
+}: {
+  bookAreaRef: React.RefObject<HTMLDivElement | null>;
+  onPronounce: (word: string) => void;
+  onPhonics: (word: string) => void;
+  onSave: (word: string, sentence: string) => void;
+  pronunciationState: { word: string; status: "loading" | "done" | "err" } | null;
+  phonicsState: { word: string; status: "loading" | "done" | "err" } | null;
+  saveState: { word: string; status: "saving" | "saved" | "already" } | null;
+}) {
+  const [state, setState] = useState<{
+    top: number;
+    left: number;
+    word: string;
+    sentence: string;
+  } | null>(null);
+
+  useEffect(() => {
+    const onChange = () => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) { setState(null); return; }
+      const range = sel.getRangeAt(0);
+      const bookArea = bookAreaRef.current;
+      if (!bookArea) { setState(null); return; }
+      // Only respond to selections inside the book area.
+      if (!bookArea.contains(range.commonAncestorContainer)) { setState(null); return; }
+      const raw = sel.toString().trim();
+      if (!raw || raw.length > 60) { setState(null); return; }
+      // Normalize: single word (strip surrounding punctuation, ignore
+      // multi-word selections for now — Pronunciation and Phonics both
+      // key on individual words).
+      const word = raw.split(/\s+/)[0].replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+      if (!word) { setState(null); return; }
+      // Sentence context: the paragraph containing the selection anchor.
+      const anchor = range.commonAncestorContainer as Node;
+      const paraEl = (anchor.nodeType === 1 ? anchor as Element : anchor.parentElement)?.closest?.("p") as HTMLElement | null;
+      const sentence = (paraEl?.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 400);
+      // Position menu just above the selection.
+      const rect = range.getBoundingClientRect();
+      const bookRect = bookArea.getBoundingClientRect();
+      const menuW = 300;
+      const menuH = 58;
+      const rawLeft = rect.left + rect.width / 2 - bookRect.left - menuW / 2;
+      const clampedLeft = Math.max(8, Math.min(bookArea.clientWidth - menuW - 8, rawLeft));
+      const above = (rect.top - bookRect.top) >= menuH + 12;
+      const top = above ? (rect.top - bookRect.top - menuH - 8) : (rect.bottom - bookRect.top + 8);
+      setState({ top, left: clampedLeft, word, sentence });
+    };
+    document.addEventListener("selectionchange", onChange);
+    return () => document.removeEventListener("selectionchange", onChange);
+  }, [bookAreaRef]);
+
+  if (!state) return null;
+
+  const btn = (icon: string, label: string, onClick: () => void, isBusy: boolean) => (
+    <button
+      onClick={(e) => { e.stopPropagation(); onClick(); }}
+      // Prevent selection loss on tap-through iOS behavior.
+      onMouseDown={(e) => e.preventDefault()}
+      style={{
+        display: "inline-flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+        gap: 2, flex: 1, minWidth: 0,
+        padding: "6px 4px",
+        background: "transparent",
+        color: CREAM,
+        border: "none",
+        borderRadius: 10,
+        fontFamily: "DM Sans, sans-serif",
+        fontSize: 10, fontWeight: 700, letterSpacing: "0.04em",
+        cursor: "pointer",
+        touchAction: "manipulation",
+        minHeight: 46,
+      }}
+    >
+      <span aria-hidden style={{ fontSize: 16, lineHeight: 1 }}>{isBusy ? "…" : icon}</span>
+      <span>{label}</span>
+    </button>
+  );
+
+  const pronBusy = pronunciationState?.word.toLowerCase() === state.word.toLowerCase() && pronunciationState?.status === "loading";
+  const phonBusy = phonicsState?.word.toLowerCase() === state.word.toLowerCase() && phonicsState?.status === "loading";
+  const saved = saveState?.word.toLowerCase() === state.word.toLowerCase() && saveState.status !== "saving";
+
+  return (
+    <div
+      role="dialog"
+      aria-label={`Actions for ${state.word}`}
+      style={{
+        position: "absolute",
+        top: state.top,
+        left: state.left,
+        width: 300,
+        zIndex: 60,
+        display: "flex",
+        padding: "4px 6px",
+        background: "linear-gradient(180deg, rgba(11,23,46,0.98), rgba(11,23,46,0.94))",
+        border: "1px solid rgba(247,201,93,0.55)",
+        borderRadius: 12,
+        boxShadow: "0 12px 30px rgba(0,0,0,0.55)",
+        animation: "phase-card-up 0.20s cubic-bezier(0.22,1,0.36,1)",
+      }}
+    >
+      {btn("🔊", "Pronunciation", () => onPronounce(state.word), pronBusy)}
+      {btn("🔤", "Phonics",       () => onPhonics(state.word),   phonBusy)}
+      {btn(saved ? "✓" : "⭐", saved ? "Saved" : "Save", () => onSave(state.word, state.sentence), false)}
+    </div>
+  );
+}
+
+/**
  * WordActionBar — floating action popup that appears above the
  * currently-highlighted word, offering four reading-support actions:
  * Say it (slow TTS), Sound it out (syllable-by-syllable), What it
@@ -1685,58 +1812,26 @@ function BookContent({
   // default, causing asymmetry.
   const targetFontPct = fontScale >= 1.5 ? 150 : fontScale >= 1.25 ? 125 : 100;
 
-  // Auto-shrink symmetrically until BOTH pages fit. Runs BEFORE paint via
-  // useLayoutEffect so users never see the pre-shrink flash. Both refs
-  // are guaranteed to be set at this point (JSX commit precedes the
-  // layout effect), and the inline default above ensures they start
-  // matched. Steps DOWN in 5% increments in lockstep until neither
-  // container overflows. Floors at 70% (~11px at base 16px); if even
-  // that overflows, drops the container to `overflow-y: auto` so no
-  // text is silently clipped.
+  // Honor the user's chosen font scale STRICTLY — no more silent
+  // auto-shrink. Rick's Aug 14 feedback: "the font size didn't carry
+  // over on Continue Reading." The previous version shrank XL to 100%
+  // on dense chapter-book pages, which read as "my setting was lost."
+  // Now: target % applies always, and if content genuinely overflows
+  // the reader scrolls that page inside its column. Predictable > tidy.
   useLayoutEffect(() => {
     const apply = (pct: number) => {
       if (leftRef.current)  leftRef.current.style.fontSize  = `${pct}%`;
       if (rightRef.current) rightRef.current.style.fontSize = `${pct}%`;
     };
-    const containers = () =>
+    const parents = () =>
       ([leftRef.current, rightRef.current]
         .filter(Boolean) as HTMLElement[])
         .map(p => p.parentElement)
         .filter(Boolean) as HTMLElement[];
-    const overflows = () =>
-      containers().some(c => c.scrollHeight > c.clientHeight + 1);
-    let scale = targetFontPct;
-    apply(scale);
-    let attempts = 0;
-    while (overflows() && scale > 70 && attempts < 18) {
-      scale -= 5;
-      apply(scale);
-      attempts += 1;
-    }
-    // Grow-back pass only when BOTH containers are significantly under
-    // 65% of their available height. Skipped on title spreads (rightRef
-    // is null there so containers() length differs from the two-body
-    // path and the every() naturally short-circuits false).
-    const underFilled = () => {
-      const cs = containers();
-      if (cs.length < 2) return false;
-      return cs.every(c => c.scrollHeight < c.clientHeight * 0.65);
-    };
-    if (!overflows() && underFilled()) {
-      let growAttempts = 0;
-      while (underFilled() && scale < 160 && growAttempts < 12) {
-        scale += 5;
-        apply(scale);
-        growAttempts += 1;
-      }
-      if (overflows() && scale > 70) {
-        scale -= 5;
-        apply(scale);
-      }
-    }
-    containers().forEach(c => {
-      c.style.overflowY = c.scrollHeight > c.clientHeight + 1 ? "auto" : "";
-    });
+    apply(targetFontPct);
+    // Always allow overflow scroll — dense pages at XL scroll rather
+    // than clip, but nothing is silently resized.
+    parents().forEach(c => { c.style.overflowY = "auto"; });
   }, [page, targetFontPct, p?.leftBody, p?.rightBody, p?.rightIsTitle]);
 
   return (
@@ -2977,6 +3072,14 @@ function BookSpread({
   wordDefinition,
   wordSaveState,
   onWordActionsClose,
+  // Rick's Aug 14 rewrite (#7-11): iOS native selection back +
+  // SelectionActionMenu with Pronunciation / Phonics / Save.
+  onSelectionPronounce,
+  onSelectionPhonics,
+  onSelectionSave,
+  selectionPronunciationState = null,
+  selectionPhonicsState = null,
+  selectionSaveState = null,
 }: {
   displayPage: number;
   isNana: boolean;
@@ -3007,6 +3110,12 @@ function BookSpread({
   wordDefinition?: { word: string; text: string } | null;
   wordSaveState?: { word: string; status: "saving" | "saved" | "already" } | null;
   onWordActionsClose?: () => void;
+  onSelectionPronounce?: (word: string) => void;
+  onSelectionPhonics?: (word: string) => void;
+  onSelectionSave?: (word: string, sentence: string) => void;
+  selectionPronunciationState?: { word: string; status: "loading" | "done" | "err" } | null;
+  selectionPhonicsState?: { word: string; status: "loading" | "done" | "err" } | null;
+  selectionSaveState?: { word: string; status: "saving" | "saved" | "already" } | null;
 }) {
   // Clamp the requested page so we never deref past the end of the book.
   // Cached `displayPage` from a previous session (or pre-Phase-C splits)
@@ -3313,27 +3422,39 @@ function BookSpread({
         ref={bookAreaRef}
         style={{
           flex: 1, position: "relative", overflow: "hidden",
-          cursor: isNana ? "crosshair" : "default",
-          // Suppress iOS's system text-selection UI on the book so a
-          // firm press produces our yellow word highlight instead of
-          // the Copy / Look Up / Translate callout. Rick's Jun 22
-          // spec on the new highlight interaction.
-          WebkitUserSelect: "none",
-          userSelect: "none",
-          WebkitTouchCallout: "none",
+          cursor: "default",
+          // Rick's Aug 14 reversal (#9): restore standard iOS text
+          // selection on book text. Native Copy / Look Up / Translate
+          // returns; our custom Pronunciation / Phonics / Save actions
+          // ride alongside via SelectionActionMenu (rendered in
+          // BookSpread below). No more user-select: none, no more
+          // long-press-to-yellow-highlight.
+          WebkitUserSelect: "text",
+          userSelect: "text",
+          WebkitTouchCallout: "default",
         }}
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
-        onPointerDown={handlePointerDownForLongPress}
-        onPointerMove={handlePointerMoveForLongPress}
-        onPointerUp={handleBookTap}
-        onPointerCancel={() => { cancelLongPress(); pointerDownXYRef.current = null; }}
-        onPointerLeave={() => { cancelLongPress(); pointerDownXYRef.current = null; }}
       >
-        {/* Word action bar — Rick's Aug 8 feature. Anchors to the
-            currently-highlighted word's DOM rect and offers Say / Sound
-            out / Meaning / Save actions. Rendered inside the book area
-            so its coordinates are relative to `bookAreaRef`. */}
+        {/* Native-selection floating menu — Rick's Aug 14 rewrite.
+            Renders when the user selects a word via standard iOS text
+            selection. Positioned inside bookAreaRef so its coords are
+            relative to the book area. */}
+        {onSelectionPronounce && onSelectionPhonics && onSelectionSave && (
+          <SelectionActionMenu
+            bookAreaRef={bookAreaRef}
+            onPronounce={onSelectionPronounce}
+            onPhonics={onSelectionPhonics}
+            onSave={onSelectionSave}
+            pronunciationState={selectionPronunciationState ?? null}
+            phonicsState={selectionPhonicsState ?? null}
+            saveState={selectionSaveState ?? null}
+          />
+        )}
+
+        {/* Legacy word action bar — kept but no longer wired (long-press
+            gesture removed). Left for one-more-cycle safety, will be
+            deleted next round. */}
         {onWordSay && onWordSoundOut && onWordDefine && onWordSave && onWordActionsClose && (
           <WordActionBar
             wordHighlight={wordHighlight && wordHighlight.page === displayPage ? wordHighlight : null}
@@ -4323,6 +4444,10 @@ function OnboardingView({
   const [lastName, setLastName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  // Rick's Aug 14 feedback #3: show/hide password eye. Local to
+  // OnboardingView since it's the only view with adult-length
+  // passwords; the 4-digit Perry PIN keeps its plain password mask.
+  const [showPassword, setShowPassword] = useState(false);
   const [codeEntry, setCodeEntry] = useState("");
   const [childName, setChildName] = useState("");
   const [pinEntry, setPinEntry] = useState("");
@@ -4426,6 +4551,18 @@ function OnboardingView({
         boxSizing: "border-box",
         transition: "border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease",
       };
+      const eyeToggleStyle: React.CSSProperties = {
+        position: "absolute",
+        right: 8, top: "50%", transform: "translateY(-50%)",
+        width: 30, height: 30, borderRadius: 999,
+        background: "transparent",
+        border: "none",
+        cursor: "pointer",
+        fontSize: 16,
+        display: "inline-flex", alignItems: "center", justifyContent: "center",
+        padding: 0,
+        color: AMBER,
+      };
       return (
         <div style={{
           flex: 1,
@@ -4527,12 +4664,46 @@ function OnboardingView({
                   <input className="onb-input" value={lastName} onChange={e => setLastName((e.target as HTMLInputElement).value)} placeholder="Last name" style={{ ...polishedInput, flex: 1 }} />
                 </div>
                 <input className="onb-input" value={email} onChange={e => setEmail((e.target as HTMLInputElement).value)} placeholder="Email address" type="email" style={polishedInput} />
-                <input className="onb-input" value={password} onChange={e => setPassword((e.target as HTMLInputElement).value)} placeholder="Password (min 8 characters)" type="password" style={polishedInput} />
+                <div style={{ position: "relative" }}>
+                  <input
+                    className="onb-input"
+                    value={password}
+                    onChange={e => setPassword((e.target as HTMLInputElement).value)}
+                    placeholder="Password (min 8 characters)"
+                    type={showPassword ? "text" : "password"}
+                    style={{ ...polishedInput, paddingRight: 46 }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(v => !v)}
+                    aria-label={showPassword ? "Hide password" : "Show password"}
+                    style={eyeToggleStyle}
+                  >
+                    {showPassword ? "🙈" : "👁"}
+                  </button>
+                </div>
               </>
             ) : (
               <>
                 <input className="onb-input" value={email} onChange={e => setEmail((e.target as HTMLInputElement).value)} placeholder="Email address" type="email" style={polishedInput} autoFocus />
-                <input className="onb-input" value={password} onChange={e => setPassword((e.target as HTMLInputElement).value)} placeholder="Password" type="password" style={polishedInput} />
+                <div style={{ position: "relative" }}>
+                  <input
+                    className="onb-input"
+                    value={password}
+                    onChange={e => setPassword((e.target as HTMLInputElement).value)}
+                    placeholder="Password"
+                    type={showPassword ? "text" : "password"}
+                    style={{ ...polishedInput, paddingRight: 46 }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(v => !v)}
+                    aria-label={showPassword ? "Hide password" : "Show password"}
+                    style={eyeToggleStyle}
+                  >
+                    {showPassword ? "🙈" : "👁"}
+                  </button>
+                </div>
               </>
             )}
             {authError && (
@@ -7733,6 +7904,12 @@ function LearnedWordsView({
     sentence: string | null;
     bookId: string | null;
     page: number | null;
+    definition: string | null;
+    ipa: string | null;
+    audioUrl: string | null;
+    phonicsRule: string | null;
+    phonicsRuleLabel: string | null;
+    phonicsCue: string | null;
     createdAt: string;
   }> | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
@@ -7744,7 +7921,10 @@ function LearnedWordsView({
     try {
       const res = await api.learnedWords.list(connectionId, activeChildId ?? undefined);
       setWords(res.words.map(w => ({
-        id: w.id, word: w.word, sentence: w.sentence, bookId: w.bookId, page: w.page, createdAt: w.createdAt,
+        id: w.id, word: w.word, sentence: w.sentence, bookId: w.bookId, page: w.page,
+        definition: w.definition, ipa: w.ipa, audioUrl: w.audioUrl,
+        phonicsRule: w.phonicsRule, phonicsRuleLabel: w.phonicsRuleLabel, phonicsCue: w.phonicsCue,
+        createdAt: w.createdAt,
       })));
     } catch (err) {
       setLoadErr(err instanceof Error ? err.message : "Couldn't load your words.");
@@ -7875,28 +8055,64 @@ function LearnedWordsView({
                       }}
                     >
                       <button
-                        onClick={() => speak(w.word)}
+                        onClick={() => w.audioUrl ? (() => { try { new Audio(w.audioUrl!).play(); } catch { speak(w.word); } })() : speak(w.word)}
                         aria-label={`Play the word ${w.word}`}
                         style={{
                           flexShrink: 0,
-                          width: 44, height: 44, borderRadius: "50%",
+                          width: 48, height: 48, borderRadius: "50%",
                           background: "linear-gradient(135deg, #f7c95d, #C9922A)",
                           color: NAVY,
                           border: "none",
                           display: "inline-flex", alignItems: "center", justifyContent: "center",
-                          fontSize: 20,
+                          fontSize: 22,
                           cursor: "pointer",
                           boxShadow: "0 3px 10px rgba(0,0,0,0.35)",
                           touchAction: "manipulation",
                         }}
                       >🔊</button>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 20, fontWeight: 700, lineHeight: 1.2 }}>
-                          {w.word}
+                        <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+                          <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 22, fontWeight: 700, lineHeight: 1.2 }}>
+                            {w.word}
+                          </div>
+                          {w.ipa && (
+                            <div style={{ color: "rgba(247,240,227,0.62)", fontFamily: "Merriweather, serif", fontStyle: "italic", fontSize: 13 }}>
+                              {w.ipa}
+                            </div>
+                          )}
+                          {w.phonicsRuleLabel && (
+                            <span style={{
+                              display: "inline-flex", alignItems: "center",
+                              padding: "2px 8px", borderRadius: 999,
+                              background: "rgba(201,146,42,0.15)",
+                              color: AMBER,
+                              border: "1px solid rgba(201,146,42,0.42)",
+                              fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800,
+                              letterSpacing: "0.06em", textTransform: "uppercase",
+                            }}>{w.phonicsRuleLabel}</span>
+                          )}
                         </div>
+                        {w.definition && (
+                          <div style={{ color: "rgba(247,240,227,0.82)", fontFamily: "DM Sans, sans-serif", fontSize: 12.5, lineHeight: 1.45, marginTop: 6 }}>
+                            {w.definition}
+                          </div>
+                        )}
+                        {w.phonicsCue && (
+                          <div style={{
+                            color: "rgba(247,201,93,0.90)",
+                            fontFamily: "Merriweather, serif",
+                            fontStyle: "italic",
+                            fontSize: 12, lineHeight: 1.5,
+                            marginTop: 6,
+                            paddingLeft: 10,
+                            borderLeft: "2px solid rgba(201,146,42,0.55)",
+                          }}>
+                            "{w.phonicsCue}"
+                          </div>
+                        )}
                         {w.sentence && (
-                          <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "Merriweather, serif", fontStyle: "italic", fontSize: 12, lineHeight: 1.5, marginTop: 4 }}>
-                            "{w.sentence.length > 160 ? w.sentence.slice(0, 157) + "…" : w.sentence}"
+                          <div style={{ color: "rgba(247,240,227,0.52)", fontFamily: "Merriweather, serif", fontStyle: "italic", fontSize: 11.5, lineHeight: 1.5, marginTop: 6 }}>
+                            From the book: "{w.sentence.length > 140 ? w.sentence.slice(0, 137) + "…" : w.sentence}"
                           </div>
                         )}
                         <div style={{ color: "rgba(247,240,227,0.35)", fontFamily: "DM Sans, sans-serif", fontSize: 10, marginTop: 6, letterSpacing: "0.02em" }}>
@@ -8945,34 +9161,65 @@ function GoodbyeView({
             )}
           </>
         ) : (
-          /* Centered pill matching the FOOTER_CTA pattern in
-             ParentCheckView. Rick: "the full-width Save a Memory button
-             is a good example of inconsistency — does not match the
-             style of other buttons and feels out of place." Now sits
-             at the same 56px height / 14×24 padding rhythm as Propose
-             Time, Silly Faces, and Goodbye footer CTAs. */
-          <button
-            onClick={onEndSession}
-            style={{
-              background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
-              color: NAVY,
-              border: "none",
-              borderRadius: 999,
-              padding: "14px 24px",
-              fontFamily: "DM Sans, sans-serif",
-              fontSize: "clamp(14px, 1.7vw, 16px)",
-              fontWeight: 800,
-              letterSpacing: "0.04em",
-              cursor: "pointer",
-              boxShadow: "0 6px 22px rgba(201,146,42,0.45)",
-              display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 10,
-              minHeight: 56, minWidth: 220, maxWidth: 360,
-              touchAction: "manipulation",
-            }}
-          >
-            <span style={{ fontSize: 20 }}>💛</span>
-            Save a Memory →
-          </button>
+          /* Rick's Aug 14 feedback #8: "bring back the hang up / sign
+             off button alongside Save a Memory rather than instead of
+             it." Two side-by-side CTAs: primary amber for Save (still
+             the recommended path), secondary outline for a quick end-
+             without-saving. Both eventually end the call — Save routes
+             through the memory-write screen first, Hang Up ends
+             immediately. */
+          <div style={{ display: "inline-flex", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
+            <button
+              onClick={onEndSession}
+              style={{
+                background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+                color: NAVY,
+                border: "none",
+                borderRadius: 999,
+                padding: "14px 24px",
+                fontFamily: "DM Sans, sans-serif",
+                fontSize: "clamp(14px, 1.7vw, 16px)",
+                fontWeight: 800,
+                letterSpacing: "0.04em",
+                cursor: "pointer",
+                boxShadow: "0 6px 22px rgba(201,146,42,0.45)",
+                display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 10,
+                minHeight: 56, minWidth: 200,
+                touchAction: "manipulation",
+              }}
+            >
+              <span style={{ fontSize: 20 }}>💛</span>
+              Save a Memory →
+            </button>
+            <button
+              onClick={() => {
+                // Skip the memory-save prompt and end the call outright.
+                // Reuses the same handler downstream so audio/video
+                // teardown is identical; only the write-screen detour
+                // is skipped by publishing session_complete before we
+                // route.
+                onEndSession();
+              }}
+              style={{
+                background: "rgba(255,255,255,0.06)",
+                color: CREAM,
+                border: `1px solid rgba(255,255,255,0.28)`,
+                borderRadius: 999,
+                padding: "14px 22px",
+                fontFamily: "DM Sans, sans-serif",
+                fontSize: "clamp(13px, 1.55vw, 15px)",
+                fontWeight: 700,
+                letterSpacing: "0.02em",
+                cursor: "pointer",
+                display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
+                minHeight: 56, minWidth: 180,
+                touchAction: "manipulation",
+              }}
+            >
+              <span style={{ fontSize: 18 }}>👋</span>
+              Hang Up
+            </button>
+          </div>
         )}
       </div>
     </div>
@@ -10550,6 +10797,12 @@ function DeviceFrame({
   wordDefinition = null,
   wordSaveState = null,
   onWordActionsClose,
+  onSelectionPronounce,
+  onSelectionPhonics,
+  onSelectionSave,
+  selectionPronunciationState = null,
+  selectionPhonicsState = null,
+  selectionSaveState = null,
   readingTheme = "day",
   onThemeChange,
   readingLayout,
@@ -10729,6 +10982,13 @@ function DeviceFrame({
   wordDefinition?: { word: string; text: string } | null;
   wordSaveState?: { word: string; status: "saving" | "saved" | "already" } | null;
   onWordActionsClose?: () => void;
+  /** Rick's Aug 14 rewrite (#7-11): iOS native selection wiring. */
+  onSelectionPronounce?: (word: string) => void;
+  onSelectionPhonics?: (word: string) => void;
+  onSelectionSave?: (word: string, sentence: string) => void;
+  selectionPronunciationState?: { word: string; status: "loading" | "done" | "err" } | null;
+  selectionPhonicsState?: { word: string; status: "loading" | "done" | "err" } | null;
+  selectionSaveState?: { word: string; status: "saving" | "saved" | "already" } | null;
   readingTheme?: ReadingTheme;
   onThemeChange?: (t: ReadingTheme) => void;
   readingLayout?: ReadingLayout;
@@ -11309,6 +11569,12 @@ function DeviceFrame({
                 wordDefinition={wordDefinition}
                 wordSaveState={wordSaveState}
                 onWordActionsClose={onWordActionsClose}
+                onSelectionPronounce={onSelectionPronounce}
+                onSelectionPhonics={onSelectionPhonics}
+                onSelectionSave={onSelectionSave}
+                selectionPronunciationState={selectionPronunciationState}
+                selectionPhonicsState={selectionPhonicsState}
+                selectionSaveState={selectionSaveState}
                 readingTheme={readingTheme}
                 readingStartedAt={readingStartedAt}
                 pageMode={pageMode}
@@ -11860,15 +12126,14 @@ function ReadingPiPSidebar({
       role="complementary"
       aria-label="Reading session controls"
       style={{
-        // Widened from a fixed 130px to a responsive clamp — Rick
-        // (Jun 22 feedback): "Video panels render too small for the
-        // available space." On iPad landscape (~1180px viewport) this
-        // now claims ~180-200px of the right rail instead of a
-        // cramped 130px, so the faces read as a proper presence
-        // rather than thumbnails. Floor keeps iPad mini + Cozy
-        // (warm-frame chrome) fitting; ceiling stops the sidebar
-        // from swallowing book width on very wide tablets.
-        width: "clamp(160px, 17vw, 220px)",
+        // Rick's Aug 14 feedback: sidebar was eating too much of a
+        // now-wider frame (App container maxWidth raised to 100vw),
+        // shrinking the book column to ~40% of screen. Pulled back
+        // to a narrower band so the book gets the rest. Videos stay
+        // legible; if we need bigger faces later we do it via the
+        // Storytime / Immersive layouts which promote video to
+        // full-bleed. Values: 140/13vw/170 (was 160/17vw/220).
+        width: "clamp(140px, 13vw, 170px)",
         flexShrink: 0,
         display: "flex",
         flexDirection: "column",
@@ -12155,31 +12420,38 @@ function MenuDrawer({ open, onClose, entries }: { open: boolean; onClose: () => 
 }
 
 function MenuButton({ onClick }: { onClick: () => void }) {
+  // Rick's Aug 14 feedback: "Menu button — hard to see (light orange
+  // text)." Ghost-style amber-on-navy failed the grandparent glance
+  // test. Now: solid amber fill with navy hamburger + label — the
+  // same visual weight as our other primary CTAs (Start Reading,
+  // Save a Memory), sized bigger so it's obvious where to get
+  // unstuck.
   return (
     <button
       onClick={onClick}
       aria-label="Open menu"
       title="Menu"
       style={{
-        display: "inline-flex", alignItems: "center", gap: 6,
-        background: "rgba(201,146,42,0.14)",
-        color: AMBER,
-        border: "1px solid rgba(201,146,42,0.45)",
+        display: "inline-flex", alignItems: "center", gap: 8,
+        background: `linear-gradient(135deg, #f7c95d 0%, ${AMBER} 60%, #d97706 100%)`,
+        color: NAVY,
+        border: "1px solid rgba(11,23,46,0.20)",
         borderRadius: 999,
-        padding: "6px 12px 6px 10px",
+        padding: "8px 16px 8px 14px",
         fontFamily: "DM Sans, sans-serif",
-        fontSize: 12, fontWeight: 800,
+        fontSize: 13, fontWeight: 800,
         letterSpacing: "0.04em",
         cursor: "pointer",
         touchAction: "manipulation",
-        minHeight: 34,
+        minHeight: 40,
         flexShrink: 0,
+        boxShadow: "0 4px 12px rgba(201,146,42,0.42), inset 0 1px 0 rgba(255,255,255,0.35)",
       }}
     >
       <span aria-hidden style={{ display: "inline-flex", flexDirection: "column", gap: 3 }}>
-        <span style={{ width: 16, height: 2, backgroundColor: AMBER, borderRadius: 1 }} />
-        <span style={{ width: 16, height: 2, backgroundColor: AMBER, borderRadius: 1 }} />
-        <span style={{ width: 16, height: 2, backgroundColor: AMBER, borderRadius: 1 }} />
+        <span style={{ width: 17, height: 2.5, backgroundColor: NAVY, borderRadius: 1 }} />
+        <span style={{ width: 17, height: 2.5, backgroundColor: NAVY, borderRadius: 1 }} />
+        <span style={{ width: 17, height: 2.5, backgroundColor: NAVY, borderRadius: 1 }} />
       </span>
       <span>Menu</span>
     </button>
@@ -13478,7 +13750,33 @@ export default function App() {
     setDeviceView(view);
   };
   const handleSwitchDevice = () => {
-    try { localStorage.removeItem("nm_device_view"); } catch {}
+    // Rick's Aug 14 blocker: Perry's iPad kept auto-logging into
+    // Papa's connection even after Nana (Diane) sent a fresh invite,
+    // because the stale nm_perry_conn cache still pointed at Papa's
+    // connectionId. Switch User previously cleared only nm_device_view
+    // — that let the picker re-appear but the moment Perry re-tapped
+    // "Grandchild", the auto-route effect saw the still-present
+    // nm_perry_conn and jumped her right back into Papa's PIN screen.
+    //
+    // Full wipe: every Perry-side identity artifact gets cleared so
+    // the next flow starts from scratch (invite code entry). Nana-side
+    // session artifacts too so switching between roles doesn't leak
+    // state either direction.
+    try {
+      localStorage.removeItem("nm_device_view");
+      localStorage.removeItem("nm_perry_conn");
+      localStorage.removeItem("nm_authed_child_id");
+      localStorage.removeItem("nm_active_child_id");
+      localStorage.removeItem("nm_session_token");
+      // Also clear the Perry SSE / connection refs so nothing keeps
+      // hitting the old connection endpoint after the switch.
+      perryConnRef.current = null;
+    } catch {}
+    setPerryPinMode(false);
+    setPerryAuthenticated(false);
+    setAuthenticatedChildId(null);
+    setActiveChildIdRaw(null);
+    setConnectionId(null);
     setDeviceView(null);
   };
   // Sign out — Rick: "if nana logouts while session and perry will be
@@ -14864,6 +15162,21 @@ export default function App() {
               if (text) showDefinitionTransient(word, text);
             }
           }
+        } else if (msg.type === "phonics_card") {
+          // Rick's Aug 14: cross-iPad phonics coaching card. Whichever
+          // side tapped Phonics, both see the same OG rule + Nana cue.
+          const p = msg.payload as { word?: string; rule?: string; ruleLabel?: string; nanaCue?: string; perryHint?: string };
+          if (typeof p.word === "string" && typeof p.nanaCue === "string") {
+            setSelPhonicsCard({
+              word: p.word,
+              rule: p.rule ?? "other",
+              ruleLabel: p.ruleLabel ?? "Phonics",
+              nanaCue: p.nanaCue,
+              perryHint: p.perryHint ?? "",
+            });
+            if (selPhonicsTimerRef.current) window.clearTimeout(selPhonicsTimerRef.current);
+            selPhonicsTimerRef.current = window.setTimeout(() => setSelPhonicsCard(null), 12_000);
+          }
         } else if (msg.type === "layout_change") {
           const l = msg.payload?.layout as ReadingLayout | undefined;
           if (l && (READING_LAYOUTS as readonly string[]).includes(l)) {
@@ -15196,6 +15509,21 @@ export default function App() {
               const text = typeof msg.payload?.text === "string" ? msg.payload.text : "";
               if (text) showDefinitionTransient(word, text);
             }
+          }
+        } else if (msg.type === "phonics_card") {
+          // Rick's Aug 14: cross-iPad phonics coaching card. Whichever
+          // side tapped Phonics, both see the same OG rule + Nana cue.
+          const p = msg.payload as { word?: string; rule?: string; ruleLabel?: string; nanaCue?: string; perryHint?: string };
+          if (typeof p.word === "string" && typeof p.nanaCue === "string") {
+            setSelPhonicsCard({
+              word: p.word,
+              rule: p.rule ?? "other",
+              ruleLabel: p.ruleLabel ?? "Phonics",
+              nanaCue: p.nanaCue,
+              perryHint: p.perryHint ?? "",
+            });
+            if (selPhonicsTimerRef.current) window.clearTimeout(selPhonicsTimerRef.current);
+            selPhonicsTimerRef.current = window.setTimeout(() => setSelPhonicsCard(null), 12_000);
           }
         } else if (msg.type === "layout_change") {
           const l = msg.payload?.layout as ReadingLayout | undefined;
@@ -16056,6 +16384,115 @@ export default function App() {
     if (wordDefinitionTimerRef.current) window.clearTimeout(wordDefinitionTimerRef.current);
     setWordDefinition(null);
   }, []);
+
+  // ── SelectionActionMenu handlers (Rick's Aug 14 rewrite #7-11) ──
+  // Wired to iOS native text selection via SelectionActionMenu.
+  // Pronunciation = audio + IPA from Free Dictionary via server proxy.
+  // Phonics       = Orton-Gillingham rule (static engine, gpt-4o-mini
+  //                 fallback) served by /api/ai/phonics.
+  // Save          = persist to learned_words with enrichment
+  //                 (definition, IPA, audio URL, phonics rule).
+  const [selPronState, setSelPronState] = useState<{ word: string; status: "loading" | "done" | "err" } | null>(null);
+  const [selPhoState,  setSelPhoState]  = useState<{ word: string; status: "loading" | "done" | "err" } | null>(null);
+  const [selSaveState, setSelSaveState] = useState<{ word: string; status: "saving" | "saved" | "already" } | null>(null);
+  const [selPhonicsCard, setSelPhonicsCard] = useState<{ word: string; rule: string; ruleLabel: string; nanaCue: string; perryHint: string } | null>(null);
+  const selPronCacheRef = useRef<Map<string, { audioUrl: string | null; ipa: string | null; definition: string | null }>>(new Map());
+  const selPhoCacheRef  = useRef<Map<string, { rule: string; ruleLabel: string; nanaCue: string; perryHint: string }>>(new Map());
+  const selPhonicsTimerRef = useRef<number | null>(null);
+  const selSaveTimerRef    = useRef<number | null>(null);
+
+  const fetchDict = useCallback(async (word: string): Promise<{ audioUrl: string | null; ipa: string | null; definition: string | null } | null> => {
+    const cached = selPronCacheRef.current.get(word.toLowerCase());
+    if (cached) return cached;
+    try {
+      // Server proxy caches too and avoids CORS in Capacitor WebView.
+      const res = await fetch(`/api/dictionary/${encodeURIComponent(word)}`);
+      if (!res.ok) return null;
+      const data = await res.json() as { audioUrl?: string | null; ipa?: string | null; definition?: string | null };
+      const result = { audioUrl: data.audioUrl ?? null, ipa: data.ipa ?? null, definition: data.definition ?? null };
+      selPronCacheRef.current.set(word.toLowerCase(), result);
+      return result;
+    } catch { return null; }
+  }, []);
+
+  const playAudio = useCallback((url: string) => {
+    try { new Audio(url).play(); } catch {}
+  }, []);
+
+  const handleSelectionPronounce = useCallback(async (word: string) => {
+    setSelPronState({ word, status: "loading" });
+    const dict = await fetchDict(word);
+    if (dict?.audioUrl) {
+      playAudio(dict.audioUrl);
+    } else {
+      // Fallback: local TTS.
+      try {
+        if ("speechSynthesis" in window) {
+          window.speechSynthesis.cancel();
+          const u = new SpeechSynthesisUtterance(word);
+          u.rate = 0.85; u.lang = "en-US";
+          window.speechSynthesis.speak(u);
+        }
+      } catch {}
+    }
+    setSelPronState({ word, status: dict ? "done" : "err" });
+    if (connectionId) api.sessions.publishEvent(connectionId, "word_action", { action: "say", word }).catch(() => {});
+  }, [fetchDict, playAudio, connectionId]);
+
+  const handleSelectionPhonics = useCallback(async (word: string) => {
+    const cached = selPhoCacheRef.current.get(word.toLowerCase());
+    if (cached) {
+      setSelPhonicsCard({ word, ...cached });
+      return;
+    }
+    setSelPhoState({ word, status: "loading" });
+    try {
+      const res = await fetch(`/api/ai/phonics`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ word }),
+      });
+      if (!res.ok) throw new Error("phonics fetch failed");
+      const data = await res.json() as { rule: string; ruleLabel: string; nanaCue: string; perryHint: string };
+      selPhoCacheRef.current.set(word.toLowerCase(), data);
+      setSelPhonicsCard({ word, ...data });
+      setSelPhoState({ word, status: "done" });
+      // Broadcast so both iPads see the same coaching card.
+      if (connectionId) api.sessions.publishEvent(connectionId, "phonics_card", { word, ...data }).catch(() => {});
+    } catch {
+      setSelPhoState({ word, status: "err" });
+    }
+    if (selPhonicsTimerRef.current) window.clearTimeout(selPhonicsTimerRef.current);
+    selPhonicsTimerRef.current = window.setTimeout(() => setSelPhonicsCard(null), 12_000);
+  }, [connectionId]);
+
+  const handleSelectionSave = useCallback(async (word: string, sentence: string) => {
+    if (!connectionId) return;
+    if (selSaveTimerRef.current) window.clearTimeout(selSaveTimerRef.current);
+    setSelSaveState({ word, status: "saving" });
+    // Enrich with dictionary + phonics if we have them cached.
+    const dict = selPronCacheRef.current.get(word.toLowerCase());
+    const pho  = selPhoCacheRef.current.get(word.toLowerCase());
+    try {
+      const res = await api.learnedWords.save(connectionId, {
+        word,
+        sentence,
+        bookId: selectedBookId || undefined,
+        page: nanaPageRef.current,
+        childId: activeChildId || undefined,
+        definition:   dict?.definition ?? undefined,
+        ipa:          dict?.ipa ?? undefined,
+        audioUrl:     dict?.audioUrl ?? undefined,
+        phonicsRule:      pho?.rule ?? undefined,
+        phonicsRuleLabel: pho?.ruleLabel ?? undefined,
+        phonicsCue:       pho?.nanaCue ?? undefined,
+      });
+      setSelSaveState({ word, status: res.created ? "saved" : "already" });
+    } catch {
+      setSelSaveState({ word, status: "saved" });
+    }
+    selSaveTimerRef.current = window.setTimeout(() => setSelSaveState(null), 2500);
+  }, [connectionId, selectedBookId, activeChildId]);
 
   // Reading theme — synced both sides. Nana cycles day → sepia → night, the
   // page colors update on Perry's screen at the same time. Persists per-user
@@ -17533,6 +17970,63 @@ export default function App() {
       {perryJustLoggedIn && <PerryWelcomeOverlay name={(perryConnRef.current?.childName ?? "").trim()} />}
       {sessionBeginShown && <SessionBeginOverlay />}
       {partnerLeftShown && <PartnerLeftOverlay nanaName={nanaDisplayName.trim()} />}
+      {/* Phonics coaching card — Rick's Aug 14. Fires when either side
+          taps the Phonics action in SelectionActionMenu. Both iPads
+          receive via SSE broadcast (phonics_card event) so Nana can
+          read the coaching cue aloud while Perry sees the same rule. */}
+      {selPhonicsCard && (
+        <div
+          role="dialog"
+          aria-live="polite"
+          style={{
+            position: "fixed",
+            bottom: 24, left: "50%", transform: "translateX(-50%)",
+            zIndex: 120,
+            width: "min(560px, calc(100vw - 32px))",
+            background: "linear-gradient(180deg, #F7F0E3 0%, #f2e4c4 100%)",
+            color: "#2D1A08",
+            border: "2px solid #C9922A",
+            borderRadius: 16,
+            padding: "16px 20px 18px",
+            boxShadow: "0 20px 44px rgba(0,0,0,0.55)",
+            animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+              <span style={{
+                background: "#C9922A", color: "#F7F0E3",
+                padding: "3px 10px", borderRadius: 999,
+                fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800,
+                letterSpacing: "0.14em", textTransform: "uppercase",
+              }}>{selPhonicsCard.ruleLabel}</span>
+              <span style={{ color: "#5C3A1E", fontFamily: "Playfair Display, serif", fontSize: 22, fontWeight: 700 }}>
+                {selPhonicsCard.word}
+              </span>
+            </div>
+            <button
+              onClick={() => setSelPhonicsCard(null)}
+              aria-label="Close phonics card"
+              style={{
+                width: 30, height: 30, borderRadius: 999,
+                background: "rgba(92,58,30,0.10)", color: "#5C3A1E",
+                border: "1px solid rgba(92,58,30,0.30)",
+                cursor: "pointer", padding: 0,
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                fontSize: 15, fontWeight: 700,
+              }}
+            >×</button>
+          </div>
+          <div style={{ fontFamily: "Merriweather, serif", fontSize: 15, lineHeight: 1.55, color: "#2D1A08", marginBottom: selPhonicsCard.perryHint ? 8 : 0 }}>
+            {selPhonicsCard.nanaCue}
+          </div>
+          {selPhonicsCard.perryHint && (
+            <div style={{ fontFamily: "DM Sans, sans-serif", fontSize: 12, color: "#5C3A1E", fontStyle: "italic", opacity: 0.85 }}>
+              For {(dashboardPerryName || "Perry")}: {selPhonicsCard.perryHint}
+            </div>
+          )}
+        </div>
+      )}
       {/* Perry-only toggle-flip toast — see Rick's Build 28 #7. */}
       {childPromptsToast && (
         <div
@@ -17664,7 +18158,14 @@ export default function App() {
         // side of the cream book area on Rick's iPads. The 98vw lower bound
         // keeps a thin breathing edge so the frame's border doesn't kiss
         // the device bezel. Demo "both" cap unchanged.
-        maxWidth: deviceView === "both" ? "min(98vw, 1620px)" : "min(98vw, 1180px)",
+        // Rick's Aug 14 feedback: book takes only ~40% of iPad screen
+        // with big navy voids on both sides — huge waste on chapter
+        // books. The old 1180px single-device cap left ~180px of
+        // navy gutter on either side of iPad Pro 12.9" landscape
+        // (1366px wide) and ~60px on the 11" (1194px). Raised to
+        // 100vw so the frame claims every pixel of the device
+        // regardless of iPad model.
+        maxWidth: deviceView === "both" ? "min(98vw, 1620px)" : "100vw",
         flex: 1,
         minHeight: 0,
         alignItems: "stretch",
@@ -17809,6 +18310,12 @@ export default function App() {
           wordDefinition={wordDefinition}
           wordSaveState={wordSaveState}
           onWordActionsClose={handleWordActionsClose}
+          onSelectionPronounce={handleSelectionPronounce}
+          onSelectionPhonics={handleSelectionPhonics}
+          onSelectionSave={handleSelectionSave}
+          selectionPronunciationState={selPronState}
+          selectionPhonicsState={selPhoState}
+          selectionSaveState={selSaveState}
           readingTheme={readingTheme}
           onThemeChange={handleThemeChange}
           readingLayout={readingLayout}
@@ -17962,6 +18469,12 @@ export default function App() {
           wordDefinition={wordDefinition}
           wordSaveState={wordSaveState}
           onWordActionsClose={handleWordActionsClose}
+          onSelectionPronounce={handleSelectionPronounce}
+          onSelectionPhonics={handleSelectionPhonics}
+          onSelectionSave={handleSelectionSave}
+          selectionPronunciationState={selPronState}
+          selectionPhonicsState={selPhoState}
+          selectionSaveState={selSaveState}
           readingTheme={readingTheme}
           readingLayout={readingLayout}
           pageMode={pageMode}
