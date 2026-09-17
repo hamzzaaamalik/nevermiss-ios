@@ -8017,14 +8017,98 @@ function SettingsToggle({ label, sub, value, onChange }: { label: string; sub?: 
 
 /* ─── Real Book Requests page ────────────────────────────── */
 
-function BookRequestsView({ onBack, childName, nanaName }: { onBack: () => void; childName: string; nanaName: string }) {
+/**
+ * BookRequestsView — Rick's Sep 2026 library-search family flow.
+ * Nana sees real requests from her family, taps "Add to Library" to
+ * flag a request as green-lit (server marks status='approved', admin
+ * sees it in the approved queue and ingests via Library Search), or
+ * "Not now" to leave it pending for later. Also has a "Send a new
+ * request" button that opens the BookRequestModal so Nana can add her
+ * own asks.
+ *
+ * Was previously a hardcoded mockup with 3 static sample entries and
+ * no server calls — the visual was there, the wiring wasn't. Now
+ * loads real data from /api/sessions/:connId/book-requests and calls
+ * the family-scoped approve/reject endpoints.
+ */
+function BookRequestsView({
+  onBack,
+  childName,
+  nanaName,
+  connectionId,
+  onSubmitNew,
+}: {
+  onBack: () => void;
+  childName: string;
+  nanaName: string;
+  connectionId: string | null;
+  onSubmitNew?: () => void;
+}) {
   const childLabel = childName || "Your grandchild";
-  const nanaLabel = nanaName || "Nana";
-  const sample = [
-    { from: childLabel, title: "Where the Wild Things Are", note: "I want to see the monsters!", color: "#f7c95d" },
-    { from: childLabel, title: "Bluey - The Pool", note: "Daddy's favorite", color: "#60a5fa" },
-    { from: `${childLabel}'s mom`, title: "The Very Hungry Caterpillar", note: "Old favorite — hers too as a kid 💛", color: "#a78bfa" },
-  ];
+  const [requests, setRequests] = useState<Array<{
+    id: string;
+    requestedBy: "nana" | "child";
+    requestedTitle: string;
+    requestedAuthor: string | null;
+    sourceUrl: string | null;
+    status: "pending" | "approved" | "rejected" | "fulfilled";
+    notes: string | null;
+    createdAt: string;
+  }> | null>(null);
+  const [err, setErr] = useState("");
+  const [actingId, setActingId] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    if (!connectionId) { setRequests([]); return; }
+    api.bookRequests.list(connectionId)
+      .then(r => setRequests(r))
+      .catch((e: unknown) => setErr(e instanceof Error ? e.message : "Couldn't load requests."));
+  }, [connectionId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const showToast = (msg: string) => {
+    setToast(msg);
+    window.setTimeout(() => setToast(null), 2600);
+  };
+
+  const approve = async (id: string) => {
+    if (!connectionId) return;
+    setActingId(id);
+    try {
+      await api.bookRequests.approve(connectionId, id);
+      showToast("Added — we'll notify you when it's in the library.");
+      load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Approve failed.");
+    } finally { setActingId(null); }
+  };
+
+  const reject = async (id: string) => {
+    if (!connectionId) return;
+    setActingId(id);
+    try {
+      await api.bookRequests.reject(connectionId, id);
+      showToast("Request dismissed.");
+      load();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Dismiss failed.");
+    } finally { setActingId(null); }
+  };
+
+  // Only show pending + approved in the primary list; fulfilled and
+  // rejected hide (fulfilled book already in library; rejected is done).
+  const visible = (requests ?? []).filter(r => r.status === "pending" || r.status === "approved");
+  const newCount = visible.filter(r => r.status === "pending").length;
+
+  const requestorLabel = (r: { requestedBy: "nana" | "child" }) => {
+    if (r.requestedBy === "child") return childLabel;
+    return nanaName || "Nana";
+  };
+  // Rotating accent colors so each card has visual variety.
+  const accents = ["#f7c95d", "#60a5fa", "#a78bfa", "#86efac", "#fb923c"];
+
   return (
     <div style={{
       flex: 1, display: "flex", flexDirection: "column",
@@ -8042,74 +8126,185 @@ function BookRequestsView({ onBack, childName, nanaName }: { onBack: () => void;
           <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: "clamp(18px, 2.4vw, 22px)", fontWeight: 700, lineHeight: 1.1 }}>Book Requests</div>
           <div style={{ color: "rgba(247,240,227,0.45)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2 }}>From {childLabel} & family</div>
         </div>
-        <span style={{
-          backgroundColor: "rgba(248,113,113,0.16)", border: "1px solid rgba(248,113,113,0.45)",
-          borderRadius: 999, padding: "4px 10px", color: "#fca5a5",
-          fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: "0.1em",
-          whiteSpace: "nowrap",
-        }}>{sample.length} NEW</span>
+        {onSubmitNew && (
+          <button
+            onClick={onSubmitNew}
+            style={{
+              background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 100%)",
+              color: NAVY, border: "none",
+              borderRadius: 999, padding: "8px 14px",
+              fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 800,
+              letterSpacing: "0.02em", cursor: "pointer",
+              display: "inline-flex", alignItems: "center", gap: 6,
+              boxShadow: "0 4px 12px rgba(201,146,42,0.35)",
+              touchAction: "manipulation",
+            }}
+          >
+            <span style={{ fontSize: 14 }}>＋</span>
+            <span>New request</span>
+          </button>
+        )}
+        {newCount > 0 && (
+          <span style={{
+            backgroundColor: "rgba(248,113,113,0.16)", border: "1px solid rgba(248,113,113,0.45)",
+            borderRadius: 999, padding: "4px 10px", color: "#fca5a5",
+            fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: "0.1em",
+            whiteSpace: "nowrap",
+          }}>{newCount} NEW</span>
+        )}
       </div>
 
-      <div className="bookreq-grid" style={{ padding: "12px 16px 18px", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 10 }}>
-        <style>{`
-          @media (max-width: 600px) { .bookreq-grid { grid-template-columns: 1fr !important; padding: 10px 14px 14px !important; } }
-          .bookreq-hint { grid-column: 1 / -1; }
-        `}</style>
-        {sample.map((req, i) => (
-          <div key={i} style={{
-            backgroundImage: `linear-gradient(135deg, color-mix(in srgb, ${req.color} 12%, rgba(255,255,255,0.04)), rgba(255,255,255,0.03) 70%)`,
-            border: `1px solid color-mix(in srgb, ${req.color} 35%, rgba(255,255,255,0.10))`,
-            borderRadius: 14, padding: "12px 14px",
-            display: "flex", gap: 10, alignItems: "flex-start",
-            minHeight: 0,
+      {err && (
+        <div style={{ margin: "10px 16px 0", padding: "8px 12px", borderRadius: 10, background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.35)", color: "#fca5a5", fontFamily: "DM Sans, sans-serif", fontSize: 12 }}>
+          {err}
+        </div>
+      )}
+
+      {requests === null ? (
+        <div style={{ padding: "40px 16px", textAlign: "center", color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: 13 }}>
+          Loading requests…
+        </div>
+      ) : visible.length === 0 ? (
+        <div style={{ padding: "40px 20px", textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
+          <div style={{ fontSize: 48, opacity: 0.7 }}>📬</div>
+          <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 18, fontWeight: 700 }}>No requests yet</div>
+          <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 13, lineHeight: 1.55, maxWidth: 420 }}>
+            When {childLabel} or another family member asks for a book that's not in the library, it'll appear here for you to approve.
+          </div>
+          {onSubmitNew && (
+            <button
+              onClick={onSubmitNew}
+              style={{
+                background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 100%)",
+                color: NAVY, border: "none", borderRadius: 999,
+                padding: "10px 20px", marginTop: 8,
+                fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 800,
+                cursor: "pointer", touchAction: "manipulation",
+                boxShadow: "0 6px 16px rgba(201,146,42,0.35)",
+              }}
+            >
+              + Request a book yourself
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="bookreq-grid" style={{ padding: "12px 16px 18px", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 10 }}>
+          <style>{`
+            @media (max-width: 600px) { .bookreq-grid { grid-template-columns: 1fr !important; padding: 10px 14px 14px !important; } }
+            .bookreq-hint { grid-column: 1 / -1; }
+          `}</style>
+          {visible.map((req, i) => {
+            const accent = accents[i % accents.length];
+            const isApproved = req.status === "approved";
+            const busy = actingId === req.id;
+            return (
+              <div key={req.id} style={{
+                backgroundImage: `linear-gradient(135deg, color-mix(in srgb, ${accent} 12%, rgba(255,255,255,0.04)), rgba(255,255,255,0.03) 70%)`,
+                border: `1px solid color-mix(in srgb, ${accent} 35%, rgba(255,255,255,0.10))`,
+                borderRadius: 14, padding: "12px 14px",
+                display: "flex", gap: 10, alignItems: "flex-start",
+                minHeight: 0,
+              }}>
+                <div style={{
+                  width: 44, height: 44, borderRadius: 12, flexShrink: 0,
+                  backgroundColor: `color-mix(in srgb, ${accent} 22%, transparent)`,
+                  border: `1px solid color-mix(in srgb, ${accent} 50%, transparent)`,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 22,
+                }}>📚</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800, letterSpacing: "0.14em" }}>
+                      FROM {requestorLabel(req).toUpperCase()}
+                    </span>
+                    {isApproved && (
+                      <span style={{
+                        backgroundColor: "rgba(134,239,172,0.18)", border: "1px solid rgba(134,239,172,0.55)",
+                        color: "#86efac", borderRadius: 999,
+                        padding: "1px 8px", fontSize: 9, fontWeight: 800, letterSpacing: "0.10em",
+                      }}>✓ APPROVED</span>
+                    )}
+                  </div>
+                  <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 16, fontWeight: 700, marginTop: 2 }}>{req.requestedTitle}</div>
+                  {req.requestedAuthor && (
+                    <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 1 }}>{req.requestedAuthor}</div>
+                  )}
+                  {req.notes && (
+                    <div style={{ color: "rgba(247,240,227,0.65)", fontFamily: "Merriweather, serif", fontSize: 12, fontStyle: "italic", marginTop: 4 }}>"{req.notes}"</div>
+                  )}
+                  <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                    {req.status === "pending" && (
+                      <>
+                        <button
+                          onClick={() => approve(req.id)}
+                          disabled={busy}
+                          style={{
+                            background: `linear-gradient(135deg, ${accent}, color-mix(in srgb, ${accent} 70%, #d97706))`,
+                            color: NAVY, border: "none", borderRadius: 999,
+                            padding: "8px 14px", fontFamily: "DM Sans, sans-serif",
+                            fontSize: 11, fontWeight: 800, cursor: busy ? "wait" : "pointer",
+                            opacity: busy ? 0.6 : 1, touchAction: "manipulation",
+                          }}
+                        >
+                          {busy ? "Sending…" : "Add to Library"}
+                        </button>
+                        <button
+                          onClick={() => reject(req.id)}
+                          disabled={busy}
+                          style={{
+                            background: "transparent", color: "rgba(247,240,227,0.6)",
+                            border: "1px solid rgba(255,255,255,0.18)", borderRadius: 999,
+                            padding: "8px 14px", fontFamily: "DM Sans, sans-serif",
+                            fontSize: 11, fontWeight: 700, cursor: busy ? "wait" : "pointer",
+                            opacity: busy ? 0.6 : 1, touchAction: "manipulation",
+                          }}
+                        >
+                          Not now
+                        </button>
+                      </>
+                    )}
+                    {isApproved && (
+                      <span style={{ color: "rgba(134,239,172,0.85)", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontStyle: "italic" }}>
+                        Waiting for the book to be added — we'll notify you.
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+
+          <div className="bookreq-hint" style={{
+            marginTop: 4, padding: "12px 14px", borderRadius: 14,
+            backgroundColor: "rgba(96,165,250,0.08)", border: "1px dashed rgba(96,165,250,0.4)",
+            display: "flex", gap: 10, alignItems: "center",
           }}>
-            <div style={{
-              width: 44, height: 44, borderRadius: 12, flexShrink: 0,
-              backgroundColor: `color-mix(in srgb, ${req.color} 22%, transparent)`,
-              border: `1px solid color-mix(in srgb, ${req.color} 50%, transparent)`,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 22,
-            }}>📚</div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800, letterSpacing: "0.14em" }}>FROM {req.from.toUpperCase()}</div>
-              <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 16, fontWeight: 700, marginTop: 2 }}>{req.title}</div>
-              <div style={{ color: "rgba(247,240,227,0.65)", fontFamily: "Merriweather, serif", fontSize: 12, fontStyle: "italic", marginTop: 4 }}>"{req.note}"</div>
-              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                <button style={{
-                  background: `linear-gradient(135deg, ${req.color}, color-mix(in srgb, ${req.color} 70%, #d97706))`,
-                  color: NAVY, border: "none", borderRadius: 999,
-                  padding: "8px 14px", fontFamily: "DM Sans, sans-serif",
-                  fontSize: 11, fontWeight: 800, cursor: "pointer",
-                }}>Add to Library</button>
-                <button style={{
-                  background: "transparent", color: "rgba(247,240,227,0.6)",
-                  border: "1px solid rgba(255,255,255,0.18)", borderRadius: 999,
-                  padding: "8px 14px", fontFamily: "DM Sans, sans-serif",
-                  fontSize: 11, fontWeight: 700, cursor: "pointer",
-                }}>Save for later</button>
+            <span style={{ fontSize: 22 }}>💡</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ color: "#cfe3ff", fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700 }}>How family sends requests</div>
+              <div style={{ color: "rgba(247,240,227,0.6)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2 }}>
+                Tap "+ New request" up top to add one yourself. Family-invite links for other adults are coming next.
               </div>
             </div>
           </div>
-        ))}
-
-        <div className="bookreq-hint" style={{
-          marginTop: 4, padding: "12px 14px", borderRadius: 14,
-          backgroundColor: "rgba(96,165,250,0.08)", border: "1px dashed rgba(96,165,250,0.4)",
-          display: "flex", gap: 10, alignItems: "center",
-        }}>
-          <span style={{ fontSize: 22 }}>💡</span>
-          <div style={{ flex: 1 }}>
-            <div style={{ color: "#cfe3ff", fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700 }}>Tell {childLabel}'s family how to send requests</div>
-            <div style={{ color: "rgba(247,240,227,0.6)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2 }}>They tap 📚 in their app and send a wish — you'll see it here.</div>
-          </div>
-          <button style={{
-            background: "rgba(96,165,250,0.18)", border: "1px solid rgba(96,165,250,0.55)",
-            borderRadius: 999, padding: "8px 14px", color: "#cfe3ff",
-            fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 800, cursor: "pointer",
-            whiteSpace: "nowrap",
-          }}>Share invite</button>
         </div>
-      </div>
+      )}
+
+      {toast && (
+        <div style={{
+          position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)",
+          zIndex: 120,
+          background: "linear-gradient(135deg, rgba(34,197,94,0.96), rgba(21,128,61,0.96))",
+          color: "#f0fdf4",
+          fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700,
+          padding: "10px 20px", borderRadius: 999,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(134,239,172,0.35)",
+          maxWidth: "calc(100% - 40px)",
+          animation: "phase-card-up 0.24s cubic-bezier(0.22,1,0.36,1)",
+        }}>
+          ✓ {toast}
+        </div>
+      )}
     </div>
   );
 }
@@ -11723,6 +11918,8 @@ function DeviceFrame({
             onBack={() => onGoHome?.()}
             childName={childName}
             nanaName={nanaName}
+            connectionId={vaultConnectionId ?? null}
+            onSubmitNew={onOpenBookRequest}
           />
         ) : isSettings ? (
           <SettingsView

@@ -364,6 +364,22 @@ export const api = {
         status: string;
         requestedTitle: string;
       } }>("POST", `/sessions/${connectionId}/book-requests`, body),
+    /** Family-scoped approve (Nana taps "Add to Library" — marks the
+     *  request status='approved' so admin sees it as green-lit; the
+     *  actual book publish still requires admin ingest). */
+    approve: (connectionId: string, requestId: string) =>
+      req<{ request: {
+        id: string;
+        status: string;
+        requestedTitle: string;
+      } }>("POST", `/sessions/${connectionId}/book-requests/${requestId}/approve`),
+    /** Family-scoped reject (Nana taps a "not interested" action). */
+    reject: (connectionId: string, requestId: string, notes?: string) =>
+      req<{ request: {
+        id: string;
+        status: string;
+        requestedTitle: string;
+      } }>("POST", `/sessions/${connectionId}/book-requests/${requestId}/reject`, notes ? { notes } : undefined),
   },
 
   learnedWords: {
