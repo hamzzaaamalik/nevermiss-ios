@@ -129,6 +129,20 @@ function formatForOutlook(date: Date): string {
   return `https://outlook.live.com/calendar/0/deeplink/compose?subject=NeverMiss+Reading+Session&startdt=${date.toISOString()}&enddt=${end.toISOString()}&body=Time+to+read+together+on+NeverMiss!`;
 }
 
+// Rick's Build 30 review #4: Apple Calendar was silently dropping the
+// blob-URL .ics hand-off on iOS Capacitor. Root cause is that Capacitor
+// WebView doesn't route blob:// download-clicks to the system share
+// sheet the way mobile Safari does. Fix: detect Capacitor and use a
+// data: URL instead — iOS intercepts data:text/calendar and offers the
+// native Calendar picker (Apple + any third-party calendar apps
+// installed). Web path unchanged: blob + click still works in browsers.
+function isNativeIOSApp(): boolean {
+  try {
+    const cap = typeof window !== "undefined" ? (window as unknown as { Capacitor?: { isNativePlatform?: () => boolean } }).Capacitor : undefined;
+    return !!(cap && cap.isNativePlatform && cap.isNativePlatform());
+  } catch { return false; }
+}
+
 function downloadICS(date: Date): void {
   const pad = (n: number) => String(n).padStart(2, "0");
   const fmt = (d: Date) => `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}00`;
@@ -140,11 +154,38 @@ function downloadICS(date: Date): void {
     "DESCRIPTION:Time to read together on NeverMiss!",
     "END:VEVENT", "END:VCALENDAR"
   ].join("\n");
+  if (isNativeIOSApp()) {
+    // iOS WebView: data:text/calendar in a new-tab window.open hands off
+    // to iOS's Calendar picker without navigating away from the app.
+    // window.location.href would take the whole app off-screen; anchor
+    // click+download attribute is ignored in Capacitor WebView.
+    const dataUrl = `data:text/calendar;charset=utf-8,${encodeURIComponent(ics)}`;
+    const w = window.open(dataUrl, "_blank");
+    if (!w) {
+      // Fallback if popup blocked: navigate current window (last resort).
+      window.location.href = dataUrl;
+    }
+    return;
+  }
   const blob = new Blob([ics], { type: "text/calendar" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url; a.download = "nevermiss-reading.ics"; a.click();
   URL.revokeObjectURL(url);
+}
+
+// Wraps a URL open so on iOS Capacitor we fall back to downloadICS —
+// google.com/outlook.live.com in the WebView present their web setup
+// flow instead of opening the installed calendar app (Rick's Build 30
+// review #4 regression). On iOS we prefer the data:text/calendar path
+// which surfaces the native Calendar picker (works with any installed
+// calendar app, including Google/Outlook if the user has them).
+function openCalendarUrl(url: string, fallbackDate: Date): void {
+  if (isNativeIOSApp()) {
+    downloadICS(fallbackDate);
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
 }
 
 const showAndTellPrompts = [
@@ -1420,17 +1461,32 @@ function splitIntoSyllables(word: string): string[] {
  */
 function SelectionActionMenu({
   bookAreaRef,
+  isPerry = false,
   onPronounce,
   onPhonics,
   onSave,
+  onShareSelection,
+  remoteSelection = null,
   pronunciationState,
   phonicsState,
   saveState,
 }: {
   bookAreaRef: React.RefObject<HTMLDivElement | null>;
+  /** Rick's Build 30 review #3: on Perry's iPad the menu never renders.
+   *  Perry still captures + broadcasts her selection so Nana sees it, but
+   *  Perry sees NO popup and NO coaching card — Nana teaches through the
+   *  lesson herself. */
+  isPerry?: boolean;
   onPronounce: (word: string) => void;
   onPhonics: (word: string) => void;
   onSave: (word: string, sentence: string) => void;
+  /** Perry-only: fires with the selected word + sentence so App can
+   *  publish selection_broadcast to Nana. No-op on Nana side. */
+  onShareSelection?: (word: string, sentence: string) => void;
+  /** Nana-only: a word Perry just highlighted on her iPad. If set and no
+   *  local selection exists, the menu appears anchored to the matching
+   *  span on Nana's page so she can tap Phonics/Pronunciation from it. */
+  remoteSelection?: { word: string; sentence: string; ts: number } | null;
   pronunciationState: { word: string; status: "loading" | "done" | "err" } | null;
   phonicsState: { word: string; status: "loading" | "done" | "err" } | null;
   saveState: { word: string; status: "saving" | "saved" | "already" } | null;
@@ -1440,48 +1496,84 @@ function SelectionActionMenu({
     left: number;
     word: string;
     sentence: string;
+    remote?: boolean;
   } | null>(null);
 
   useEffect(() => {
     const onChange = () => {
       const sel = window.getSelection();
-      if (!sel || sel.isCollapsed || sel.rangeCount === 0) { setState(null); return; }
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) { if (!isPerry) setState(null); return; }
       const range = sel.getRangeAt(0);
       const bookArea = bookAreaRef.current;
-      if (!bookArea) { setState(null); return; }
+      if (!bookArea) { if (!isPerry) setState(null); return; }
       // Only respond to selections inside the book area.
-      if (!bookArea.contains(range.commonAncestorContainer)) { setState(null); return; }
+      if (!bookArea.contains(range.commonAncestorContainer)) { if (!isPerry) setState(null); return; }
       const raw = sel.toString().trim();
-      if (!raw || raw.length > 60) { setState(null); return; }
+      if (!raw || raw.length > 60) { if (!isPerry) setState(null); return; }
       // Normalize: single word (strip surrounding punctuation, ignore
       // multi-word selections for now — Pronunciation and Phonics both
       // key on individual words).
       const word = raw.split(/\s+/)[0].replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
-      if (!word) { setState(null); return; }
+      if (!word) { if (!isPerry) setState(null); return; }
       // Sentence context: the paragraph containing the selection anchor.
       const anchor = range.commonAncestorContainer as Node;
       const paraEl = (anchor.nodeType === 1 ? anchor as Element : anchor.parentElement)?.closest?.("p") as HTMLElement | null;
       const sentence = (paraEl?.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 400);
+
+      // Perry side: broadcast to Nana + suppress local popup entirely.
+      // Rick's Build 30 review: "Perry really should not see any of the
+      // prompts but she should be able to highlight."
+      if (isPerry) {
+        if (onShareSelection) onShareSelection(word, sentence);
+        return;
+      }
+
       // Position: prefer BELOW the selection so we don't collide with
       // iOS's native Copy / Look Up bar which sits ABOVE the selection.
-      // Flip above if there's no room below.
+      // Rick's Build 30 review #7: never flip above (would collide with
+      // iOS menu). If not enough room below, dock to book bottom.
       const rect = range.getBoundingClientRect();
       const bookRect = bookArea.getBoundingClientRect();
       const menuW = 300;
-      const menuH = 58;
+      const menuH = 68;
       const rawLeft = rect.left + rect.width / 2 - bookRect.left - menuW / 2;
       const clampedLeft = Math.max(8, Math.min(bookArea.clientWidth - menuW - 8, rawLeft));
       const spaceBelow = bookArea.clientHeight - (rect.bottom - bookRect.top);
-      const preferBelow = spaceBelow >= menuH + 12;
-      const top = preferBelow
-        ? (rect.bottom - bookRect.top + 8)
-        : Math.max(4, rect.top - bookRect.top - menuH - 8);
+      const top = spaceBelow >= menuH + 16
+        ? (rect.bottom - bookRect.top + 10)
+        : Math.max(4, bookArea.clientHeight - menuH - 10);
       setState({ top, left: clampedLeft, word, sentence });
     };
     document.addEventListener("selectionchange", onChange);
     return () => document.removeEventListener("selectionchange", onChange);
-  }, [bookAreaRef]);
+  }, [bookAreaRef, isPerry, onShareSelection]);
 
+  // Nana-only: when Perry broadcasts a selection, anchor the menu to
+  // the matching word on Nana's page. Finds the first [data-w] span
+  // whose lowercased text starts with the shared word.
+  useEffect(() => {
+    if (isPerry || !remoteSelection) return;
+    const bookArea = bookAreaRef.current;
+    if (!bookArea) return;
+    const target = remoteSelection.word.toLowerCase();
+    const spans = Array.from(bookArea.querySelectorAll<HTMLElement>("[data-w]"));
+    const match = spans.find(s => (s.textContent ?? "").trim().toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "") === target);
+    if (!match) return;
+    const bookRect = bookArea.getBoundingClientRect();
+    const wordRect = match.getBoundingClientRect();
+    const menuW = 300;
+    const menuH = 68;
+    const rawLeft = wordRect.left + wordRect.width / 2 - bookRect.left - menuW / 2;
+    const clampedLeft = Math.max(8, Math.min(bookArea.clientWidth - menuW - 8, rawLeft));
+    const spaceBelow = bookArea.clientHeight - (wordRect.bottom - bookRect.top);
+    const top = spaceBelow >= menuH + 16
+      ? (wordRect.bottom - bookRect.top + 10)
+      : Math.max(4, bookArea.clientHeight - menuH - 10);
+    setState({ top, left: clampedLeft, word: remoteSelection.word, sentence: remoteSelection.sentence, remote: true });
+  }, [remoteSelection, isPerry, bookAreaRef]);
+
+  // Perry never renders the popup — she still broadcasts via onShareSelection.
+  if (isPerry) return null;
   if (!state) return null;
 
   const btn = (icon: string, label: string, onClick: () => void, isBusy: boolean) => (
@@ -1524,17 +1616,31 @@ function SelectionActionMenu({
         width: 300,
         zIndex: 60,
         display: "flex",
+        flexDirection: "column",
         padding: "4px 6px",
-        background: "linear-gradient(180deg, rgba(11,23,46,0.98), rgba(11,23,46,0.94))",
-        border: "1px solid rgba(247,201,93,0.55)",
+        background: state.remote
+          ? "linear-gradient(180deg, rgba(34,58,110,0.98), rgba(11,23,46,0.96))"
+          : "linear-gradient(180deg, rgba(11,23,46,0.98), rgba(11,23,46,0.94))",
+        border: `1px solid ${state.remote ? "rgba(134,239,172,0.60)" : "rgba(247,201,93,0.55)"}`,
         borderRadius: 12,
         boxShadow: "0 12px 30px rgba(0,0,0,0.55)",
         animation: "phase-card-up 0.20s cubic-bezier(0.22,1,0.36,1)",
       }}
     >
-      {btn("🔊", "Pronunciation", () => onPronounce(state.word), pronBusy)}
-      {btn("🔤", "Phonics",       () => onPhonics(state.word),   phonBusy)}
-      {btn(saved ? "✓" : "⭐", saved ? "Saved" : "Save", () => onSave(state.word, state.sentence), false)}
+      {state.remote && (
+        <div style={{
+          fontFamily: "DM Sans, sans-serif", fontSize: 9.5, fontWeight: 800,
+          letterSpacing: "0.14em", color: "#86efac",
+          padding: "3px 6px 1px", textAlign: "center",
+        }}>
+          👉 GRANDCHILD HIGHLIGHTED THIS
+        </div>
+      )}
+      <div style={{ display: "flex" }}>
+        {btn("🔊", "Pronunciation", () => onPronounce(state.word), pronBusy)}
+        {btn("🔤", "Phonics",       () => onPhonics(state.word),   phonBusy)}
+        {btn(saved ? "✓" : "⭐", saved ? "Saved" : "Save", () => onSave(state.word, state.sentence), false)}
+      </div>
     </div>
   );
 }
@@ -2444,6 +2550,8 @@ function GreetingView({
   onReady,
   onShowPrompts,
   onGoHome,
+  onPerryPickBook,
+  onPerryAskNana,
 }: {
   isNana: boolean;
   childName: string;
@@ -2458,6 +2566,11 @@ function GreetingView({
   onShowPrompts?: () => void;
   /** NEED 1 — Nana-side escape back to the dashboard. */
   onGoHome?: () => void;
+  /** Rick's Build 30 review #2: Perry-side pills — ask Nana to pick a
+   *  book or grab attention. Each fires a perry_request SSE that
+   *  surfaces a floating banner on Nana's iPad. */
+  onPerryPickBook?: () => void;
+  onPerryAskNana?: () => void;
 }) {
   const otherName = isNana ? (childName || getRoleLabel("child")) : (nanaName || getRoleLabel("nana"));
   const selfName  = isNana ? (nanaName  || getRoleLabel("nana"))  : (childName || getRoleLabel("child"));
@@ -2578,15 +2691,66 @@ function GreetingView({
             </button>
           </>
         ) : (
-          <div style={{
-            color: "rgba(247,240,227,0.7)",
-            fontFamily: "Merriweather, serif",
-            fontSize: 14,
-            fontStyle: "italic",
-            textAlign: "center",
-            lineHeight: 1.4,
-          }}>
-            👋 {otherName} is here — she'll pick a book when you're ready!
+          // Perry side — friendly waiting text + two request pills so
+          // she can nudge Nana. Rick's Build 30 review #2.
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
+            <div style={{
+              color: "rgba(247,240,227,0.7)",
+              fontFamily: "Merriweather, serif",
+              fontSize: 14,
+              fontStyle: "italic",
+              textAlign: "center",
+              lineHeight: 1.4,
+            }}>
+              👋 {otherName} is here — she'll pick a book when you're ready!
+            </div>
+            {(onPerryPickBook || onPerryAskNana) && (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center" }}>
+                {onPerryPickBook && (
+                  <button
+                    onClick={onPerryPickBook}
+                    style={{
+                      background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+                      color: NAVY,
+                      border: "none",
+                      borderRadius: 999,
+                      padding: "10px 20px",
+                      fontFamily: "DM Sans, sans-serif",
+                      fontSize: 13, fontWeight: 800, letterSpacing: "0.03em",
+                      cursor: "pointer",
+                      boxShadow: "0 6px 16px rgba(201,146,42,0.42)",
+                      display: "inline-flex", alignItems: "center", gap: 6,
+                      touchAction: "manipulation",
+                      minHeight: 40,
+                    }}
+                  >
+                    <span style={{ fontSize: 15 }}>📚</span>
+                    <span>I'm Ready! Pick a Book</span>
+                  </button>
+                )}
+                {onPerryAskNana && (
+                  <button
+                    onClick={onPerryAskNana}
+                    style={{
+                      background: "rgba(255,255,255,0.06)",
+                      color: CREAM,
+                      border: "1px solid rgba(255,255,255,0.20)",
+                      borderRadius: 999,
+                      padding: "10px 18px",
+                      fontFamily: "DM Sans, sans-serif",
+                      fontSize: 13, fontWeight: 700,
+                      cursor: "pointer",
+                      display: "inline-flex", alignItems: "center", gap: 6,
+                      touchAction: "manipulation",
+                      minHeight: 40,
+                    }}
+                  >
+                    <span style={{ fontSize: 14 }}>👋</span>
+                    <span>Wave at {otherName}</span>
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -3082,6 +3246,8 @@ function BookSpread({
   onSelectionPronounce,
   onSelectionPhonics,
   onSelectionSave,
+  onShareSelection,
+  remoteSelection = null,
   selectionPronunciationState = null,
   selectionPhonicsState = null,
   selectionSaveState = null,
@@ -3118,6 +3284,11 @@ function BookSpread({
   onSelectionPronounce?: (word: string) => void;
   onSelectionPhonics?: (word: string) => void;
   onSelectionSave?: (word: string, sentence: string) => void;
+  /** Perry-only: broadcast her selection so Nana's SelectionActionMenu
+   *  can appear anchored to the matching word on Nana's page. */
+  onShareSelection?: (word: string, sentence: string) => void;
+  /** Nana-only: the word Perry most recently highlighted. */
+  remoteSelection?: { word: string; sentence: string; ts: number } | null;
   selectionPronunciationState?: { word: string; status: "loading" | "done" | "err" } | null;
   selectionPhonicsState?: { word: string; status: "loading" | "done" | "err" } | null;
   selectionSaveState?: { word: string; status: "saving" | "saved" | "already" } | null;
@@ -3448,9 +3619,12 @@ function BookSpread({
         {onSelectionPronounce && onSelectionPhonics && onSelectionSave && (
           <SelectionActionMenu
             bookAreaRef={bookAreaRef}
+            isPerry={!isNana}
             onPronounce={onSelectionPronounce}
             onPhonics={onSelectionPhonics}
             onSave={onSelectionSave}
+            onShareSelection={onShareSelection}
+            remoteSelection={remoteSelection ?? null}
             pronunciationState={selectionPronunciationState ?? null}
             phonicsState={selectionPhonicsState ?? null}
             saveState={selectionSaveState ?? null}
@@ -6017,6 +6191,7 @@ function NanaHomeView({
   onOpenBookRequests,
   onOpenSettings,
   onSwitchDevice,
+  onSignOut,
   publicMode = false,
   onSignIn,
   onJoinAsChild,
@@ -6046,6 +6221,10 @@ function NanaHomeView({
   onOpenBookRequests: () => void;
   onOpenSettings: () => void;
   onSwitchDevice: () => void;
+  /** Rick's Build 30 review #5: sidebar "Sign out" replaces the old
+   *  "Switch User" that was wiping mid-session state. Graceful signout
+   *  notifies Perry first, then clears. */
+  onSignOut?: () => void;
   /** When true, show the homepage to a logged-out visitor with a Sign In CTA. */
   publicMode?: boolean;
   onSignIn?: () => void;
@@ -6061,6 +6240,9 @@ function NanaHomeView({
   onSelectChild?: (childId: string) => void;
   onOpenAddChild?: () => void;
 }) {
+  // Rick's Build 30 review #5: inline modal instead of window.confirm
+  // (unreliable in iPad Safari PWA — see EndCallConfirm precedent).
+  const [signOutConfirmOpen, setSignOutConfirmOpen] = useState(false);
   const greeting = publicMode ? "Welcome" : timeOfDayGreeting();
   const nextSessionLabel = publicMode
     ? "Sign in to schedule your next reading session."
@@ -6245,12 +6427,87 @@ function NanaHomeView({
             Settings/Switch User off the bottom of the iPad viewport. */}
         <div style={{ height: 1, backgroundColor: "rgba(255,255,255,0.06)", margin: "6px 4px" }} />
         <SidebarItem label="Settings" icon="⚙️" onClick={onOpenSettings} />
-        {/* Hide Switch User on the splash. The splash IS the device-picker
-            so there's nowhere to "switch" to, and leaving the item visible
-            invited the bug where tapping it set deviceView="perry" and
-            wrote the choice to localStorage. */}
-        {!publicMode && <SidebarItem label="Switch User" icon="🔄" onClick={onSwitchDevice} />}
+        {/* Rick's Build 30 review #5: the old "Switch User" here called
+            the full-wipe handleSwitchDevice which killed the connection
+            AND dropped both iPads to the splash. Rick expected profile
+            swap. To switch grandchildren, use the child picker in the
+            hero above. This row is a graceful sign-out only. */}
+        {!publicMode && onSignOut && (
+          <SidebarItem label="Sign out" icon="🚪" onClick={() => setSignOutConfirmOpen(true)} />
+        )}
       </aside>
+
+      {/* Sign-out confirm modal — Rick's Build 30 review #5. */}
+      {signOutConfirmOpen && onSignOut && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="signout-title"
+          onClick={() => setSignOutConfirmOpen(false)}
+          style={{
+            position: "fixed", inset: 0, zIndex: 200,
+            background: "rgba(8,15,30,0.82)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            padding: 24,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "min(400px, 100%)",
+              background: "linear-gradient(180deg, #14223e 0%, #0b172e 100%)",
+              border: "1px solid rgba(201,146,42,0.45)",
+              borderRadius: 16,
+              padding: "22px 22px 18px",
+              boxShadow: "0 24px 60px rgba(0,0,0,0.6)",
+              textAlign: "center",
+            }}
+          >
+            <div style={{ fontSize: 44, marginBottom: 10 }}>🚪</div>
+            <div id="signout-title" style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 22, fontWeight: 700, marginBottom: 6 }}>
+              Sign out of NeverMiss?
+            </div>
+            <div style={{ color: "rgba(247,240,227,0.65)", fontFamily: "DM Sans, sans-serif", fontSize: 13, lineHeight: 1.5, marginBottom: 18 }}>
+              You'll come back to the sign-in screen. Your grandchild's iPad will drop back to the PIN screen.
+            </div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+              <button
+                onClick={() => setSignOutConfirmOpen(false)}
+                style={{
+                  background: "transparent",
+                  color: "rgba(247,240,227,0.75)",
+                  border: "1px solid rgba(255,255,255,0.20)",
+                  borderRadius: 999,
+                  padding: "10px 22px",
+                  fontFamily: "DM Sans, sans-serif",
+                  fontSize: 13, fontWeight: 700,
+                  cursor: "pointer",
+                  minHeight: 44, touchAction: "manipulation",
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { setSignOutConfirmOpen(false); onSignOut(); }}
+                style={{
+                  background: "linear-gradient(135deg, rgba(239,68,68,0.90) 0%, rgba(220,38,38,0.90) 100%)",
+                  color: "#fff",
+                  border: "none",
+                  borderRadius: 999,
+                  padding: "10px 22px",
+                  fontFamily: "DM Sans, sans-serif",
+                  fontSize: 13, fontWeight: 800, letterSpacing: "0.02em",
+                  cursor: "pointer",
+                  minHeight: 44, touchAction: "manipulation",
+                  boxShadow: "0 6px 16px rgba(239,68,68,0.35)",
+                }}
+              >
+                Yes, sign out
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── RIGHT CONTENT ────────────────────────────────────── */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "auto", minWidth: 0 }}>
@@ -8895,6 +9152,7 @@ function GoodbyeView({
   nanaName,
   sessionSummary,
   onGoHome,
+  onBackToSillyFaces,
 }: {
   isNana: boolean;
   goodbyePhase: number;
@@ -8907,6 +9165,9 @@ function GoodbyeView({
   onHangUp?: () => void;
   childName: string;
   nanaName: string;
+  /** Rick's Build 30 review #9: dead-end fix. Nana-only pill on the
+   *  Ready stage that jumps back to Silly Faces. */
+  onBackToSillyFaces?: () => void;
   /** Optional per-session stats shown in the top "wonderful reading session"
    *  panel. Built by App from currentBook + pages read + chapter info. */
   sessionSummary?: {
@@ -9044,6 +9305,27 @@ function GoodbyeView({
             {isNana ? (
               <div style={{ display: "inline-flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
                 <ProminentHomePill onClick={onGoHome} />
+                {onBackToSillyFaces && (
+                  <button
+                    onClick={onBackToSillyFaces}
+                    style={{
+                      background: "rgba(192,132,252,0.14)",
+                      color: "#c084fc",
+                      border: "1px solid rgba(192,132,252,0.55)",
+                      borderRadius: 999,
+                      padding: "11px 20px",
+                      fontFamily: "DM Sans, sans-serif",
+                      fontSize: "clamp(13px, 1.55vw, 15px)",
+                      fontWeight: 800, letterSpacing: "0.04em",
+                      cursor: "pointer",
+                      display: "inline-flex", alignItems: "center", gap: 8,
+                      minHeight: 44, touchAction: "manipulation",
+                    }}
+                  >
+                    <span aria-hidden style={{ fontSize: 16 }}>🎭</span>
+                    <span>Back to Silly Faces</span>
+                  </button>
+                )}
                 <button
                   onClick={onBeginCountdown}
                   style={{
@@ -9245,6 +9527,7 @@ function SillyFacesView({
   myFilter,
   theirFilter,
   onSetMyFilter,
+  onClearAllFilters,
   sillyChallenge,
   sillyCountNum,
   onStartChallenge,
@@ -9266,6 +9549,9 @@ function SillyFacesView({
   myFilter: string;
   theirFilter: string;
   onSetMyFilter: (f: string) => void;
+  /** Rick's Build 30 review #6: Nana-only reset that clears BOTH sides
+   *  via filter_clear_all SSE. Perry keeps just her own "Clear". */
+  onClearAllFilters?: () => void;
   sillyChallenge: ChallengeState;
   sillyCountNum: number;
   onStartChallenge: () => void;
@@ -9549,16 +9835,37 @@ function SillyFacesView({
       {/* Bottom strip — gaps tightened from 8 → 6 and padding pulled in so
           the row stays comfortably within the viewport on small iPads. */}
       <div style={{ backgroundColor: "#0b172e", padding: "6px 12px 8px", borderTop: "1px solid rgba(255,255,255,0.08)", display: "flex", flexDirection: "column", gap: "6px", flexShrink: 0 }}>
-        {/* Filter label + Clear button row. The Clear pill resets MY
-            pick so the OTHER person's face goes back to plain video.
-            Rick: "add a button to reset or clean faces." Sits at the
-            right of the label so it's obvious without crowding the
-            sticker circles below. */}
+        {/* Filter label + Clear button row. Rick's Build 30 review #6:
+            Nana's "Clear" needs to reset BOTH sides (she's in control).
+            Perry still only clears her own. Also Rick's #10: bumped
+            filter circles to 52px + onTouchStart for faster taps. */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}>
           <div style={{ color: "rgba(255,255,255,0.4)", fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700, letterSpacing: "0.12em" }}>
             🎭 YOUR FILTER
           </div>
-          {myFilter !== "none" && (
+          {isNana && onClearAllFilters && (myFilter !== "none" || theirFilter !== "none") && (
+            <button
+              onClick={onClearAllFilters}
+              aria-label="Clear both filters"
+              style={{
+                background: "rgba(239,68,68,0.22)",
+                border: "1px solid rgba(239,68,68,0.60)",
+                color: "#fca5a5",
+                borderRadius: 999,
+                padding: "3px 10px",
+                fontFamily: "DM Sans, sans-serif",
+                fontSize: 10, fontWeight: 700,
+                cursor: "pointer",
+                letterSpacing: "0.04em",
+                display: "inline-flex", alignItems: "center", gap: 4,
+                touchAction: "manipulation",
+              }}
+            >
+              <span>✕</span>
+              <span>Clear All (both)</span>
+            </button>
+          )}
+          {!isNana && myFilter !== "none" && (
             <button
               onClick={() => onSetMyFilter("none")}
               aria-label="Clear my filter"
@@ -9582,13 +9889,11 @@ function SillyFacesView({
           )}
         </div>
 
-        {/* Scrollable filter circles — 50→42px so 13 filters fit on screen
-            with less wasted height. Centered horizontally so the row
-            doesn't look hung from the left edge on iPads wide enough to
-            fit all 13 emojis with room to spare. When the row overflows
-            on narrower devices, `flex-start` re-asserts and the row
-            scrolls — `justifyContent: center` only takes effect when
-            content actually fits. */}
+        {/* Scrollable filter circles — 52px for reliable iOS tap targets
+            (Rick's Build 30 review #10: "buttons were slow to respond and
+            a bit small/unresponsive on first taps"). onTouchStart fires
+            in addition to onClick so the first tap doesn't wait for
+            iOS's click-delay resolution. */}
         <div style={{ display: "flex", gap: "6px", overflowX: "auto", paddingBottom: "2px", scrollbarWidth: "none" as const, justifyContent: "center" }}>
           {sillyFilters.map(f => {
             const sel = myFilter === f.id;
@@ -9596,13 +9901,22 @@ function SillyFacesView({
               <button
                 key={f.id}
                 onClick={() => onSetMyFilter(f.id)}
+                onTouchStart={(e) => {
+                  // Rick's Build 30 #10: instant response — no 300ms wait
+                  // for the synthesized click. preventDefault stops the
+                  // late-firing click from re-toggling.
+                  e.preventDefault();
+                  onSetMyFilter(f.id);
+                }}
                 style={{
-                  flexShrink: 0, width: "42px", height: "42px", borderRadius: "50%",
+                  flexShrink: 0, width: "52px", height: "52px", borderRadius: "50%",
                   backgroundColor: sel ? "rgba(192,132,252,0.35)" : "rgba(255,255,255,0.08)",
                   border: `2px solid ${sel ? "#c084fc" : "rgba(255,255,255,0.16)"}`,
                   display: "flex", alignItems: "center", justifyContent: "center",
                   cursor: "pointer", transition: "all 0.15s",
                   boxShadow: sel ? "0 0 14px rgba(192,132,252,0.55)" : "none",
+                  touchAction: "manipulation",
+                  WebkitTapHighlightColor: "transparent",
                 }}
               >
                 <span style={{ fontSize: "22px", lineHeight: 1 }}>{f.emoji}</span>
@@ -10286,7 +10600,7 @@ function ParentCheckView({
                       tone="secondary"
                       size="md"
                       style={{ width: "100%" }}
-                      onClick={() => window.open(formatForGoogle(scheduledDate), "_blank", "noopener,noreferrer")}
+                      onClick={() => openCalendarUrl(formatForGoogle(scheduledDate), scheduledDate)}
                     />
                     <TileButton
                       icon="📅"
@@ -10302,7 +10616,7 @@ function ParentCheckView({
                       tone="secondary"
                       size="md"
                       style={{ width: "100%" }}
-                      onClick={() => window.open(formatForOutlook(scheduledDate), "_blank", "noopener,noreferrer")}
+                      onClick={() => openCalendarUrl(formatForOutlook(scheduledDate), scheduledDate)}
                     />
                     <TileButton
                       icon="📋"
@@ -10691,6 +11005,7 @@ function DeviceFrame({
   myFilter,
   theirFilter,
   onSetMyFilter,
+  onClearAllFilters,
   sillyChallenge,
   sillyCountNum,
   onStartChallenge,
@@ -10814,6 +11129,11 @@ function DeviceFrame({
   onSelectionPronounce,
   onSelectionPhonics,
   onSelectionSave,
+  onShareSelection,
+  remoteSelection = null,
+  onPerryPickBook,
+  onPerryAskNana,
+  onOpenBookRequest,
   selectionPronunciationState = null,
   selectionPhonicsState = null,
   selectionSaveState = null,
@@ -10849,6 +11169,8 @@ function DeviceFrame({
   myFilter: string;
   theirFilter: string;
   onSetMyFilter: (f: string) => void;
+  /** Rick's Build 30 review #6: Nana-only reset that clears both sides. */
+  onClearAllFilters?: () => void;
   sillyChallenge: ChallengeState;
   sillyCountNum: number;
   onStartChallenge: () => void;
@@ -11002,6 +11324,16 @@ function DeviceFrame({
   onSelectionPronounce?: (word: string) => void;
   onSelectionPhonics?: (word: string) => void;
   onSelectionSave?: (word: string, sentence: string) => void;
+  /** Perry-only: broadcast selection to Nana. */
+  onShareSelection?: (word: string, sentence: string) => void;
+  /** Nana-only: the word Perry most recently highlighted. */
+  remoteSelection?: { word: string; sentence: string; ts: number } | null;
+  /** Perry-only: pill handlers that publish perry_request SSE events. */
+  onPerryPickBook?: () => void;
+  onPerryAskNana?: () => void;
+  /** Nana-only (for now): opens the "Request a book we don't have"
+   *  modal. Rick's Sep 2026 library-search family flow. */
+  onOpenBookRequest?: () => void;
   selectionPronunciationState?: { word: string; status: "loading" | "done" | "err" } | null;
   selectionPhonicsState?: { word: string; status: "loading" | "done" | "err" } | null;
   selectionSaveState?: { word: string; status: "saving" | "saved" | "already" } | null;
@@ -11112,7 +11444,10 @@ function DeviceFrame({
     if (onStartShowAndTell) {
       es.push({ key: "showandtell", label: "Show & Tell", sublabel: "Take turns sharing", icon: <SparklesIcon size={16} strokeWidth={2} aria-hidden />, onClick: onStartShowAndTell, active: isShowAndTell });
     }
-    if (isNana && onStartSillyFaces) {
+    // Silly Faces — both roles. Rick's Build 30 review flagged Perry's
+    // menu as too sparse (just "Show & Tell"). Perry can initiate silly
+    // faces same as Nana; the phase_change SSE syncs both iPads.
+    if (onStartSillyFaces) {
       es.push({ key: "silly", label: "Silly Faces", sublabel: "Faces + reactions", icon: <Smile size={16} strokeWidth={2} aria-hidden />, onClick: onStartSillyFaces, active: isSillyFaces });
     }
     if (isNana && onStartGoodbye) {
@@ -11123,6 +11458,13 @@ function DeviceFrame({
       if (onOpenVault) es.push({ key: "vault", label: "Memory Vault", sublabel: "Saved reading moments", icon: <Disc size={16} strokeWidth={2} aria-hidden />, onClick: onOpenVault, active: isVault });
       if (onOpenFamilyStories) es.push({ key: "journal", label: "Family Journal", sublabel: "Notes about today", icon: <BookHeart size={16} strokeWidth={2} aria-hidden />, onClick: onOpenFamilyStories, active: isFamilyStories });
       if (onOpenLearnedWords) es.push({ key: "learnedwords", label: "Words We're Learning", sublabel: `${childName || "Perry"}'s saved words`, icon: <StarIcon size={16} strokeWidth={2} aria-hidden />, onClick: onOpenLearnedWords, active: isLearnedWords });
+      if (onOpenBookRequest) es.push({ key: "requestbook", label: "Request a Book", sublabel: "Ask us to add a story", icon: <Mail size={16} strokeWidth={2} aria-hidden />, onClick: onOpenBookRequest });
+    } else if (onOpenLearnedWords) {
+      // Perry-side: her own saved-words list. Read-only view of the
+      // same LearnedWordsView Nana sees. Rick's Build 30 review:
+      // Perry's menu should have more than just Show & Tell.
+      es.push({ divider: true, key: "d1", label: "My Learning" });
+      es.push({ key: "learnedwords", label: "Words I'm Learning", sublabel: "See my saved words", icon: <StarIcon size={16} strokeWidth={2} aria-hidden />, onClick: onOpenLearnedWords, active: isLearnedWords });
     }
     if (isNana) {
       es.push({ divider: true, key: "d2" });
@@ -11355,6 +11697,7 @@ function DeviceFrame({
             onOpenBookRequests={onOpenBookRequests ?? (() => {})}
             onOpenSettings={onOpenSettings ?? (() => {})}
             onSwitchDevice={onSwitchDevice ?? (() => {})}
+            onSignOut={onSignOut}
             perryConnected={perryConnected}
             onOpenFamilyStories={onOpenFamilyStories}
             familyStoryEntries={familyStoryEntries}
@@ -11438,6 +11781,8 @@ function DeviceFrame({
             onReady={onGreetingReady ?? (() => {})}
             onShowPrompts={onGreetingShowPrompts}
             onGoHome={isNana ? onGoHome : undefined}
+            onPerryPickBook={!isNana ? onPerryPickBook : undefined}
+            onPerryAskNana={!isNana ? onPerryAskNana : undefined}
           />
         ) : isIcebreaker ? (
           <IcebreakerView
@@ -11513,6 +11858,7 @@ function DeviceFrame({
             myFilter={myFilter}
             theirFilter={theirFilter}
             onSetMyFilter={onSetMyFilter}
+            onClearAllFilters={onClearAllFilters}
             sillyChallenge={sillyChallenge}
             sillyCountNum={sillyCountNum}
             onStartChallenge={onStartChallenge}
@@ -11542,6 +11888,7 @@ function DeviceFrame({
             nanaName={nanaName}
             sessionSummary={sessionSummary}
             onGoHome={isNana ? onGoHome : undefined}
+            onBackToSillyFaces={isNana ? onStartSillyFaces : undefined}
           />
         ) : isChatMode ? (
           <ChatModeView
@@ -11589,6 +11936,8 @@ function DeviceFrame({
                 onSelectionPronounce={onSelectionPronounce}
                 onSelectionPhonics={onSelectionPhonics}
                 onSelectionSave={onSelectionSave}
+                onShareSelection={onShareSelection}
+                remoteSelection={remoteSelection}
                 selectionPronunciationState={selectionPronunciationState}
                 selectionPhonicsState={selectionPhonicsState}
                 selectionSaveState={selectionSaveState}
@@ -11695,7 +12044,7 @@ function DeviceFrame({
                     pointerEvents: "auto",
                     zIndex: 30,
                   }}>
-                    {onReact && <ReactionRow onReact={onReact} />}
+                    {onReact && <ReactionsDropdown onReact={onReact} />}
                     {isNana && <VideoControls compact showRecording />}
                     {isNana && onThemeChange && (
                       <ThemeSwitcher theme={readingTheme} onChange={onThemeChange} />
@@ -11796,7 +12145,7 @@ function DeviceFrame({
                     pointerEvents: "auto",
                     zIndex: 30,
                   }}>
-                    {onReact && <ReactionRow onReact={onReact} />}
+                    {onReact && <ReactionsDropdown onReact={onReact} />}
                     {isNana && <VideoControls compact showRecording />}
                     {isNana && onThemeChange && (
                       <ThemeSwitcher theme={readingTheme} onChange={onThemeChange} />
@@ -11937,7 +12286,7 @@ function DeviceFrame({
                     zIndex: 30,
                     boxShadow: "0 4px 14px rgba(0,0,0,0.10)",
                   }}>
-                    {onReact && <ReactionRow onReact={onReact} />}
+                    {onReact && <ReactionsDropdown onReact={onReact} />}
                     {isNana && <VideoControls compact showRecording />}
                     {isNana && onThemeChange && (
                       <ThemeSwitcher theme={readingTheme} onChange={onThemeChange} />
@@ -12202,11 +12551,12 @@ function ReadingPiPSidebar({
           <VideoControls compact showRecording />
         </div>
       )}
-      {/* Reactions in 2x2 grid (default — no `vertical` prop). 4 × 48
-          + gaps comfortably fit the 118px inner width. */}
+      {/* Rick's Build 30 review #8: reactions grid tucked into a compact
+          dropdown pill (matches PageModeSwitcher style at top of page).
+          Frees up ~60px of sidebar vertical real estate on picture books. */}
       {onReact && (
-        <div style={{ flexShrink: 0 }}>
-          <ReactionRow onReact={onReact} />
+        <div style={{ flexShrink: 0, display: "flex", justifyContent: "center" }}>
+          <ReactionsDropdown onReact={onReact} />
         </div>
       )}
       {isNana && onThemeChange && (
@@ -12966,6 +13316,288 @@ function PhaseIntroCard({
         <div style={{ color: "rgba(247,240,227,0.45)", fontFamily: "DM Sans, sans-serif", fontSize: "11px", marginTop: "14px", letterSpacing: "0.02em" }}>
           Turn help back on anytime from the corner toggle or Settings.
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Rick's Build 30 review #8: reactions row was taking too much bottom-
+ * bar real estate on picture books (heart / star / clap / party tiles
+ * always visible). Wrapping it behind a compact dropdown trigger —
+ * styled like PageModeSwitcher — keeps the same set of reactions but
+ * folds them into a single amber-outlined pill until tapped. Uses a
+ * portal-mounted popover for the emoji picker so it floats above the
+ * book frame regardless of z-index nesting.
+ */
+function ReactionsDropdown({ onReact }: { onReact?: (e: ReactionEmoji) => void }) {
+  const [open, setOpen] = useState(false);
+  const [anchor, setAnchor] = useState<{ top: number; left: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const recompute = () => {
+      if (!btnRef.current) return;
+      const r = btnRef.current.getBoundingClientRect();
+      // Popover width ~180px; anchor so it doesn't clip the right edge.
+      const left = Math.min(r.left, window.innerWidth - 190);
+      setAnchor({ top: r.bottom + 6, left });
+    };
+    recompute();
+    window.addEventListener("resize", recompute);
+    window.addEventListener("scroll", recompute, true);
+    return () => {
+      window.removeEventListener("resize", recompute);
+      window.removeEventListener("scroll", recompute, true);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (btnRef.current?.contains(t)) return;
+      if (popRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  if (!onReact) return null;
+
+  const REACTIONS: { key: ReactionEmoji; accent: string }[] = [
+    { key: "heart",     accent: "#fbbf24" },
+    { key: "star",      accent: "#f59e0b" },
+    { key: "clap",      accent: "#fcd34d" },
+    { key: "celebrate", accent: "#a78bfa" },
+  ];
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        onClick={() => setOpen(o => !o)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="Send a reaction"
+        title="Send a reaction"
+        style={{
+          display: "inline-flex", alignItems: "center", gap: 6,
+          padding: "5px 10px",
+          borderRadius: 999,
+          background: "rgba(251,191,36,0.14)",
+          border: "1px solid rgba(251,191,36,0.45)",
+          color: "#fbbf24",
+          fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700,
+          cursor: "pointer", letterSpacing: "0.02em",
+          flexShrink: 0,
+          touchAction: "manipulation",
+        }}
+      >
+        <span style={{ fontSize: 14, lineHeight: 1 }}>💛</span>
+        <span>React</span>
+        <span style={{ fontSize: 9, opacity: 0.7 }}>▾</span>
+      </button>
+      {open && anchor && createPortal(
+        <div
+          ref={popRef}
+          role="menu"
+          style={{
+            position: "fixed",
+            top: anchor.top, left: anchor.left,
+            zIndex: 9999,
+            display: "flex", gap: 6,
+            padding: 8,
+            backgroundColor: "#0f1d36",
+            border: "1px solid rgba(251,191,36,0.55)",
+            borderRadius: 14,
+            boxShadow: "0 14px 36px rgba(0,0,0,0.7), 0 0 0 1px rgba(0,0,0,0.6)",
+          }}
+        >
+          {REACTIONS.map(({ key, accent }) => (
+            <button
+              key={key}
+              role="menuitem"
+              onClick={() => { onReact(key); setOpen(false); }}
+              aria-label={`Send ${getReactionLabel(key)}`}
+              style={{
+                width: 42, height: 42, borderRadius: 12,
+                border: `1px solid color-mix(in srgb, ${accent} 32%, rgba(255,255,255,0.10))`,
+                backgroundImage: `linear-gradient(155deg, color-mix(in srgb, ${accent} 18%, rgba(255,255,255,0.04)) 0%, rgba(255,255,255,0.04) 70%)`,
+                backgroundColor: "rgba(255,255,255,0.04)",
+                color: "#fff", fontSize: 22, lineHeight: 1,
+                cursor: "pointer",
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                padding: 0, touchAction: "manipulation",
+                WebkitTapHighlightColor: "transparent",
+              }}
+            >
+              <span style={{ filter: "drop-shadow(0 2px 6px rgba(0,0,0,0.35))" }}>
+                {getReactionGlyph(key)}
+              </span>
+            </button>
+          ))}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
+/**
+ * BookRequestModal — Rick's Sep 2026 library-search family flow. Nana
+ * (or Perry, when we surface it on the child side later) submits a
+ * "we want this book" request that lands in Rick's admin queue. Once
+ * he approves + publishes the resulting book, both iPads receive a
+ * toast via the book_request_approved SSE event.
+ */
+function BookRequestModal({ connectionId, onClose }: { connectionId: string; onClose: () => void }) {
+  const [title, setTitle] = useState("");
+  const [author, setAuthor] = useState("");
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [err, setErr] = useState("");
+  const [done, setDone] = useState(false);
+
+  const submit = async () => {
+    const t = title.trim();
+    if (!t) { setErr("Please enter a title."); return; }
+    setErr(""); setSubmitting(true);
+    try {
+      await api.bookRequests.submit(connectionId, {
+        title: t,
+        author: author.trim() || undefined,
+        sourceUrl: sourceUrl.trim() || undefined,
+      });
+      setDone(true);
+      window.setTimeout(onClose, 2200);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Something went wrong. Try again.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const inputStyle: React.CSSProperties = {
+    width: "100%",
+    background: "rgba(255,255,255,0.06)",
+    border: "1px solid rgba(255,255,255,0.18)",
+    borderRadius: 12,
+    padding: "11px 14px",
+    color: CREAM,
+    fontFamily: "DM Sans, sans-serif", fontSize: 14,
+    outline: "none",
+  };
+  const labelStyle: React.CSSProperties = {
+    color: "rgba(247,240,227,0.7)", fontFamily: "DM Sans, sans-serif",
+    fontSize: 11, fontWeight: 800, letterSpacing: "0.10em", textTransform: "uppercase",
+    display: "block", marginBottom: 6,
+  };
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={submitting ? undefined : onClose}
+      style={{
+        position: "fixed", inset: 0, zIndex: 220,
+        background: "rgba(8,15,30,0.82)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 24,
+        animation: "phase-intro-fade 0.2s ease-out",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "min(520px, 100%)",
+          background: "linear-gradient(180deg, #14223e 0%, #0b172e 100%)",
+          border: "1px solid rgba(201,146,42,0.45)",
+          borderRadius: 18,
+          padding: "24px 24px 20px",
+          boxShadow: "0 24px 60px rgba(0,0,0,0.6)",
+          animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
+        }}
+      >
+        {done ? (
+          <div style={{ textAlign: "center", padding: "10px 0 6px" }}>
+            <div style={{ fontSize: 44, marginBottom: 8 }}>📮</div>
+            <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 20, fontWeight: 700, marginBottom: 6 }}>
+              Request sent!
+            </div>
+            <div style={{ color: "rgba(247,240,227,0.7)", fontSize: 13, lineHeight: 1.55 }}>
+              We'll let you know as soon as the book is added to your library.
+            </div>
+          </div>
+        ) : (
+          <>
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 21, fontWeight: 700, marginBottom: 4 }}>
+                Request a book
+              </div>
+              <div style={{ color: "rgba(247,240,227,0.6)", fontSize: 12.5, lineHeight: 1.55 }}>
+                Can't find a story you love? Tell us the title and we'll try to add it. You'll get a notice when it's ready.
+              </div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div>
+                <label style={labelStyle}>Book title *</label>
+                <input style={inputStyle} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Charlotte's Web" autoFocus />
+              </div>
+              <div>
+                <label style={labelStyle}>Author (optional)</label>
+                <input style={inputStyle} value={author} onChange={(e) => setAuthor(e.target.value)} placeholder="e.g. E.B. White" />
+              </div>
+              <div>
+                <label style={labelStyle}>Link (optional)</label>
+                <input style={inputStyle} value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} placeholder="Paste a Standard Ebooks or Gutenberg URL" />
+              </div>
+            </div>
+            {err && (
+              <div style={{ marginTop: 10, color: "#fca5a5", fontSize: 12, fontWeight: 600 }}>{err}</div>
+            )}
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 18 }}>
+              <button
+                onClick={onClose}
+                disabled={submitting}
+                style={{
+                  background: "transparent",
+                  color: "rgba(247,240,227,0.7)",
+                  border: "1px solid rgba(255,255,255,0.20)",
+                  borderRadius: 999,
+                  padding: "10px 20px",
+                  fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700,
+                  cursor: submitting ? "not-allowed" : "pointer",
+                  minHeight: 44, touchAction: "manipulation",
+                  opacity: submitting ? 0.5 : 1,
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submit}
+                disabled={submitting || !title.trim()}
+                style={{
+                  background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+                  color: NAVY,
+                  border: "none",
+                  borderRadius: 999,
+                  padding: "10px 22px",
+                  fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 800, letterSpacing: "0.02em",
+                  cursor: submitting || !title.trim() ? "not-allowed" : "pointer",
+                  minHeight: 44, touchAction: "manipulation",
+                  boxShadow: "0 6px 16px rgba(201,146,42,0.42)",
+                  opacity: submitting || !title.trim() ? 0.6 : 1,
+                }}
+              >
+                {submitting ? "Sending…" : "Send request"}
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -15180,20 +15812,9 @@ export default function App() {
             }
           }
         } else if (msg.type === "phonics_card") {
-          // Rick's Aug 14: cross-iPad phonics coaching card. Whichever
-          // side tapped Phonics, both see the same OG rule + Nana cue.
-          const p = msg.payload as { word?: string; rule?: string; ruleLabel?: string; nanaCue?: string; perryHint?: string };
-          if (typeof p.word === "string" && typeof p.nanaCue === "string") {
-            setSelPhonicsCard({
-              word: p.word,
-              rule: p.rule ?? "other",
-              ruleLabel: p.ruleLabel ?? "Phonics",
-              nanaCue: p.nanaCue,
-              perryHint: p.perryHint ?? "",
-            });
-            if (selPhonicsTimerRef.current) window.clearTimeout(selPhonicsTimerRef.current);
-            selPhonicsTimerRef.current = window.setTimeout(() => setSelPhonicsCard(null), 12_000);
-          }
+          // Rick's Build 30 review #3: Perry side must NOT render the
+          // phonics card. Only Nana teaches through the lesson; Perry
+          // just sees the highlight. Suppress on Perry entirely.
         } else if (msg.type === "layout_change") {
           const l = msg.payload?.layout as ReadingLayout | undefined;
           if (l && (READING_LAYOUTS as readonly string[]).includes(l)) {
@@ -15210,6 +15831,21 @@ export default function App() {
             const ts = r.ts ?? Date.now();
             lastAppliedReactionTsRef.current = ts;
             setCurrentReaction({ ...r, ts });
+          }
+        } else if (msg.type === "filter_clear_all") {
+          // Rick's Build 30 review #6: Nana broadcasts a clear-all so
+          // both iPads reset their filters simultaneously.
+          setNanaSillyFilter("none");
+          setPerrySillyFilter("none");
+        } else if (msg.type === "book_request_approved") {
+          // Rick's Sep 2026 library-search feature: a book the family
+          // requested has been approved + published. Refresh catalog so
+          // it appears + surface a toast.
+          const p = msg.payload as { requestId?: string; bookId?: string };
+          if (typeof p.bookId === "string") {
+            setBookRequestApprovedToast({ bookId: p.bookId, ts: Date.now() });
+            if (refreshCatalogRef.current) refreshCatalogRef.current();
+            window.setTimeout(() => setBookRequestApprovedToast(null), 8000);
           }
         } else if (msg.type === "session_started") {
           // Live signal that Nana started a session — Perry can now follow.
@@ -15546,6 +16182,42 @@ export default function App() {
             });
             if (selPhonicsTimerRef.current) window.clearTimeout(selPhonicsTimerRef.current);
             selPhonicsTimerRef.current = window.setTimeout(() => setSelPhonicsCard(null), 12_000);
+          }
+        } else if (msg.type === "selection_broadcast") {
+          // Rick's Build 30 review #3: Perry highlighted a word — anchor
+          // Nana's SelectionActionMenu to the matching span on her page
+          // so she can tap Phonics/Pronunciation/Save on Perry's behalf.
+          const p = msg.payload as { word?: string; sentence?: string };
+          if (typeof p.word === "string" && p.word.length > 0) {
+            const ts = Date.now();
+            setRemoteSelection({ word: p.word, sentence: p.sentence ?? "", ts });
+            if (remoteSelectionTimerRef.current) window.clearTimeout(remoteSelectionTimerRef.current);
+            remoteSelectionTimerRef.current = window.setTimeout(() => setRemoteSelection(null), 20_000);
+          }
+        } else if (msg.type === "perry_request") {
+          // Rick's Build 30 review #2: Perry tapped a request pill on
+          // her iPad. Nana sees a floating banner + Accept button.
+          const p = msg.payload as { kind?: string };
+          const kind = p.kind;
+          if (kind === "showandtell" || kind === "silly" || kind === "pickbook" || kind === "wave") {
+            const ts = Date.now();
+            setPerryRequest({ kind: kind as "showandtell" | "silly" | "pickbook" | "wave", ts });
+            if (perryRequestTimerRef.current) window.clearTimeout(perryRequestTimerRef.current);
+            perryRequestTimerRef.current = window.setTimeout(() => setPerryRequest(null), 15_000);
+          }
+        } else if (msg.type === "filter_clear_all") {
+          // Rick's Build 30 review #6: Nana broadcast; harmless echo on
+          // her own side but keeps state consistent if event replays.
+          setNanaSillyFilter("none");
+          setPerrySillyFilter("none");
+        } else if (msg.type === "book_request_approved") {
+          // Rick's Sep 2026 library-search: notify Nana too when a
+          // family request is fulfilled (she may have submitted it).
+          const p = msg.payload as { requestId?: string; bookId?: string };
+          if (typeof p.bookId === "string") {
+            setBookRequestApprovedToast({ bookId: p.bookId, ts: Date.now() });
+            if (refreshCatalogRef.current) refreshCatalogRef.current();
+            window.setTimeout(() => setBookRequestApprovedToast(null), 8000);
           }
         } else if (msg.type === "layout_change") {
           const l = msg.payload?.layout as ReadingLayout | undefined;
@@ -16423,6 +17095,22 @@ export default function App() {
   const [selPhoState,  setSelPhoState]  = useState<{ word: string; status: "loading" | "done" | "err" } | null>(null);
   const [selSaveState, setSelSaveState] = useState<{ word: string; status: "saving" | "saved" | "already" } | null>(null);
   const [selPhonicsCard, setSelPhonicsCard] = useState<{ word: string; rule: string; ruleLabel: string; nanaCue: string; perryHint: string } | null>(null);
+  // Rick's Build 30 review #3: Perry broadcasts her selection to Nana
+  // via SSE. Nana sees a SelectionActionMenu anchored to the matching
+  // word on her own page. Perry sees no popup at all.
+  const [remoteSelection, setRemoteSelection] = useState<{ word: string; sentence: string; ts: number } | null>(null);
+  const remoteSelectionTimerRef = useRef<number | null>(null);
+  // Rick's Build 30 review #2: Perry can tap Ask/Pick-a-Book/etc pills
+  // that ask Nana to do something. Nana sees a floating banner and
+  // taps Accept to route the request.
+  const [perryRequest, setPerryRequest] = useState<{ kind: "showandtell" | "silly" | "pickbook" | "wave"; ts: number } | null>(null);
+  const perryRequestTimerRef = useRef<number | null>(null);
+  // Rick's Sep 2026 library-search: family "Request a book we don't
+  // have" flow. Nana can submit a request from the library screen; when
+  // admin approves + publishes it, both iPads receive a toast + the
+  // catalog auto-refreshes.
+  const [bookRequestApprovedToast, setBookRequestApprovedToast] = useState<{ bookId: string; ts: number } | null>(null);
+  const [bookRequestModalOpen, setBookRequestModalOpen] = useState(false);
   const selPronCacheRef = useRef<Map<string, { audioUrl: string | null; ipa: string | null; definition: string | null }>>(new Map());
   const selPhoCacheRef  = useRef<Map<string, { rule: string; ruleLabel: string; nanaCue: string; perryHint: string }>>(new Map());
   const selPhonicsTimerRef = useRef<number | null>(null);
@@ -16493,6 +17181,25 @@ export default function App() {
     }
     if (selPhonicsTimerRef.current) window.clearTimeout(selPhonicsTimerRef.current);
     selPhonicsTimerRef.current = window.setTimeout(() => setSelPhonicsCard(null), 12_000);
+  }, [connectionId]);
+
+  // Rick's Build 30 review #3: Perry publishes her selection so Nana's
+  // iPad can render the SelectionActionMenu at the matching word.
+  // Debounced — same word within 400ms doesn't re-publish.
+  const lastShareRef = useRef<{ word: string; ts: number } | null>(null);
+  const handleShareSelection = useCallback((word: string, sentence: string) => {
+    if (!connectionId) return;
+    const now = Date.now();
+    const last = lastShareRef.current;
+    if (last && last.word.toLowerCase() === word.toLowerCase() && now - last.ts < 400) return;
+    lastShareRef.current = { word, ts: now };
+    api.sessions.publishEvent(connectionId, "selection_broadcast", { word, sentence }).catch(() => {});
+  }, [connectionId]);
+
+  // Perry-side request-to-Nana pill (Rick's Build 30 review #2).
+  const handlePerryRequest = useCallback((kind: "showandtell" | "silly" | "pickbook" | "wave") => {
+    if (!connectionId) return;
+    api.sessions.publishEvent(connectionId, "perry_request", { kind }).catch(() => {});
   }, [connectionId]);
 
   const handleSelectionSave = useCallback(async (word: string, sentence: string) => {
@@ -17421,6 +18128,14 @@ export default function App() {
     setPerrySillyFilter(f);
     if (connectionId) api.sessions.publishEvent(connectionId, "silly_filter", { who: "perry", filter: f }).catch(() => {});
   };
+  // Rick's Build 30 review #6: Clear All resets both iPads' filters via
+  // a filter_clear_all SSE event. Nana's local state also resets so she
+  // sees the effect immediately without waiting for her own broadcast.
+  const handleClearAllFilters = () => {
+    setNanaSillyFilter("none");
+    setPerrySillyFilter("none");
+    if (connectionId) api.sessions.publishEvent(connectionId, "filter_clear_all", {}).catch(() => {});
+  };
   const handleStartChallenge = () => {
     // Debounce: ignore re-tap if a transition is already scheduled
     // within the next 2s. Prevents the "both tap Try Again
@@ -18020,11 +18735,94 @@ export default function App() {
       {perryJustLoggedIn && <PerryWelcomeOverlay name={(perryConnRef.current?.childName ?? "").trim()} />}
       {sessionBeginShown && <SessionBeginOverlay />}
       {partnerLeftShown && <PartnerLeftOverlay nanaName={nanaDisplayName.trim()} />}
-      {/* Phonics coaching card — Rick's Aug 14. Fires when either side
-          taps the Phonics action in SelectionActionMenu. Both iPads
-          receive via SSE broadcast (phonics_card event) so Nana can
-          read the coaching cue aloud while Perry sees the same rule. */}
-      {selPhonicsCard && (
+      {/* Perry request banner — Rick's Build 30 review #2. Renders on
+          Nana's iPad when Perry taps Show & Tell / Silly Faces / Pick
+          a Book from her menu. Nana taps Accept to route the request. */}
+      {perryRequest && deviceView !== "perry" && (
+        <div
+          role="dialog"
+          aria-live="polite"
+          style={{
+            position: "fixed",
+            top: 74, left: "50%", transform: "translateX(-50%)",
+            zIndex: 130,
+            width: "min(500px, calc(100vw - 32px))",
+            background: "linear-gradient(180deg, rgba(11,23,46,0.98), rgba(20,34,62,0.96))",
+            color: CREAM,
+            border: "2px solid #86efac",
+            borderRadius: 14,
+            padding: "12px 16px 14px",
+            boxShadow: "0 16px 40px rgba(0,0,0,0.55), 0 0 0 1px rgba(134,239,172,0.35)",
+            animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+            <span style={{ fontSize: 24 }}>
+              {perryRequest.kind === "showandtell" ? "🎁"
+                : perryRequest.kind === "silly" ? "🎭"
+                : perryRequest.kind === "pickbook" ? "📚"
+                : "👋"}
+            </span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: "0.14em", color: "#86efac", marginBottom: 2 }}>
+                {(dashboardPerryName || perryConnRef.current?.childName || "Perry").toUpperCase()} ASKED
+              </div>
+              <div style={{ fontFamily: "Merriweather, serif", fontSize: 15, fontWeight: 700, lineHeight: 1.35 }}>
+                {perryRequest.kind === "showandtell" ? "Can we do Show & Tell?"
+                  : perryRequest.kind === "silly" ? "Can we play Silly Faces?"
+                  : perryRequest.kind === "pickbook" ? "Ready to pick a book!"
+                  : "Waving hello!"}
+              </div>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <button
+              onClick={() => setPerryRequest(null)}
+              style={{
+                background: "transparent",
+                color: "rgba(247,240,227,0.55)",
+                border: "1px solid rgba(255,255,255,0.18)",
+                borderRadius: 999,
+                padding: "8px 14px",
+                fontFamily: "DM Sans, sans-serif",
+                fontSize: 12, fontWeight: 700,
+                cursor: "pointer",
+                touchAction: "manipulation",
+              }}
+            >
+              Not now
+            </button>
+            <button
+              onClick={() => {
+                const kind = perryRequest.kind;
+                setPerryRequest(null);
+                if (kind === "showandtell") handleStartShowAndTell();
+                else if (kind === "silly") handleStartSillyFaces();
+                else if (kind === "pickbook") handleOpenLibrary();
+                else if (kind === "wave") handleSendReaction("heart");
+              }}
+              style={{
+                background: "linear-gradient(135deg, #86efac 0%, #22c55e 100%)",
+                color: "#0b172e",
+                border: "none",
+                borderRadius: 999,
+                padding: "9px 18px",
+                fontFamily: "DM Sans, sans-serif",
+                fontSize: 12, fontWeight: 800, letterSpacing: "0.02em",
+                cursor: "pointer",
+                boxShadow: "0 6px 16px rgba(34,197,94,0.35)",
+                touchAction: "manipulation",
+              }}
+            >
+              ✓ Yes, let's do it
+            </button>
+          </div>
+        </div>
+      )}
+      {/* Phonics coaching card — Rick's Build 30 review #3: Nana teaches
+          Perry through it; Perry should NOT see the card. Suppress on
+          Perry side; render only on Nana/both. */}
+      {selPhonicsCard && deviceView !== "perry" && (
         <div
           role="dialog"
           aria-live="polite"
@@ -18111,13 +18909,61 @@ export default function App() {
           </span>
         </div>
       )}
+      {/* Rick's Sep 2026 library-search: family "your requested book is
+          ready" toast. Fires on the book_request_approved SSE event. */}
+      {bookRequestApprovedToast && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: "fixed",
+            top: 60,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 100,
+            background: "linear-gradient(135deg, rgba(34,197,94,0.96), rgba(21,128,61,0.96))",
+            color: "#f0fdf4",
+            fontFamily: "DM Sans, sans-serif",
+            fontSize: 14, fontWeight: 800,
+            letterSpacing: "0.02em",
+            padding: "12px 22px",
+            borderRadius: 999,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(134,239,172,0.35)",
+            display: "inline-flex", alignItems: "center", gap: 10,
+            maxWidth: "calc(100% - 40px)",
+            animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
+          }}
+        >
+          <span style={{ fontSize: 18 }}>📚</span>
+          <span>Your requested book is now in the library!</span>
+        </div>
+      )}
+      {/* Family "Request a book we don't have" modal — Rick's Sep 2026
+          library-search feature. Opens from a menu action; posts to
+          /api/sessions/:connId/book-requests which lands in the admin
+          book-request queue. */}
+      {bookRequestModalOpen && connectionId && (
+        <BookRequestModal
+          connectionId={connectionId}
+          onClose={() => setBookRequestModalOpen(false)}
+        />
+      )}
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=Merriweather:ital,wght@0,400;0,700;1,400&family=DM+Sans:wght@400;500;700&display=swap');
 
         @keyframes page-flip {
-          0%   { transform: perspective(700px) rotateY(0deg);    box-shadow:  2px 0 14px rgba(0,0,0,0.25); }
-          40%  { transform: perspective(700px) rotateY(-90deg);  box-shadow: -6px 0 22px rgba(0,0,0,0.45); }
-          100% { transform: perspective(700px) rotateY(-180deg); box-shadow:  0px 0 0px rgba(0,0,0,0); }
+          0%   { transform: perspective(1200px) rotateY(0deg);    box-shadow:  2px 0 14px rgba(0,0,0,0.25); }
+          40%  { transform: perspective(1200px) rotateY(-90deg);  box-shadow: -6px 0 22px rgba(0,0,0,0.45); }
+          100% { transform: perspective(1200px) rotateY(-180deg); box-shadow:  0px 0 0px rgba(0,0,0,0); }
+        }
+        /* Rick's Build 30 review #11: backward page-turn keyframe was
+           missing entirely — animation: page-flip-back resolved to no
+           animation and the "page flew right" effect was lost when
+           going Prev. Restored as the mirror of page-flip. */
+        @keyframes page-flip-back {
+          0%   { transform: perspective(1200px) rotateY(-180deg); box-shadow:  0px 0 0px rgba(0,0,0,0); }
+          60%  { transform: perspective(1200px) rotateY(-90deg);  box-shadow:  6px 0 22px rgba(0,0,0,0.45); }
+          100% { transform: perspective(1200px) rotateY(0deg);    box-shadow: -2px 0 14px rgba(0,0,0,0.25); }
         }
 
         /* ── Filter emoji animations ── */
@@ -18239,6 +19085,7 @@ export default function App() {
           myFilter={nanaSillyFilter}
           theirFilter={perrySillyFilter}
           onSetMyFilter={handleSetNanaFilter}
+          onClearAllFilters={handleClearAllFilters}
           sillyChallenge={sillyChallenge}
           sillyCountNum={sillyCountNum}
           onStartChallenge={handleStartChallenge}
@@ -18364,6 +19211,7 @@ export default function App() {
           onSelectionPronounce={handleSelectionPronounce}
           onSelectionPhonics={handleSelectionPhonics}
           onSelectionSave={handleSelectionSave}
+          remoteSelection={remoteSelection}
           selectionPronunciationState={selPronState}
           selectionPhonicsState={selPhoState}
           selectionSaveState={selSaveState}
@@ -18384,6 +19232,7 @@ export default function App() {
           onLibraryScroll={handleLibraryScroll}
           libraryScrollTop={libraryScrollTop}
           onSignOut={handleSignOut}
+          onOpenBookRequest={() => setBookRequestModalOpen(true)}
         /></VideoSessionProvider>}
         {(deviceView === "perry" || deviceView === "both") && <VideoSessionProvider
           connectionId={connectionId}
@@ -18416,11 +19265,14 @@ export default function App() {
           onGreetingShowPrompts={handleGreetingShowPrompts}
           onNextPrompt={handleNextPrompt}
           onNextChildPrompt={handleNextChildPrompt}
-          onStartShowAndTell={handleStartShowAndTell}
+          // Perry-side: menu taps become requests to Nana (Rick's Build
+          // 30 review #2). Locally setting mode wouldn't broadcast, so
+          // instead Perry asks Nana who confirms via the banner.
+          onStartShowAndTell={() => handlePerryRequest("showandtell")}
           onNextShowAndTellPrompt={handleNextShowAndTellPrompt}
           onBackToReading={handleBackToReading}
           onStartParentCheck={handleStartParentCheck}
-          onStartSillyFaces={handleStartSillyFaces}
+          onStartSillyFaces={() => handlePerryRequest("silly")}
           onBackFromSillyFaces={handleBackFromSillyFaces}
           goodbyePhase={goodbyePhase}
           goodbyeStartTime={goodbyeStartTime}
@@ -18524,6 +19376,9 @@ export default function App() {
           onSelectionPronounce={handleSelectionPronounce}
           onSelectionPhonics={handleSelectionPhonics}
           onSelectionSave={handleSelectionSave}
+          onShareSelection={handleShareSelection}
+          onPerryPickBook={() => handlePerryRequest("pickbook")}
+          onPerryAskNana={() => handlePerryRequest("wave")}
           selectionPronunciationState={selPronState}
           selectionPhonicsState={selPhoState}
           selectionSaveState={selSaveState}

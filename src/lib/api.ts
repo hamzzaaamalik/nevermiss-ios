@@ -331,6 +331,41 @@ export const api = {
       ),
   },
 
+  /** Book requests — Rick's Sep 2026 family-side "can't find your
+   *  book?" flow. Family submits a title (+ optional author + URL);
+   *  admin sees the request in the admin dashboard queue; on approval
+   *  the requesting family receives an in-app notice via SSE
+   *  (book_request_approved). */
+  bookRequests: {
+    list: (connectionId: string) =>
+      req<{ requests: Array<{
+        id: string;
+        connectionId: string;
+        childId: string | null;
+        requestedBy: "nana" | "child";
+        requestedTitle: string;
+        requestedAuthor: string | null;
+        sourceUrl: string | null;
+        status: "pending" | "approved" | "rejected" | "fulfilled";
+        fulfilledBookId: string | null;
+        notes: string | null;
+        createdAt: string;
+        resolvedAt: string | null;
+      }> }>("GET", `/sessions/${connectionId}/book-requests`).then(r => r.requests),
+    submit: (connectionId: string, body: {
+      title: string;
+      author?: string;
+      sourceUrl?: string;
+      childId?: string;
+      requestedBy?: "nana" | "child";
+    }) =>
+      req<{ request: {
+        id: string;
+        status: string;
+        requestedTitle: string;
+      } }>("POST", `/sessions/${connectionId}/book-requests`, body),
+  },
+
   learnedWords: {
     list: (connectionId: string, childId?: string) =>
       req<{ words: Array<{
