@@ -119,6 +119,17 @@ export interface CatalogBook {
   displayOrder: number;
   createdAt: string;
   updatedAt: string;
+  /** Rick's Build 32 review #A-6: metadata surfaced from AI triage.
+   *  ageTier is the suggested reading tier; triageReport carries the
+   *  full summary + content flags. Both nullable — manual books skip
+   *  triage so these are usually null. */
+  ageTier?: string | null;
+  subjects?: string[];
+  triageReport?: {
+    ageTier: string | null;
+    summary: string;
+    flags: Array<{ type: string; note: string }>;
+  } | null;
 }
 
 export const api = {
@@ -318,6 +329,14 @@ export const api = {
       req<{ audioUrl: string | null; ipa: string | null; definition: string | null; source: string }>(
         "GET", `/dictionary/${encodeURIComponent(word)}`,
       ),
+  },
+
+  /** Rick's Build 32 review #A-2: natural-voice TTS via the server's
+   *  /api/tts endpoint (proxied Google Translate). Returns a URL the
+   *  browser can drop straight into <audio src>. Server caches per
+   *  word so repeat plays are instant. */
+  tts: {
+    audioUrl: (word: string) => `${BASE}/tts/${encodeURIComponent(word)}.mp3`,
   },
 
   /** Phonics classification — static Orton-Gillingham rules first,

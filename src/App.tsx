@@ -373,6 +373,16 @@ interface BookPage {
    *  EPUB / PDF where each page is a complete illustration. The text fields
    *  can be left empty. */
   imageUrl?: string;
+  /** Rick's Build 32 review #B-6: the NeverMiss sign-off page that
+   *  auto-appends on every ingested book. When true, the reader
+   *  suppresses the running header (chapter/book title) and the page
+   *  number so the page reads as a branded closing beat instead of
+   *  yet another chapter page. */
+  signOff?: boolean;
+  /** Rick's Build 32 review #A-7: inline illustration URLs extracted
+   *  from the source EPUB. Ordered as they appear in the chapter text;
+   *  the reader interleaves them between paragraphs on that page. */
+  images?: string[];
 }
 
 /** A chapter in a chapter book — multi-session reads where each chapter
@@ -1257,6 +1267,8 @@ function mergeServerCatalog(serverBooks: unknown[]): void {
           cue:            typeof pp.cue === "string" ? pp.cue : "",
           nanaPrompt:     typeof pp.nanaPrompt === "string" ? pp.nanaPrompt : "",
           imageUrl:       typeof pp.imageUrl === "string" ? pp.imageUrl : undefined,
+          signOff:        !!pp.signOff,
+          images:         Array.isArray(pp.images) ? pp.images.filter((u): u is string => typeof u === "string") : undefined,
         };
       });
 
@@ -1289,11 +1301,34 @@ function mergeServerCatalog(serverBooks: unknown[]): void {
                   cue:           typeof pp.cue === "string" ? pp.cue : "",
                   nanaPrompt:    typeof pp.nanaPrompt === "string" ? pp.nanaPrompt : "",
                   imageUrl:      typeof pp.imageUrl === "string" ? pp.imageUrl : undefined,
+                  signOff:       !!pp.signOff,
+                  images:        Array.isArray(pp.images) ? pp.images.filter((u): u is string => typeof u === "string") : undefined,
                 };
               }),
           };
         });
     }
+
+    // Rick's Build 32 review #A-6: derive display-friendly ageRange +
+    // readingLevel from the server's AI-triage ageTier ("4-5", "5-7",
+    // "7-10", "10-13"). Falls back to whatever the hardcoded catalog
+    // had (usually "" for imported books).
+    const serverAgeTier = typeof b.ageTier === "string" ? b.ageTier : null;
+    const derivedAgeRange = serverAgeTier ? `Ages ${serverAgeTier}` : "";
+    const gradeMap: Record<string, string> = {
+      "4-5":   "Grade Pre-K–K",
+      "5-7":   "Grade K–2",
+      "7-10":  "Grade 2–4",
+      "10-13": "Grade 5–7",
+    };
+    const derivedReadingLevel = serverAgeTier ? (gradeMap[serverAgeTier] ?? "") : "";
+    // Rick's Build 32 review #B-2: use the AI triage summary as
+    // fallback tagline so imported books get a parent-friendly blurb
+    // instead of empty text on the library card. Trimmed to ~140 chars
+    // to fit the card without wrapping ugly.
+    const triage = (b.triageReport && typeof b.triageReport === "object") ? b.triageReport as Record<string, unknown> : null;
+    const triageSummary = typeof triage?.summary === "string" ? triage.summary : "";
+    const derivedTagline = triageSummary ? (triageSummary.length > 140 ? triageSummary.slice(0, 137) + "…" : triageSummary) : "";
 
     const existing = booksLibrary[id];
     booksLibrary[id] = {
@@ -1317,10 +1352,16 @@ function mergeServerCatalog(serverBooks: unknown[]): void {
       // Overlay server-authoritative fields.
       id,
       title,
-      author:     typeof b.author === "string" ? b.author : (existing?.author ?? ""),
-      emoji:      typeof b.emoji === "string" && b.emoji.length > 0 ? b.emoji : (existing?.emoji ?? "📖"),
-      spineColor: typeof b.spineColor === "string" ? b.spineColor : (existing?.spineColor ?? "#5C3A1E"),
-      tagline:    typeof b.tagline === "string" ? b.tagline : (existing?.tagline ?? ""),
+      author:       typeof b.author === "string" ? b.author : (existing?.author ?? ""),
+      emoji:        typeof b.emoji === "string" && b.emoji.length > 0 ? b.emoji : (existing?.emoji ?? "📖"),
+      spineColor:   typeof b.spineColor === "string" ? b.spineColor : (existing?.spineColor ?? "#5C3A1E"),
+      tagline:      (typeof b.tagline === "string" && b.tagline.length > 0)
+                      ? b.tagline
+                      : (existing?.tagline && existing.tagline.length > 0 ? existing.tagline : derivedTagline),
+      // Prefer hardcoded metadata if present (curated catalog for our
+      // 30 launch books); otherwise fall back to AI-derived values.
+      ageRange:     (existing?.ageRange && existing.ageRange.length > 0) ? existing.ageRange : derivedAgeRange,
+      readingLevel: (existing?.readingLevel && existing.readingLevel.length > 0) ? existing.readingLevel : derivedReadingLevel,
       pages,
       chapters,
     };
@@ -1528,20 +1569,31 @@ function SelectionActionMenu({
         return;
       }
 
-      // Position: prefer BELOW the selection so we don't collide with
-      // iOS's native Copy / Look Up bar which sits ABOVE the selection.
-      // Rick's Build 30 review #7: never flip above (would collide with
-      // iOS menu). If not enough room below, dock to book bottom.
+      // Rick's Build 32 review #A-1: overlap regression. The old
+      // "prefer just below the selection" logic collided with iOS's
+      // Copy/Look Up bar when the selection was near the top of the
+      // viewport (iOS flips ITS bar to below in that case). Fix: pin
+      // ours to a FIXED corner of the book pane based on where the
+      // selection is vertically:
+      //   - Selection in the TOP half of the book: iOS is likely to
+      //     be BELOW the selection, so we dock at the BOTTOM edge.
+      //   - Selection in the BOTTOM half: iOS is above (standard),
+      //     so we dock at the TOP edge (safely away from iOS bar).
+      // This gives predictable placement — muscle memory — and
+      // guarantees the two never sit on top of each other.
       const rect = range.getBoundingClientRect();
       const bookRect = bookArea.getBoundingClientRect();
       const menuW = 300;
-      const menuH = 68;
+      const menuH = 74;
+      // Horizontal: keep centered on selection but clamped inside book.
       const rawLeft = rect.left + rect.width / 2 - bookRect.left - menuW / 2;
-      const clampedLeft = Math.max(8, Math.min(bookArea.clientWidth - menuW - 8, rawLeft));
-      const spaceBelow = bookArea.clientHeight - (rect.bottom - bookRect.top);
-      const top = spaceBelow >= menuH + 16
-        ? (rect.bottom - bookRect.top + 10)
-        : Math.max(4, bookArea.clientHeight - menuH - 10);
+      const clampedLeft = Math.max(10, Math.min(bookArea.clientWidth - menuW - 10, rawLeft));
+      // Vertical: bottom-dock or top-dock based on selection position.
+      const selectionMidY = (rect.top + rect.bottom) / 2 - bookRect.top;
+      const isTopHalf = selectionMidY < bookArea.clientHeight / 2;
+      const top = isTopHalf
+        ? Math.max(10, bookArea.clientHeight - menuH - 10)  // dock bottom
+        : 10;                                                // dock top
       setState({ top, left: clampedLeft, word, sentence });
     };
     document.addEventListener("selectionchange", onChange);
@@ -1923,12 +1975,18 @@ function BookContent({
   // default, causing asymmetry.
   const targetFontPct = fontScale >= 1.5 ? 150 : fontScale >= 1.25 ? 125 : 100;
 
-  // Honor the user's chosen font scale STRICTLY — no more silent
-  // auto-shrink. Rick's Aug 14 feedback: "the font size didn't carry
-  // over on Continue Reading." The previous version shrank XL to 100%
-  // on dense chapter-book pages, which read as "my setting was lost."
-  // Now: target % applies always, and if content genuinely overflows
-  // the reader scrolls that page inside its column. Predictable > tidy.
+  // Rick's Build 32 review #A-3: pagination fix. The original behavior
+  // (Aug 14) was "honor target % strictly, scroll on overflow" — which
+  // predictably lost Rick's XL setting via auto-shrink. But screenshots
+  // show text running below the page invisibly and lopsided spreads
+  // (one page crowded, the facing page nearly empty).
+  //
+  // Compromise: try target font first. If content overflows, shrink
+  // GRADUALLY (5% steps) until it fits — but only down to 85% of the
+  // user's chosen size. That means XL stays visibly XL, just tightens a
+  // bit on dense chapter pages. If it STILL overflows after minimum
+  // shrink, allow scroll (visible fade-out at the bottom cues the
+  // scroll gesture — see nm-book-body-fade below).
   useLayoutEffect(() => {
     const apply = (pct: number) => {
       if (leftRef.current)  leftRef.current.style.fontSize  = `${pct}%`;
@@ -1940,9 +1998,39 @@ function BookContent({
         .map(p => p.parentElement)
         .filter(Boolean) as HTMLElement[];
     apply(targetFontPct);
-    // Always allow overflow scroll — dense pages at XL scroll rather
-    // than clip, but nothing is silently resized.
-    parents().forEach(c => { c.style.overflowY = "auto"; });
+    // Auto-fit pass — capped shrink preserves Rick's XL feel.
+    const containers = parents();
+    requestAnimationFrame(() => {
+      let currentPct = targetFontPct;
+      const minPct = Math.round(targetFontPct * 0.85);
+      let iterations = 0;
+      while (iterations++ < 6) {
+        const overflows = containers.some(c => c.scrollHeight > c.clientHeight + 4);
+        if (!overflows || currentPct <= minPct) break;
+        currentPct = Math.max(minPct, currentPct - 5);
+        apply(currentPct);
+      }
+      // Fallback: if content still doesn't fit after the shrink cap,
+      // allow scroll + apply the fade-out cue so the user knows more
+      // text is below. Also inject a visible "↓ MORE BELOW" pill so
+      // the affordance is obvious (Rick's Build 32 A-3 root cause was
+      // that the subtle fade was invisible on iPad).
+      containers.forEach(c => {
+        const overflows = c.scrollHeight > c.clientHeight + 4;
+        c.style.overflowY = overflows ? "auto" : "hidden";
+        c.classList.toggle("nm-book-body-overflow", overflows);
+        // Remove any existing cue then add a fresh one so the animation
+        // restarts on page change.
+        const existing = c.querySelector(".nm-scroll-cue");
+        if (existing) existing.remove();
+        if (overflows) {
+          const cue = document.createElement("div");
+          cue.className = "nm-scroll-cue";
+          cue.textContent = "↓ Scroll for more";
+          c.appendChild(cue);
+        }
+      });
+    });
   }, [page, targetFontPct, p?.leftBody, p?.rightBody, p?.rightIsTitle]);
 
   return (
@@ -1967,6 +2055,39 @@ function BookContent({
           -webkit-hyphens: auto;
           word-spacing: 0.01em;
           letter-spacing: 0.005em;
+        }
+        /* Rick's Build 32 review #A-3: when a page still overflows
+           after the auto-fit shrink, cue "there's more below" with a
+           soft fade-out AND a visible scroll indicator pill. The
+           fade alone was too subtle for Rick to notice. */
+        .nm-book-body-overflow {
+          mask-image: linear-gradient(to bottom, black 82%, transparent 100%);
+          -webkit-mask-image: linear-gradient(to bottom, black 82%, transparent 100%);
+          position: relative;
+        }
+        .nm-scroll-cue {
+          position: absolute;
+          bottom: 6px;
+          left: 50%;
+          transform: translateX(-50%);
+          padding: 3px 10px;
+          border-radius: 999px;
+          background: rgba(201,146,42,0.90);
+          color: #1B2B4B;
+          font-family: "DM Sans", sans-serif;
+          font-size: 10px;
+          font-weight: 800;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+          z-index: 3;
+          pointer-events: none;
+          animation: scroll-cue-bob 1.8s ease-in-out infinite;
+          white-space: nowrap;
+        }
+        @keyframes scroll-cue-bob {
+          0%,100% { transform: translate(-50%, 0); }
+          50%     { transform: translate(-50%, 3px); }
         }
         /* Subtle parchment grain — only visible on day/sepia, invisible on night */
         .nm-book-page::before {
@@ -2140,6 +2261,37 @@ function BookContent({
             page and turns at exactly the same point — regardless of
             which font size they have chosen"). */}
         <div className={p.leftChapter ? "nm-book-dropcap" : undefined} style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative", zIndex: 1 }}>
+          {/* Rick's Build 32 review #A-7: inline illustrations
+              extracted from the source EPUB. Render at the top of the
+              chapter's first page (that's where the admin importer
+              attaches them). Each image is a data: URL, sized to fit
+              the page width. */}
+          {p.images && p.images.length > 0 && (
+            <div style={{
+              display: "flex", flexDirection: "column",
+              gap: 10, marginBottom: 12, alignItems: "center",
+              // Give illustrations roughly half the page height so
+              // they read as real pictures, not thumbnails. If there
+              // are 2+ images each shares the space proportionally.
+              maxHeight: p.images.length === 1 ? "55%" : "45%",
+              overflow: "hidden",
+            }}>
+              {p.images.map((src, i) => (
+                <img
+                  key={i}
+                  src={src}
+                  alt=""
+                  style={{
+                    maxWidth: "100%",
+                    maxHeight: p.images!.length === 1 ? "100%" : `${Math.floor(100 / p.images!.length)}%`,
+                    objectFit: "contain",
+                    borderRadius: 6,
+                    boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
+                  }}
+                />
+              ))}
+            </div>
+          )}
           <p ref={leftRef} className="book-body nm-book-body" style={{
             color: themeColors.text,
             margin: 0,
@@ -2178,8 +2330,9 @@ function BookContent({
           </div>
         </div>
 
-        {/* Page number — centered, refined */}
-        {leftPageNum && (
+        {/* Page number — centered, refined. Hidden on sign-off pages
+            per Rick's Build 32 review #B-6. */}
+        {leftPageNum && !p.signOff && (
           <div style={{ textAlign: "center", marginTop: 4, position: "relative", zIndex: 1 }}>
             <span style={{ color: LEATHER, fontFamily: "Merriweather, serif", fontSize: 9, opacity: 0.5, letterSpacing: "0.1em", fontVariantNumeric: "oldstyle-nums" }}>· {leftPageNum} ·</span>
           </div>
@@ -2213,12 +2366,17 @@ function BookContent({
         overflow: "hidden",
         transition: "background-color 240ms ease",
       }}>
-        {/* Running header — author from page 1 subtitle, stripped of "by " */}
-        <div style={{ borderBottom: `1px solid ${LEATHER}`, paddingBottom: "4px", marginBottom: "10px", display: "flex", justifyContent: "center", opacity: 0.55 }}>
-          <span style={{ color: LEATHER, fontFamily: "Merriweather, serif", fontSize: "9px", fontStyle: "italic", letterSpacing: "0.14em", textTransform: "uppercase" }}>
-            {(bookPages[0]?.rightTitleSub ?? "").replace(/^by\s*/i, "")}
-          </span>
-        </div>
+        {/* Running header — author from page 1 subtitle, stripped of "by ".
+            Rick's Build 32 review #B-6: hidden on the sign-off page so
+            it reads as a distinct branded closing rather than another
+            body page. */}
+        {!p.signOff && (
+          <div style={{ borderBottom: `1px solid ${LEATHER}`, paddingBottom: "4px", marginBottom: "10px", display: "flex", justifyContent: "center", opacity: 0.55 }}>
+            <span style={{ color: LEATHER, fontFamily: "Merriweather, serif", fontSize: "9px", fontStyle: "italic", letterSpacing: "0.14em", textTransform: "uppercase" }}>
+              {(bookPages[0]?.rightTitleSub ?? "").replace(/^by\s*/i, "")}
+            </span>
+          </div>
+        )}
 
         {/* Right page content — see left-page comment above; same
             `overflow: hidden` contract: source data is paginated so
@@ -2279,8 +2437,10 @@ function BookContent({
           )}
         </div>
 
-        {/* Page number — centered, refined */}
-        {rightPageNum && (
+        {/* Page number — centered, refined. Hidden on sign-off pages
+            (Rick's Build 32 review #B-6: branded closing beat should
+            read as a page distinct from the story pagination). */}
+        {rightPageNum && !p.signOff && (
           <div style={{ textAlign: "center", marginTop: 4, position: "relative", zIndex: 1 }}>
             <span style={{ color: LEATHER, fontFamily: "Merriweather, serif", fontSize: 9, opacity: 0.5, letterSpacing: "0.1em", fontVariantNumeric: "oldstyle-nums" }}>· {rightPageNum} ·</span>
           </div>
@@ -3892,6 +4052,10 @@ function LibraryView({
   // record from the prop above.
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "in-progress" | "not-started" | "finished">("all");
+  // Rick's Build 32 review #B-3: age-tier filter. AI-suggested tiers
+  // come from the /api/books catalog (ageRange like "Ages 4-5" through
+  // "Ages 10-13"). "any" = show all tiers.
+  const [ageFilter, setAgeFilter] = useState<"any" | "4-5" | "5-7" | "7-10" | "10-13">("any");
 
   const progressByBookId = new Map(progress.map(p => [p.bookId, p]));
   const allBooks = Object.values(booksLibrary);
@@ -3901,6 +4065,13 @@ function LibraryView({
     if (q) {
       const haystack = `${book.title} ${book.author} ${book.tagline ?? ""}`.toLowerCase();
       if (!haystack.includes(q)) return false;
+    }
+    if (ageFilter !== "any") {
+      // Match books whose ageRange contains the tier ("Ages 4-5",
+      // "4–5", etc.). Books without a tier are excluded when the filter
+      // is active — that pushes admin/nana to triage older imports.
+      const range = (book.ageRange ?? "").toLowerCase().replace(/[–—]/g, "-");
+      if (!range.includes(ageFilter)) return false;
     }
     if (statusFilter !== "all") {
       const p = progressByBookId.get(book.id);
@@ -4050,6 +4221,43 @@ function LibraryView({
                   padding: "1px 6px",
                   minWidth: 16, textAlign: "center",
                 }}>{n}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Rick's Build 32 review #B-3: age-tier filter chips.
+            Populated from the AI triage. "Any" shows all books;
+            picking a tier hides everything else. */}
+        <div role="tablist" aria-label="Filter by age" style={{ display: "flex", gap: 6, overflowX: "auto", scrollbarWidth: "none" as const, marginTop: 6 }}>
+          {([
+            { key: "any" as const,   label: "All ages" },
+            { key: "4-5" as const,   label: "Ages 4–5" },
+            { key: "5-7" as const,   label: "Ages 5–7" },
+            { key: "7-10" as const,  label: "Ages 7–10" },
+            { key: "10-13" as const, label: "Ages 10–13" },
+          ]).map(chip => {
+            const active = ageFilter === chip.key;
+            return (
+              <button
+                key={chip.key}
+                role="tab"
+                aria-selected={active}
+                onClick={() => setAgeFilter(chip.key)}
+                style={{
+                  flexShrink: 0,
+                  display: "inline-flex", alignItems: "center", gap: 6,
+                  padding: "5px 11px",
+                  borderRadius: 999,
+                  background: active ? "rgba(96,165,250,0.18)" : "rgba(255,255,255,0.04)",
+                  border: `1px solid ${active ? "rgba(96,165,250,0.55)" : "rgba(255,255,255,0.10)"}`,
+                  color: active ? "#93c5fd" : "rgba(247,240,227,0.68)",
+                  fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700,
+                  cursor: "pointer", letterSpacing: "0.02em",
+                  touchAction: "manipulation",
+                }}
+              >
+                {chip.label}
               </button>
             );
           })}
@@ -11329,6 +11537,8 @@ function DeviceFrame({
   onPerryPickBook,
   onPerryAskNana,
   onOpenBookRequest,
+  readingFullscreen = false,
+  onToggleReadingFullscreen,
   selectionPronunciationState = null,
   selectionPhonicsState = null,
   selectionSaveState = null,
@@ -11529,6 +11739,11 @@ function DeviceFrame({
   /** Nana-only (for now): opens the "Request a book we don't have"
    *  modal. Rick's Sep 2026 library-search family flow. */
   onOpenBookRequest?: () => void;
+  /** Rick's Build 32 review #B-5: minimal-chrome distraction-free
+   *  reading. When true, the device-frame top bar collapses to just
+   *  a floating exit-fullscreen pill. */
+  readingFullscreen?: boolean;
+  onToggleReadingFullscreen?: () => void;
   selectionPronunciationState?: { word: string; status: "loading" | "done" | "err" } | null;
   selectionPhonicsState?: { word: string; status: "loading" | "done" | "err" } | null;
   selectionSaveState?: { word: string; status: "saving" | "saved" | "already" } | null;
@@ -11632,6 +11847,12 @@ function DeviceFrame({
       } else if (isNana && onStartReadingSession && (isHome || isLibrary || isVault || isFamilyStories || isSillyFaces || isGoodbyeMode || isBookRequests || isSettings)) {
         es.push({ key: "continue", label: "Continue Reading", sublabel: "Pick up where you left off", icon: <BookOpen size={16} strokeWidth={2} aria-hidden />, onClick: onStartReadingSession });
       }
+    }
+    // Rick's Build 32 review #B-4: Library entry in the menu so Nana
+    // can jump back to book selection from anywhere in Reading Mode
+    // (previously she had to hunt for Change Book in the top bar).
+    if (isNana && onOpenLibrary) {
+      es.push({ key: "library", label: "Change Book", sublabel: "Pick a different story", icon: <LibraryIcon size={16} strokeWidth={2} aria-hidden />, onClick: onOpenLibrary, active: isLibrary });
     }
     if (isNana && onStartParentCheck) {
       es.push({ key: "schedule", label: "Schedule", sublabel: "Book next reading", icon: <CalendarDays size={16} strokeWidth={2} aria-hidden />, onClick: onStartParentCheck, active: isParentCheck });
@@ -11742,7 +11963,27 @@ function DeviceFrame({
           }
         `}</style>
         {/* Top bar — slim chrome so the book gets more vertical real estate
-            (Rick: "utilize some more real estate" for the reading area). */}
+            (Rick: "utilize some more real estate" for the reading area).
+            Rick's Build 32 review #B-5: fully hidden in fullscreen mode. */}
+        {isReadingMode && readingFullscreen && onToggleReadingFullscreen && (
+          <button
+            onClick={onToggleReadingFullscreen}
+            aria-label="Exit fullscreen"
+            style={{
+              position: "absolute", top: 6, right: 8, zIndex: 50,
+              width: 30, height: 30, borderRadius: "50%",
+              background: "rgba(11,23,46,0.7)", border: "1px solid rgba(201,146,42,0.45)",
+              color: AMBER, cursor: "pointer",
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+              padding: 0, backdropFilter: "blur(6px)",
+              boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
+              touchAction: "manipulation",
+            }}
+          >
+            <XIcon size={14} strokeWidth={2.4} />
+          </button>
+        )}
+        {!(isReadingMode && readingFullscreen) && (
         <div style={{
           background: "linear-gradient(180deg, #1B2B4B 0%, #14223e 100%)",
           padding: "6px 12px",
@@ -11820,8 +12061,30 @@ function DeviceFrame({
             {modeHighlight && !isOnboarding && menuEntries.length > 0 && (
               <MenuButton onClick={() => setMenuOpen(true)} />
             )}
+            {/* Rick's Build 32 review #B-5: fullscreen toggle button.
+                Only shown in Reading Mode + on Nana's iPad. Icon
+                looks like the standard fullscreen four-corner
+                symbol. */}
+            {isReadingMode && isNana && onToggleReadingFullscreen && (
+              <button
+                onClick={onToggleReadingFullscreen}
+                aria-label="Enter fullscreen reading"
+                title="Fullscreen"
+                style={{
+                  background: "rgba(201,146,42,0.14)",
+                  color: AMBER,
+                  border: "1px solid rgba(201,146,42,0.45)",
+                  borderRadius: 999,
+                  width: 30, height: 30,
+                  display: "inline-flex", alignItems: "center", justifyContent: "center",
+                  padding: 0, cursor: "pointer",
+                  touchAction: "manipulation", flexShrink: 0,
+                }}
+              >⤢</button>
+            )}
           </div>
         </div>
+        )}
 
         {/* Slide-in menu drawer — see menuEntries above. */}
         <MenuDrawer open={menuOpen} onClose={() => setMenuOpen(false)} entries={menuEntries} />
@@ -17331,13 +17594,37 @@ export default function App() {
     try { new Audio(url).play(); } catch {}
   }, []);
 
+  // Optimistic audio play — returns true if playback started, false if
+  // the Audio element rejected the source. Used for the Google TTS path
+  // where we want to try-and-fall-back without waiting on the network.
+  const playAudioFast = useCallback((url: string): boolean => {
+    try {
+      const a = new Audio(url);
+      // If audio errors out (404, CORS, etc.) suppress silently — the
+      // caller has already fired the Dictionary fetch as backup.
+      a.onerror = () => { /* silent */ };
+      const p = a.play();
+      if (p && typeof p.then === "function") p.catch(() => {});
+      return true;
+    } catch { return false; }
+  }, []);
+
   const handleSelectionPronounce = useCallback(async (word: string) => {
     setSelPronState({ word, status: "loading" });
+    // Rick's Build 32 review #A-2: 10-second delay + robotic voice.
+    // New order-of-preference:
+    //   1. Server /api/tts (Google Translate voice, ~200ms, cached
+    //      forever per word) — natural human voice, always fast.
+    //   2. Free Dictionary audio (rare, sometimes region-specific).
+    //   3. Web Speech local TTS (robotic, but works offline).
+    // We speak immediately from step 1; the dictionary fetch runs in
+    // parallel just to enrich the Words We're Learning save later.
+    const spoken = playAudioFast(api.tts.audioUrl(word));
+    // Enrichment fetch in the background — never blocks audio playback.
     const dict = await fetchDict(word);
-    if (dict?.audioUrl) {
+    if (!spoken && dict?.audioUrl) {
       playAudio(dict.audioUrl);
-    } else {
-      // Fallback: local TTS.
+    } else if (!spoken) {
       try {
         if ("speechSynthesis" in window) {
           window.speechSynthesis.cancel();
@@ -17347,7 +17634,7 @@ export default function App() {
         }
       } catch {}
     }
-    setSelPronState({ word, status: dict ? "done" : "err" });
+    setSelPronState({ word, status: dict || spoken ? "done" : "err" });
     if (connectionId) api.sessions.publishEvent(connectionId, "word_action", { action: "say", word }).catch(() => {});
   }, [fetchDict, playAudio, connectionId]);
 
@@ -17476,6 +17763,19 @@ export default function App() {
       api.sessions.publishEvent(connectionId, "layout_change", { layout: next }).catch(() => {});
     }
   };
+  // Rick's Build 32 review #B-5: fullscreen reading mode. Hides the
+  // top device-frame chrome + bottom nav strip so the page is
+  // uninterrupted. The Menu is still reachable via a small floating
+  // corner button that appears only in fullscreen. Doesn't sync
+  // between iPads (per-device preference — Nana might want distraction-
+  // free while Perry sees the standard chrome).
+  const [readingFullscreen, setReadingFullscreen] = useState<boolean>(false);
+  const toggleReadingFullscreen = useCallback(() => setReadingFullscreen(v => !v), []);
+  useEffect(() => {
+    // Auto-exit fullscreen when leaving Reading Mode so the chrome
+    // returns everywhere else.
+    if (mode !== "reading" && readingFullscreen) setReadingFullscreen(false);
+  }, [mode, readingFullscreen]);
   // Layout-sync authority: when Nana enters reading mode, broadcast
   // her current layout so Perry's screen converges. Same pattern as
   // theme sync above.
@@ -17717,6 +18017,21 @@ export default function App() {
       if (info) {
         const totalChapters = currentBook.chapters?.length ?? 0;
         const isLastChapter = info.chapterIndex === totalChapters - 1;
+        // Rick's Build 32 review #A-8: on very short books (Goldilocks,
+        // Aesop shorts) the Chapter Complete popup fires every couple of
+        // pages and becomes noise instead of a beat. Skip when the
+        // chapter is under 3 pages AND the whole book is under 20 pages
+        // — that catches picture books but preserves the popup on real
+        // chapter books like The Call of the Wild or Little Lord
+        // Fauntleroy. The last chapter always fires (so the "book over"
+        // beat still lands).
+        const chapterPages = (info.chapter.pages?.length ?? 0);
+        const bookPages = (currentBook.pages?.length ?? 0);
+        const isShortChapterInShortBook = chapterPages > 0 && chapterPages < 3 && bookPages < 20;
+        if (isShortChapterInShortBook && !isLastChapter) {
+          // Skip the popup entirely — just advance the page.
+          // Falls through to the normal changePage flow below.
+        } else {
         // Prefer the chapter's own question; otherwise pull a random one
         // from the reflection bank. Previously we keyed on
         // chapterIndex % bank.length, which felt deterministic and canned
@@ -17740,6 +18055,7 @@ export default function App() {
         }
         lastPageChangeRef.current = 0; // allow immediate retry after dismiss
         return; // pause advance until Nana taps Next Chapter
+        } // end short-chapter gate else-branch
       }
     }
     // Tactile feedback — soft page-turn whoosh + iOS haptic if available.
@@ -18910,16 +19226,21 @@ export default function App() {
 
   return (
     <div style={{
-      // Use the tracked live viewport height (see setVh effect above) with
-      // 100dvh as fallback for browsers where the effect hasn't run yet
-      // or where visualViewport isn't available. Fixes the "book opens
-      // small, stays small" regression after iPad backgrounding.
+      // Rick's Build 32 review #A-4: after returning from Reading Mode
+      // the whole app sometimes rendered as a small centered window
+      // instead of filling the iPad. Root cause was ambiguous outer
+      // sizing — the container relied on inner flex to claim width and
+      // that could shrink on mode transitions. Force explicit
+      // width: 100vw AND stretch-align so the inner device frame can't
+      // collapse. Height stays tracked via --nm-app-vh (with 100dvh
+      // fallback) for the "book opens small" fix from earlier rounds.
+      width: "100vw",
       height: "var(--nm-app-vh, 100dvh)",
       minHeight: "100dvh",
       backgroundColor: NAVY,
       display: "flex",
       flexDirection: "column",
-      alignItems: "center",
+      alignItems: "stretch",
       padding: "6px 2px 6px",
       fontFamily: "DM Sans, sans-serif",
       overflow: "hidden",
@@ -19430,6 +19751,8 @@ export default function App() {
           libraryScrollTop={libraryScrollTop}
           onSignOut={handleSignOut}
           onOpenBookRequest={() => setBookRequestModalOpen(true)}
+          readingFullscreen={readingFullscreen}
+          onToggleReadingFullscreen={toggleReadingFullscreen}
         /></VideoSessionProvider>}
         {(deviceView === "perry" || deviceView === "both") && <VideoSessionProvider
           connectionId={connectionId}
@@ -19632,8 +19955,55 @@ export default function App() {
 
       {/* Reading toolbar — separate buttons with consistent height (40px)
           and unified styling. No outer pill container that forces
-          mismatched proportions. */}
-      {mode === "reading" && deviceView !== "perry" && (
+          mismatched proportions. Rick's Build 32 review #B-5: in
+          fullscreen mode the toolbar collapses to just a compact
+          Prev / page-count / Next pill so the book claims the screen. */}
+      {mode === "reading" && deviceView !== "perry" && readingFullscreen && (
+        <div style={{
+          position: "fixed", bottom: 12, left: "50%", transform: "translateX(-50%)",
+          zIndex: 55,
+          display: "inline-flex", alignItems: "center", gap: 6,
+          padding: "6px 8px",
+          background: "rgba(11,23,46,0.85)",
+          border: "1px solid rgba(201,146,42,0.35)",
+          borderRadius: 999,
+          backdropFilter: "blur(8px)",
+          boxShadow: "0 6px 20px rgba(0,0,0,0.55)",
+        }}>
+          <button
+            onClick={() => advancePage(-1)}
+            disabled={nanaPage === 1 || busy}
+            aria-label="Previous page"
+            style={{
+              width: 34, height: 34, borderRadius: "50%",
+              background: nanaPage === 1 || busy ? "rgba(255,255,255,0.06)" : AMBER,
+              color: nanaPage === 1 || busy ? "rgba(247,240,227,0.35)" : NAVY,
+              border: "none", cursor: nanaPage === 1 || busy ? "not-allowed" : "pointer",
+              fontSize: 16, fontWeight: 900,
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+              padding: 0, touchAction: "manipulation",
+            }}
+          >←</button>
+          <span style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 600, padding: "0 8px", fontVariantNumeric: "oldstyle-nums", whiteSpace: "nowrap" }}>
+            {nanaPage} / {currentBook.pages.length}
+          </span>
+          <button
+            onClick={() => advancePage(1)}
+            disabled={nanaPage === currentBook.pages.length || busy}
+            aria-label="Next page"
+            style={{
+              width: 34, height: 34, borderRadius: "50%",
+              background: nanaPage === currentBook.pages.length || busy ? "rgba(255,255,255,0.06)" : AMBER,
+              color: nanaPage === currentBook.pages.length || busy ? "rgba(247,240,227,0.35)" : NAVY,
+              border: "none", cursor: nanaPage === currentBook.pages.length || busy ? "not-allowed" : "pointer",
+              fontSize: 16, fontWeight: 900,
+              display: "inline-flex", alignItems: "center", justifyContent: "center",
+              padding: 0, touchAction: "manipulation",
+            }}
+          >→</button>
+        </div>
+      )}
+      {mode === "reading" && deviceView !== "perry" && !readingFullscreen && (
         <div style={{
           display: "flex", alignItems: "center", justifyContent: "center",
           gap: 8, marginTop: 8, flexShrink: 0,
