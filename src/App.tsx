@@ -16631,7 +16631,19 @@ export default function App() {
         } else if (msg.type === "phonics_card") {
           // Rick's Aug 14: cross-iPad phonics coaching card. Whichever
           // side tapped Phonics, both see the same OG rule + Nana cue.
-          const p = msg.payload as { word?: string; rule?: string; ruleLabel?: string; nanaCue?: string; perryHint?: string };
+          // Sep 24: multi-step Diane walkthroughs carry `steps` array;
+          // both iPads open on step 1 and Nana advances everyone.
+          const p = msg.payload as {
+            word?: string;
+            rule?: string;
+            ruleLabel?: string;
+            nanaCue?: string;
+            perryHint?: string;
+            source?: string;
+            steps?: Array<{ code: string; codeLabel: string; target: string; prompt: string }>;
+            level?: string;
+            syllables?: string;
+          };
           if (typeof p.word === "string" && typeof p.nanaCue === "string") {
             setSelPhonicsCard({
               word: p.word,
@@ -16639,9 +16651,16 @@ export default function App() {
               ruleLabel: p.ruleLabel ?? "Phonics",
               nanaCue: p.nanaCue,
               perryHint: p.perryHint ?? "",
+              source: p.source,
+              steps: Array.isArray(p.steps) ? p.steps : undefined,
+              level: p.level,
+              syllables: p.syllables,
             });
+            setSelPhonicsStep(0);
             if (selPhonicsTimerRef.current) window.clearTimeout(selPhonicsTimerRef.current);
-            selPhonicsTimerRef.current = window.setTimeout(() => setSelPhonicsCard(null), 12_000);
+            if (!p.steps || p.steps.length <= 1) {
+              selPhonicsTimerRef.current = window.setTimeout(() => setSelPhonicsCard(null), 12_000);
+            }
           }
         } else if (msg.type === "selection_broadcast") {
           // Rick's Build 30 review #3: Perry highlighted a word — anchor
@@ -17554,7 +17573,22 @@ export default function App() {
   const [selPronState, setSelPronState] = useState<{ word: string; status: "loading" | "done" | "err" } | null>(null);
   const [selPhoState,  setSelPhoState]  = useState<{ word: string; status: "loading" | "done" | "err" } | null>(null);
   const [selSaveState, setSelSaveState] = useState<{ word: string; status: "saving" | "saved" | "already" } | null>(null);
-  const [selPhonicsCard, setSelPhonicsCard] = useState<{ word: string; rule: string; ruleLabel: string; nanaCue: string; perryHint: string } | null>(null);
+  // Rick's Sep 24 feature: Diane's 94 teacher-approved words carry
+  // 1-3 sequential lesson steps. Card renders single-step (source
+  // 'static' / 'llm' / 'cache') OR multi-step walkthrough (source
+  // 'diane') via the optional `steps` array.
+  const [selPhonicsCard, setSelPhonicsCard] = useState<{
+    word: string;
+    rule: string;
+    ruleLabel: string;
+    nanaCue: string;
+    perryHint: string;
+    source?: string;
+    steps?: Array<{ code: string; codeLabel: string; target: string; prompt: string }>;
+    level?: string;
+    syllables?: string;
+  } | null>(null);
+  const [selPhonicsStep, setSelPhonicsStep] = useState<number>(0);
   // Rick's Build 30 review #3: Perry broadcasts her selection to Nana
   // via SSE. Nana sees a SelectionActionMenu anchored to the matching
   // word on her own page. Perry sees no popup at all.
@@ -17572,7 +17606,16 @@ export default function App() {
   const [bookRequestApprovedToast, setBookRequestApprovedToast] = useState<{ bookId: string; ts: number } | null>(null);
   const [bookRequestModalOpen, setBookRequestModalOpen] = useState(false);
   const selPronCacheRef = useRef<Map<string, { audioUrl: string | null; ipa: string | null; definition: string | null }>>(new Map());
-  const selPhoCacheRef  = useRef<Map<string, { rule: string; ruleLabel: string; nanaCue: string; perryHint: string }>>(new Map());
+  const selPhoCacheRef  = useRef<Map<string, {
+    rule: string;
+    ruleLabel: string;
+    nanaCue: string;
+    perryHint: string;
+    source?: string;
+    steps?: Array<{ code: string; codeLabel: string; target: string; prompt: string }>;
+    level?: string;
+    syllables?: string;
+  }>>(new Map());
   const selPhonicsTimerRef = useRef<number | null>(null);
   const selSaveTimerRef    = useRef<number | null>(null);
 
@@ -17642,6 +17685,13 @@ export default function App() {
     const cached = selPhoCacheRef.current.get(word.toLowerCase());
     if (cached) {
       setSelPhonicsCard({ word, ...cached });
+      setSelPhonicsStep(0);
+      // Multi-step Diane walkthroughs pause the auto-dismiss timer
+      // (only single-step cards auto-hide).
+      if (selPhonicsTimerRef.current) window.clearTimeout(selPhonicsTimerRef.current);
+      if (!cached.steps || cached.steps.length <= 1) {
+        selPhonicsTimerRef.current = window.setTimeout(() => setSelPhonicsCard(null), 12_000);
+      }
       return;
     }
     setSelPhoState({ word, status: "loading" });
@@ -17654,9 +17704,14 @@ export default function App() {
         ruleLabel: data.ruleLabel,
         nanaCue: data.nanaCue,
         perryHint: data.perryHint,
+        source: data.source,
+        steps: data.steps,
+        level: data.level,
+        syllables: data.syllables,
       };
       selPhoCacheRef.current.set(word.toLowerCase(), payload);
       setSelPhonicsCard({ word, ...payload });
+      setSelPhonicsStep(0);
       setSelPhoState({ word, status: "done" });
       // Broadcast so both iPads see the same coaching card.
       if (connectionId) api.sessions.publishEvent(connectionId, "phonics_card", { word, ...payload }).catch(() => {});
@@ -17664,7 +17719,12 @@ export default function App() {
       setSelPhoState({ word, status: "err" });
     }
     if (selPhonicsTimerRef.current) window.clearTimeout(selPhonicsTimerRef.current);
-    selPhonicsTimerRef.current = window.setTimeout(() => setSelPhonicsCard(null), 12_000);
+    // Only auto-hide single-step cards — multi-step walkthroughs stay
+    // open until Nana taps Done (or hits × explicitly).
+    const cachedNow = selPhoCacheRef.current.get(word.toLowerCase());
+    if (!cachedNow?.steps || cachedNow.steps.length <= 1) {
+      selPhonicsTimerRef.current = window.setTimeout(() => setSelPhonicsCard(null), 12_000);
+    }
   }, [connectionId]);
 
   // Rick's Build 30 review #3: Perry publishes her selection so Nana's
@@ -19339,8 +19399,23 @@ export default function App() {
       )}
       {/* Phonics coaching card — Rick's Build 30 review #3: Nana teaches
           Perry through it; Perry should NOT see the card. Suppress on
-          Perry side; render only on Nana/both. */}
-      {selPhonicsCard && deviceView !== "perry" && (
+          Perry side; render only on Nana/both.
+          Rick's Sep 24 feature: Diane's teacher-approved multi-step
+          walkthrough. When source='diane' and steps has 2+ entries,
+          the card shows one step at a time with Prev/Next controls
+          and a step-count chip. Single-step cards render unchanged. */}
+      {selPhonicsCard && deviceView !== "perry" && (() => {
+        const isDiane = selPhonicsCard.source === "diane" && Array.isArray(selPhonicsCard.steps) && selPhonicsCard.steps.length > 0;
+        const steps = selPhonicsCard.steps ?? [];
+        const stepIdx = Math.min(selPhonicsStep, Math.max(0, steps.length - 1));
+        const currentStep = isDiane ? steps[stepIdx] : null;
+        // Header shows the ACTIVE step's rule label (each step can be a
+        // different rule) so Nana knows which lesson is on screen.
+        const activeRuleLabel = currentStep?.codeLabel ?? selPhonicsCard.ruleLabel;
+        const activePrompt = currentStep?.prompt ?? selPhonicsCard.nanaCue;
+        const activeTarget = currentStep?.target ?? "";
+        const totalSteps = isDiane ? steps.length : 1;
+        return (
         <div
           role="dialog"
           aria-live="polite"
@@ -19358,20 +19433,38 @@ export default function App() {
             animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
-            <div style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <span style={{
                 background: "#C9922A", color: "#F7F0E3",
                 padding: "3px 10px", borderRadius: 999,
                 fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800,
                 letterSpacing: "0.14em", textTransform: "uppercase",
-              }}>{selPhonicsCard.ruleLabel}</span>
+              }}>{activeRuleLabel}</span>
               <span style={{ color: "#5C3A1E", fontFamily: "Playfair Display, serif", fontSize: 22, fontWeight: 700 }}>
-                {selPhonicsCard.word}
+                {selPhonicsCard.syllables && isDiane ? selPhonicsCard.syllables : selPhonicsCard.word}
               </span>
+              {isDiane && totalSteps > 1 && (
+                <span style={{
+                  background: "rgba(92,58,30,0.14)",
+                  color: "#5C3A1E",
+                  padding: "2px 8px", borderRadius: 999,
+                  fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 700,
+                  letterSpacing: "0.10em",
+                }}>Step {stepIdx + 1} of {totalSteps}</span>
+              )}
+              {isDiane && (
+                <span style={{
+                  background: "rgba(134,239,172,0.28)",
+                  color: "#166534",
+                  padding: "2px 8px", borderRadius: 999,
+                  fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800,
+                  letterSpacing: "0.14em", textTransform: "uppercase",
+                }}>Teacher-approved</span>
+              )}
             </div>
             <button
-              onClick={() => setSelPhonicsCard(null)}
+              onClick={() => { setSelPhonicsCard(null); setSelPhonicsStep(0); }}
               aria-label="Close phonics card"
               style={{
                 width: 30, height: 30, borderRadius: 999,
@@ -19383,16 +19476,92 @@ export default function App() {
               }}
             >×</button>
           </div>
-          <div style={{ fontFamily: "Merriweather, serif", fontSize: 15, lineHeight: 1.55, color: "#2D1A08", marginBottom: selPhonicsCard.perryHint ? 8 : 0 }}>
-            {selPhonicsCard.nanaCue}
+          {/* Highlight the target letters (for Diane steps that have a
+              target like "sh" or "at" or "e|d" — we render the target
+              in a pill above the prompt so Nana can point to it). */}
+          {isDiane && activeTarget && (
+            <div style={{ marginBottom: 8 }}>
+              <span style={{
+                fontFamily: "Playfair Display, serif",
+                fontSize: 18, fontWeight: 700,
+                color: "#C9922A",
+                padding: "3px 12px",
+                background: "rgba(201,146,42,0.14)",
+                borderRadius: 8,
+                border: "1px solid rgba(201,146,42,0.35)",
+                letterSpacing: "0.08em",
+              }}>{activeTarget}</span>
+            </div>
+          )}
+          <div style={{ fontFamily: "Merriweather, serif", fontSize: 15, lineHeight: 1.55, color: "#2D1A08", marginBottom: (isDiane || selPhonicsCard.perryHint) ? 10 : 0 }}>
+            {activePrompt}
           </div>
-          {selPhonicsCard.perryHint && (
+          {/* Multi-step navigation controls — Prev / step count / Next /
+              Done. Only rendered for Diane multi-step cards. */}
+          {isDiane && totalSteps > 1 && (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginTop: 10 }}>
+              <button
+                onClick={() => setSelPhonicsStep(i => Math.max(0, i - 1))}
+                disabled={stepIdx === 0}
+                style={{
+                  background: stepIdx === 0 ? "rgba(92,58,30,0.06)" : "rgba(92,58,30,0.14)",
+                  color: stepIdx === 0 ? "rgba(92,58,30,0.35)" : "#5C3A1E",
+                  border: "1px solid rgba(92,58,30,0.30)",
+                  borderRadius: 999,
+                  padding: "7px 14px",
+                  fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700,
+                  cursor: stepIdx === 0 ? "not-allowed" : "pointer",
+                  touchAction: "manipulation",
+                }}
+              >← Prev</button>
+              <div style={{ display: "flex", gap: 4 }}>
+                {steps.map((_, i) => (
+                  <span key={i} style={{
+                    width: 7, height: 7, borderRadius: "50%",
+                    background: i === stepIdx ? "#C9922A" : "rgba(92,58,30,0.22)",
+                  }} />
+                ))}
+              </div>
+              {stepIdx < totalSteps - 1 ? (
+                <button
+                  onClick={() => setSelPhonicsStep(i => Math.min(totalSteps - 1, i + 1))}
+                  style={{
+                    background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 100%)",
+                    color: NAVY,
+                    border: "none",
+                    borderRadius: 999,
+                    padding: "7px 16px",
+                    fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 800,
+                    cursor: "pointer",
+                    boxShadow: "0 4px 10px rgba(201,146,42,0.35)",
+                    touchAction: "manipulation",
+                  }}
+                >Next →</button>
+              ) : (
+                <button
+                  onClick={() => { setSelPhonicsCard(null); setSelPhonicsStep(0); }}
+                  style={{
+                    background: "rgba(34,197,94,0.18)",
+                    color: "#166534",
+                    border: "1px solid rgba(34,197,94,0.55)",
+                    borderRadius: 999,
+                    padding: "7px 16px",
+                    fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 800,
+                    cursor: "pointer",
+                    touchAction: "manipulation",
+                  }}
+                >✓ Done</button>
+              )}
+            </div>
+          )}
+          {!isDiane && selPhonicsCard.perryHint && (
             <div style={{ fontFamily: "DM Sans, sans-serif", fontSize: 12, color: "#5C3A1E", fontStyle: "italic", opacity: 0.85 }}>
               For {(dashboardPerryName || "Perry")}: {selPhonicsCard.perryHint}
             </div>
           )}
         </div>
-      )}
+        );
+      })()}
       {/* Perry-only toggle-flip toast — see Rick's Build 28 #7. */}
       {childPromptsToast && (
         <div

@@ -339,13 +339,24 @@ export const api = {
     audioUrl: (word: string) => `${BASE}/tts/${encodeURIComponent(word)}.mp3`,
   },
 
-  /** Phonics classification — static Orton-Gillingham rules first,
-   *  gpt-4o-mini fallback for the tail. Server caches every response
-   *  in the phonics_cache table so each unique word costs at most one
-   *  OpenAI call ever. */
+  /** Phonics classification — Diane's teacher-approved multi-step
+   *  prompts first (source: "diane" with `steps` array), then static
+   *  Orton-Gillingham rules, then gpt-4o-mini for the tail. Server
+   *  caches every response in the phonics_cache table so each unique
+   *  word costs at most one OpenAI call ever. */
   phonics: {
     classify: (word: string) =>
-      req<{ rule: string; ruleLabel: string; nanaCue: string; perryHint: string; source: string }>(
+      req<{
+        rule: string;
+        ruleLabel: string;
+        nanaCue: string;
+        perryHint: string;
+        source: string;
+        /** Diane-source only: sequential lesson steps. */
+        steps?: Array<{ code: string; codeLabel: string; target: string; prompt: string }>;
+        level?: string;
+        syllables?: string;
+      }>(
         "POST", "/ai/phonics", { word },
       ),
   },
