@@ -1550,11 +1550,50 @@ function SelectionActionMenu({
       // Only respond to selections inside the book area.
       if (!bookArea.contains(range.commonAncestorContainer)) { if (!isPerry) setState(null); return; }
       const raw = sel.toString().trim();
-      if (!raw || raw.length > 60) { if (!isPerry) setState(null); return; }
-      // Normalize: single word (strip surrounding punctuation, ignore
-      // multi-word selections for now — Pronunciation and Phonics both
-      // key on individual words).
-      const word = raw.split(/\s+/)[0].replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+      if (!raw || raw.length > 80) { if (!isPerry) setState(null); return; }
+
+      // Rick's Sep 25: selection cleanup + word-boundary detection.
+      // Old logic just split on whitespace and stripped punctuation
+      // from the raw selection. That failed in three real cases:
+      //   1. Selection starts mid-word ("bod" in "nobody") → old code
+      //      returned "bod". Now: expand outward to full word bounds.
+      //   2. Selection includes leading em-dash ("—nobody") or
+      //      trailing semi/colon ("nobody;") → old regex handled the
+      //      strip, but couldn't recover the FULL word if selection
+      //      was also mid-word. Now: bounds are derived from the
+      //      text node, not the ragged selection.
+      //   3. Curly apostrophe or hyphenated words (don't, mother-in-
+      //      law) → old regex stripped inside chars. Now: apostrophes
+      //      + hyphens preserved INSIDE word, stripped only at bounds.
+      const wordCharRegex = /[\p{L}\p{N}'’‘\-]/u;
+      let word = "";
+      // Expand from the START of the selection outward, using the
+      // start container's text. This is the container the user first
+      // touched, so it's the most reliable anchor for "which word did
+      // they mean?" Falls back to the raw normalized string if the
+      // start container isn't a text node (rare — e.g. dragged across
+      // element boundaries).
+      const startNode = range.startContainer;
+      if (startNode.nodeType === 3) {
+        const text = startNode.textContent ?? "";
+        let start = Math.min(range.startOffset, text.length);
+        let end = start;
+        while (start > 0 && wordCharRegex.test(text.charAt(start - 1))) start--;
+        while (end < text.length && wordCharRegex.test(text.charAt(end))) end++;
+        word = text.substring(start, end);
+      }
+      if (!word) {
+        // Fallback: strip surrounding punctuation from the raw
+        // selection and take the first token.
+        word = raw.split(/\s+/)[0].replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+      }
+      // Belt-and-suspenders: even the boundary-derived word might
+      // have a stray leading/trailing apostrophe (Unicode gotcha with
+      // possessives at end of sentence). Normalize once more.
+      word = word.replace(/^['’‘\-]+|['’‘\-]+$/g, "");
+      // Normalize curly apostrophes to straight so the phonics_cache
+      // key match doesn't miss on typography differences.
+      word = word.replace(/[’‘]/g, "'");
       if (!word) { if (!isPerry) setState(null); return; }
       // Sentence context: the paragraph containing the selection anchor.
       const anchor = range.commonAncestorContainer as Node;
