@@ -361,6 +361,25 @@ export const api = {
       ),
   },
 
+  /** Rick's Sep 25 (C-3): in-app "Send Feedback" channel. Any user
+   *  can submit; connection_id + user_id are stamped server-side from
+   *  the auth session so Rick can trace which family sent it. */
+  feedback: {
+    submit: (body: {
+      message: string;
+      category?: "bug" | "idea" | "praise" | "confusion" | "general";
+      subject?: string;
+      senderEmail?: string;
+      senderRole?: "nana" | "child" | "parent";
+      appVersion?: string;
+      pageContext?: string;
+      connectionId?: string;
+    }) =>
+      req<{ feedback: { id: string; status: string; createdAt: string } }>(
+        "POST", "/feedback", body,
+      ),
+  },
+
   /** Book requests — Rick's Sep 2026 family-side "can't find your
    *  book?" flow. Family submits a title (+ optional author + URL);
    *  admin sees the request in the admin dashboard queue; on approval

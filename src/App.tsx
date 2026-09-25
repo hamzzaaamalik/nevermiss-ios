@@ -11537,6 +11537,7 @@ function DeviceFrame({
   onPerryPickBook,
   onPerryAskNana,
   onOpenBookRequest,
+  onOpenFeedback,
   readingFullscreen = false,
   onToggleReadingFullscreen,
   selectionPronunciationState = null,
@@ -11739,6 +11740,9 @@ function DeviceFrame({
   /** Nana-only (for now): opens the "Request a book we don't have"
    *  modal. Rick's Sep 2026 library-search family flow. */
   onOpenBookRequest?: () => void;
+  /** Rick's Sep 25 (C-3): opens the Send Feedback modal. Available
+   *  to both Nana and Perry from the Menu drawer. */
+  onOpenFeedback?: () => void;
   /** Rick's Build 32 review #B-5: minimal-chrome distraction-free
    *  reading. When true, the device-frame top bar collapses to just
    *  a floating exit-fullscreen pill. */
@@ -11881,6 +11885,12 @@ function DeviceFrame({
       // Perry's menu should have more than just Show & Tell.
       es.push({ divider: true, key: "d1", label: "My Learning" });
       es.push({ key: "learnedwords", label: "Words I'm Learning", sublabel: "See my saved words", icon: <StarIcon size={16} strokeWidth={2} aria-hidden />, onClick: onOpenLearnedWords, active: isLearnedWords });
+    }
+    // Rick's Sep 25 (C-3): Send Feedback entry — visible to everyone,
+    // Nana and Perry both. Reachable from every screen.
+    if (onOpenFeedback) {
+      if (isNana) es.push({ divider: true, key: "dfb" });
+      es.push({ key: "feedback", label: "Send Feedback", sublabel: "Tell Rick what you think", icon: <Mail size={16} strokeWidth={2} aria-hidden />, onClick: onOpenFeedback });
     }
     if (isNana) {
       es.push({ divider: true, key: "d2" });
@@ -14054,6 +14064,229 @@ function BookRequestModal({ connectionId, onClose }: { connectionId: string; onC
                 }}
               >
                 {submitting ? "Sending…" : "Send request"}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * FeedbackModal — Rick's C-3 (Sep 25). Any user can send feedback
+ * from any screen. Captures the message, an optional email for
+ * follow-up, a category picker (bug / idea / praise / confusion),
+ * and the current app/page context automatically. POSTs to
+ * /api/feedback which stamps the connection + user id from the
+ * auth session so Rick can trace which family sent it.
+ */
+function FeedbackModal({
+  connectionId,
+  senderRole,
+  senderName,
+  pageContext,
+  appVersion,
+  onClose,
+}: {
+  connectionId: string | null;
+  senderRole?: "nana" | "child" | "parent";
+  senderName?: string;
+  pageContext?: string;
+  appVersion?: string;
+  onClose: () => void;
+}) {
+  const [message, setMessage] = useState("");
+  const [category, setCategory] = useState<"bug" | "idea" | "praise" | "confusion" | "general">("general");
+  const [email, setEmail] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [err, setErr] = useState("");
+  const [done, setDone] = useState(false);
+
+  const submit = async () => {
+    const m = message.trim();
+    if (m.length < 5) { setErr("Please add a bit more detail."); return; }
+    setErr(""); setSubmitting(true);
+    try {
+      await api.feedback.submit({
+        message: m,
+        category,
+        senderEmail: email.trim() || undefined,
+        senderRole,
+        connectionId: connectionId ?? undefined,
+        pageContext,
+        appVersion,
+      });
+      setDone(true);
+      window.setTimeout(onClose, 2200);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Something went wrong. Try again.");
+    } finally { setSubmitting(false); }
+  };
+
+  const inputStyle: React.CSSProperties = {
+    width: "100%",
+    background: "rgba(255,255,255,0.06)",
+    border: "1px solid rgba(255,255,255,0.18)",
+    borderRadius: 12,
+    padding: "11px 14px",
+    color: CREAM,
+    fontFamily: "DM Sans, sans-serif", fontSize: 14,
+    outline: "none",
+    boxSizing: "border-box",
+  };
+  const labelStyle: React.CSSProperties = {
+    color: "rgba(247,240,227,0.7)", fontFamily: "DM Sans, sans-serif",
+    fontSize: 11, fontWeight: 800, letterSpacing: "0.10em", textTransform: "uppercase",
+    display: "block", marginBottom: 6,
+  };
+
+  const categories: Array<{ key: typeof category; label: string; emoji: string }> = [
+    { key: "bug",       label: "Something broke",   emoji: "🐛" },
+    { key: "idea",      label: "Idea",              emoji: "💡" },
+    { key: "confusion", label: "Confusing",         emoji: "❓" },
+    { key: "praise",    label: "Loving it",         emoji: "💛" },
+    { key: "general",   label: "Something else",    emoji: "💬" },
+  ];
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={submitting ? undefined : onClose}
+      style={{
+        position: "fixed", inset: 0, zIndex: 220,
+        background: "rgba(8,15,30,0.82)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 24,
+        animation: "phase-intro-fade 0.2s ease-out",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: "min(540px, 100%)",
+          background: "linear-gradient(180deg, #14223e 0%, #0b172e 100%)",
+          border: "1px solid rgba(201,146,42,0.45)",
+          borderRadius: 18,
+          padding: "22px 22px 20px",
+          boxShadow: "0 24px 60px rgba(0,0,0,0.6)",
+          animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
+          maxHeight: "90vh", overflowY: "auto",
+        }}
+      >
+        {done ? (
+          <div style={{ textAlign: "center", padding: "12px 0 8px" }}>
+            <div style={{ fontSize: 44, marginBottom: 8 }}>📬</div>
+            <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 20, fontWeight: 700, marginBottom: 6 }}>
+              Thank you{senderName ? `, ${senderName}` : ""}!
+            </div>
+            <div style={{ color: "rgba(247,240,227,0.7)", fontSize: 13, lineHeight: 1.55 }}>
+              Your feedback went straight to Rick. Every message shapes the app.
+            </div>
+          </div>
+        ) : (
+          <>
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 21, fontWeight: 700, marginBottom: 4 }}>
+                Send feedback
+              </div>
+              <div style={{ color: "rgba(247,240,227,0.6)", fontSize: 12.5, lineHeight: 1.55 }}>
+                Anything you noticed, anything you wish worked differently, anything that made you smile. Every note helps.
+              </div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div>
+                <label style={labelStyle}>What kind?</label>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {categories.map(c => {
+                    const active = category === c.key;
+                    return (
+                      <button
+                        key={c.key}
+                        onClick={() => setCategory(c.key)}
+                        style={{
+                          display: "inline-flex", alignItems: "center", gap: 6,
+                          padding: "7px 12px", borderRadius: 999,
+                          background: active ? "rgba(201,146,42,0.20)" : "rgba(255,255,255,0.05)",
+                          border: `1px solid ${active ? "rgba(201,146,42,0.55)" : "rgba(255,255,255,0.14)"}`,
+                          color: active ? AMBER : "rgba(247,240,227,0.75)",
+                          fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700,
+                          cursor: "pointer", touchAction: "manipulation",
+                        }}
+                      >
+                        <span style={{ fontSize: 14 }}>{c.emoji}</span>
+                        <span>{c.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div>
+                <label style={labelStyle}>Your message *</label>
+                <textarea
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  placeholder="What happened, what you wish, or what you loved..."
+                  rows={5}
+                  autoFocus
+                  style={{ ...inputStyle, resize: "vertical", minHeight: 100, fontFamily: "Merriweather, serif" }}
+                />
+              </div>
+              <div>
+                <label style={labelStyle}>Email (optional — for follow-up)</label>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  style={inputStyle}
+                />
+              </div>
+              {pageContext && (
+                <div style={{ color: "rgba(247,240,227,0.4)", fontSize: 10, fontStyle: "italic" }}>
+                  We'll also send the app version and the screen you're on so Rick can find the issue faster.
+                </div>
+              )}
+            </div>
+            {err && (
+              <div style={{ marginTop: 10, color: "#fca5a5", fontSize: 12, fontWeight: 600 }}>{err}</div>
+            )}
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 18 }}>
+              <button
+                onClick={onClose}
+                disabled={submitting}
+                style={{
+                  background: "transparent",
+                  color: "rgba(247,240,227,0.7)",
+                  border: "1px solid rgba(255,255,255,0.20)",
+                  borderRadius: 999,
+                  padding: "10px 20px",
+                  fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700,
+                  cursor: submitting ? "not-allowed" : "pointer",
+                  minHeight: 44, touchAction: "manipulation",
+                  opacity: submitting ? 0.5 : 1,
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submit}
+                disabled={submitting || message.trim().length < 5}
+                style={{
+                  background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+                  color: NAVY,
+                  border: "none",
+                  borderRadius: 999,
+                  padding: "10px 22px",
+                  fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 800, letterSpacing: "0.02em",
+                  cursor: submitting || message.trim().length < 5 ? "not-allowed" : "pointer",
+                  minHeight: 44, touchAction: "manipulation",
+                  boxShadow: "0 6px 16px rgba(201,146,42,0.42)",
+                  opacity: submitting || message.trim().length < 5 ? 0.6 : 1,
+                }}
+              >
+                {submitting ? "Sending…" : "Send feedback"}
               </button>
             </div>
           </>
@@ -17605,6 +17838,9 @@ export default function App() {
   // catalog auto-refreshes.
   const [bookRequestApprovedToast, setBookRequestApprovedToast] = useState<{ bookId: string; ts: number } | null>(null);
   const [bookRequestModalOpen, setBookRequestModalOpen] = useState(false);
+  // Rick's Sep 25 (C-3): in-app "Send Feedback" — accessible from
+  // Menu on every screen. Both Nana and Perry can send.
+  const [feedbackModalOpen, setFeedbackModalOpen] = useState(false);
   const selPronCacheRef = useRef<Map<string, { audioUrl: string | null; ipa: string | null; definition: string | null }>>(new Map());
   const selPhoCacheRef  = useRef<Map<string, {
     rule: string;
@@ -19635,6 +19871,20 @@ export default function App() {
           onClose={() => setBookRequestModalOpen(false)}
         />
       )}
+      {/* Rick's Sep 25 (C-3): Send Feedback modal. Accessible from
+          Menu on every screen. Auto-captures the current mode as
+          page context so Rick can jump to the right screen when he
+          reads the report. */}
+      {feedbackModalOpen && (
+        <FeedbackModal
+          connectionId={connectionId}
+          senderRole={deviceView === "perry" ? "child" : (currentUser?.role === "parent" ? "parent" : "nana")}
+          senderName={(dashboardPerryName || nanaDisplayName || currentUser?.firstName || "").trim() || undefined}
+          pageContext={`mode=${mode}${selectedBookId ? ` book=${selectedBookId}` : ""}`}
+          appVersion="Build 35"
+          onClose={() => setFeedbackModalOpen(false)}
+        />
+      )}
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=Merriweather:ital,wght@0,400;0,700;1,400&family=DM+Sans:wght@400;500;700&display=swap');
 
@@ -19920,6 +20170,7 @@ export default function App() {
           libraryScrollTop={libraryScrollTop}
           onSignOut={handleSignOut}
           onOpenBookRequest={() => setBookRequestModalOpen(true)}
+          onOpenFeedback={() => setFeedbackModalOpen(true)}
           readingFullscreen={readingFullscreen}
           onToggleReadingFullscreen={toggleReadingFullscreen}
         /></VideoSessionProvider>}
@@ -20067,6 +20318,7 @@ export default function App() {
           onSelectionSave={handleSelectionSave}
           onShareSelection={handleShareSelection}
           onPerryPickBook={() => handlePerryRequest("pickbook")}
+          onOpenFeedback={() => setFeedbackModalOpen(true)}
           onPerryAskNana={() => handlePerryRequest("wave")}
           selectionPronunciationState={selPronState}
           selectionPhonicsState={selPhoState}
