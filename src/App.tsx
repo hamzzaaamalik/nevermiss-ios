@@ -2033,6 +2033,76 @@ function BookContent({
     });
   }, [page, targetFontPct, p?.leftBody, p?.rightBody, p?.rightIsTitle]);
 
+  // Rick's Sep 25 (C-1): fixed-layout / image-page render path. When
+  // the current page carries an imageUrl (either an Aubrees-style
+  // preset picture book OR a fixed-layout EPUB the admin imported),
+  // display the illustration full-bleed on the whole spread and drop
+  // any caption text below. Both pages of the "spread" render the
+  // same image so single/double mode both look right; page-turn
+  // moves to the next spread regardless. This bypasses the entire
+  // two-column text renderer below — that model is wrong for
+  // pre-paginated illustrated books.
+  if (p?.imageUrl) {
+    const caption = (p.rightBody ?? p.leftBody ?? "").trim();
+    return (
+      <div style={{
+        display: "flex", flexDirection: "column",
+        width: "100%", height: "100%",
+        backgroundColor: "#0b172e",
+        boxShadow: "0 8px 32px rgba(0,0,0,0.55), 0 1px 4px rgba(0,0,0,0.3)",
+        position: "relative",
+      }}>
+        <div style={{
+          flex: 1, minHeight: 0,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          padding: caption ? "10px 12px 4px" : "10px 12px",
+          backgroundColor: themeColors.page,
+          overflow: "hidden",
+        }}>
+          <img
+            src={p.imageUrl}
+            alt=""
+            style={{
+              maxWidth: "100%",
+              maxHeight: "100%",
+              objectFit: "contain",
+              borderRadius: 4,
+              boxShadow: "0 4px 14px rgba(0,0,0,0.28)",
+            }}
+          />
+        </div>
+        {caption && (
+          <div style={{
+            flexShrink: 0,
+            padding: "10px 20px 14px",
+            backgroundColor: themeColors.page,
+            color: themeColors.text,
+            fontFamily: "Merriweather, Georgia, serif",
+            fontSize: `${targetFontPct}%`,
+            lineHeight: 1.5,
+            textAlign: "center",
+            borderTop: `1px solid ${LEATHER}22`,
+          }}>
+            {caption}
+          </div>
+        )}
+        {/* Page number — small, bottom-center, hidden on sign-off. */}
+        {!p.signOff && (
+          <div style={{
+            position: "absolute", bottom: 4, left: 0, right: 0,
+            textAlign: "center",
+            color: LEATHER, fontFamily: "Merriweather, serif", fontSize: 9,
+            opacity: 0.45, letterSpacing: "0.1em",
+            fontVariantNumeric: "oldstyle-nums",
+            pointerEvents: "none",
+          }}>
+            · {safePage} ·
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div style={{
       display: "flex", width: "100%", height: "100%",
