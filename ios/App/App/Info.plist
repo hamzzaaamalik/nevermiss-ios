@@ -49,8 +49,16 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>NeverMiss uses your iPad camera so you can see your grandchild during reading sessions. Your video is only shared with the family member you are connected to and is not recorded by default.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>NeverMiss lets you choose a photo of your grandchild for their profile picture. The photo is only shared with your family.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>NeverMiss uses your iPad microphone so you can hear and talk to your grandchild during reading sessions. Your audio is only shared with the family member you are connected to.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>NeverMiss adds the reading sessions you schedule to your calendar so you never miss one.</string>
+	<key>NSCalendarsWriteOnlyAccessUsageDescription</key>
+	<string>NeverMiss adds the reading sessions you schedule to your calendar so you never miss one.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>NeverMiss adds the reading sessions you schedule to your calendar so you never miss one.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>NeverMiss uses your local network to establish a direct, lower-latency video connection between the two iPads when both are on the same Wi-Fi network. No data is shared with other devices.</string>
 	<!-- App Store Connect Export Compliance: NeverMiss only uses iOS's

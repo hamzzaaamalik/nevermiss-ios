@@ -34,3 +34,19 @@ export function roleToPerson(role: VideoRole): VideoPerson {
 export function userIdForRole(connectionId: string, role: VideoRole): string {
   return `${connectionId}:${role}`;
 }
+
+/** Why this device's video isn't working (Build 38 help card). */
+export type VideoProblemKind =
+  | "blocked"        // camera / mic permission denied
+  | "in-use"         // another app (FaceTime, Zoom) holds the camera
+  | "not-found"      // no camera on this device
+  | "unsupported"    // browser can't do WebRTC video calls
+  | "insecure"       // page isn't https, so the browser hides the camera
+  | "join-failed"    // couldn't reach or enter the call
+  | "ejected"        // the same person joined from another device
+  | "camera-unknown";
+
+export interface VideoProblem {
+  kind: VideoProblemKind;
+  detail?: string;
+}

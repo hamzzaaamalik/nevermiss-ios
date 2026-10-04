@@ -24,6 +24,19 @@ export interface VideoTileState {
   isActiveSpeaker: boolean;
 }
 
+function newestFirst(a: { joined_at?: Date; local?: boolean }, b: { joined_at?: Date; local?: boolean }): 1 | -1 | 0 {
+  // The local participant always wins for our own tile.
+  if (a.local !== b.local) return a.local ? -1 : 1;
+  const ta = a.joined_at ? new Date(a.joined_at).getTime() : 0;
+  const tb = b.joined_at ? new Date(b.joined_at).getTime() : 0;
+  return ta === tb ? 0 : ta > tb ? -1 : 1;
+}
+
+/** The raw video track state, so a tile can say why there is no picture. */
+export function useVideoTrackState(participantId: string): string | undefined {
+  return useParticipantProperty(participantId, "tracks.video.state") as string | undefined;
+}
+
 export function useVideoTile({ person, connectionId }: UseVideoTileOpts): VideoTileState {
   const role: VideoRole = personToRole(person);
   const expectedUserId = connectionId ? userIdForRole(connectionId, role) : null;
@@ -36,10 +49,16 @@ export function useVideoTile({ person, connectionId }: UseVideoTileOpts): VideoT
   // re-issues the user_id, the tile still binds.
   const expectedUserName = role === "nana" ? "Nana" : "Perry";
 
+  // Tokens carry user_id = role ("nana" / "perry") since Build 38; the
+  // older `${connectionId}:${role}` form and the display name still match.
+  // Newest first: a child who reopened the app leaves a stale copy until
+  // Nana's iPad ejects it, and the tile must follow the live device.
   const matchedIds = useParticipantIds({
     filter: (p) =>
+      p.user_id === role ||
       (Boolean(expectedUserId) && p.user_id === expectedUserId) ||
       p.user_name === expectedUserName,
+    sort: newestFirst,
   });
   const participantId = matchedIds[0] ?? null;
 

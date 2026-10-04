@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Clock, Moon, Sun, Sunrise } from "lucide-react";
+import { Clock, Moon, Sun, SunMedium, Sunrise } from "lucide-react";
 import {
   NEXT_THEME,
   READING_THEME_LABEL,
@@ -198,7 +198,7 @@ export function StickyChapter({
 }
 
 /**
- * Theme switcher cycles day → sepia → night → day.
+ * Theme switcher cycles day → white → sepia → night → day.
  * Visible only to Nana (Perry doesn't choose; she follows).
  */
 export function ThemeSwitcher({
@@ -208,15 +208,21 @@ export function ThemeSwitcher({
   theme: ReadingTheme;
   onChange: (next: ReadingTheme) => void;
 }) {
-  const Icon = theme === "day" ? Sun : theme === "sepia" ? Sunrise : Moon;
+  const Icon = theme === "day" ? Sun : theme === "bright" ? SunMedium : theme === "sepia" ? Sunrise : Moon;
   return (
     <button
       onClick={() => onChange(NEXT_THEME[theme])}
       aria-label={`Reading theme: ${READING_THEME_LABEL[theme]}. Tap to change.`}
       title={`Theme: ${READING_THEME_LABEL[theme]} — tap to cycle`}
       style={{
-        width: 36,
+        minWidth: 36,
         height: 36,
+        gap: 5,
+        paddingLeft: 10,
+        paddingRight: 10,
+        fontFamily: "DM Sans, sans-serif",
+        fontSize: 12,
+        fontWeight: 700,
         borderRadius: 999,
         border: "1px solid rgba(255,255,255,0.18)",
         backgroundColor: "rgba(255,255,255,0.06)",
@@ -225,12 +231,12 @@ export function ThemeSwitcher({
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
-        padding: 0,
         WebkitTapHighlightColor: "transparent",
         transition: "background-color 160ms ease",
       }}
     >
       <Icon size={16} strokeWidth={2} aria-hidden />
+      <span>{READING_THEME_LABEL[theme]}</span>
     </button>
   );
 }

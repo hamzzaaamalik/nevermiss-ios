@@ -5,7 +5,11 @@
  * so the book doesn't strobe a dark room.
  */
 
-export type ReadingTheme = "day" | "sepia" | "night";
+export type ReadingTheme = "day" | "bright" | "sepia" | "night";
+
+export function isReadingTheme(v: unknown): v is ReadingTheme {
+  return v === "day" || v === "bright" || v === "sepia" || v === "night";
+}
 
 export interface ReadingThemeColors {
   /** Page background — the "paper". */
@@ -37,6 +41,17 @@ export const READING_THEMES: Record<ReadingTheme, ReadingThemeColors> = {
     spineShadow: "rgba(0,0,0,0.13)",
     bookShadow: "0 6px 28px rgba(0,0,0,0.55), 0 1px 4px rgba(0,0,0,0.30)",
   },
+  // Rick's Build 33: a clean white page like a Kindle or Nook.
+  bright: {
+    page: "#FFFFFF",
+    spine: "#D4D4D4",
+    text: "#1A1A1A",
+    accent: "#3F3F3F",
+    muted: "#6B6B6B",
+    highlight: "rgba(201,146,42,0.45)",
+    spineShadow: "rgba(0,0,0,0.06)",
+    bookShadow: "0 6px 24px rgba(0,0,0,0.40), 0 1px 4px rgba(0,0,0,0.20)",
+  },
   sepia: {
     page: "#EFE0BD",
     spine: "#6B4218",
@@ -61,12 +76,14 @@ export const READING_THEMES: Record<ReadingTheme, ReadingThemeColors> = {
 
 export const READING_THEME_LABEL: Record<ReadingTheme, string> = {
   day: "Day",
+  bright: "White",
   sepia: "Sepia",
   night: "Night",
 };
 
 export const NEXT_THEME: Record<ReadingTheme, ReadingTheme> = {
-  day: "sepia",
+  day: "bright",
+  bright: "sepia",
   sepia: "night",
   night: "day",
 };

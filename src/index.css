@@ -488,6 +488,18 @@
 .book-body, .book-body * {
   -webkit-touch-callout: none;
 }
+/* Visible press on tile buttons (the tap highlight is turned off). */
+.nm-tile:active:not(:disabled) {
+  transform: scale(0.96);
+  filter: brightness(1.18);
+}
+/* Rick's Build 33 A-1: words are picked by tap, so the book never shows
+   iOS text selection (and therefore never the Copy / Look Up menu). */
+.nm-book-area, .nm-book-area * {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
 
 /* "Speaking" subtle breath halo for active video tiles. */
 @keyframes video-speaking-breath {

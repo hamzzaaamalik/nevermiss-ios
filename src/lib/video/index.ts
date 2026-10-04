@@ -21,10 +21,14 @@ export {
   useTrackPlayable,
   useMicMuted,
   useCameraOff,
+  useVideoTrackState,
 } from "./useVideoTile";
+export { VideoHelpCard } from "./VideoHelpCard";
 export type {
   VideoRole,
   VideoPerson,
   ConnectionQuality,
   SessionStatus,
+  VideoProblem,
+  VideoProblemKind,
 } from "./types";

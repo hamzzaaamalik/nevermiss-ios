@@ -84,7 +84,8 @@ export interface Child {
   connectionId: string;
   name: string;
   birthday: string | null;
-  pin: string;
+  /** Small square JPEG as a data URL (Build 38), or null. */
+  photoUrl?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -165,11 +166,25 @@ export const api = {
       req<{ valid: boolean; connectionId: string; nanaName: string; needsPin: boolean }>("GET", `/connections/lookup/${token}`),
     list: () => req<{ connections: Array<{ connection: Connection; nana: SafeUser | null }> }>("GET", "/connections"),
     activate: (token: string) => req<{ connection: Connection }>("POST", `/connections/activate/${token}`),
-    status: (id: string) => req<{ status: "pending" | "active" }>("GET", `/connections/${id}/status`),
+    /** `perryOnline` is real presence: a child's iPad has the session
+     *  stream open right now. `perryChildId` is who is logged in there. */
+    status: (id: string) => req<{ status: "pending" | "active"; perryOnline?: boolean; perryChildId?: string | null }>("GET", `/connections/${id}/status`),
+    /** The next saved visit (both sides accepted a time), if any. */
+    nextSession: (id: string, childId?: string | null) =>
+      req<{ nextSession: { startsAt: string; childId: string | null } | null }>(
+        "GET", `/connections/${id}/next-session${childId ? `?childId=${encodeURIComponent(childId)}` : ""}`,
+      ),
   },
   children: {
-    create: (body: { connectionId: string; name: string; birthday: string | null; pin: string }) =>
+    create: (body: { connectionId: string; name: string; birthday: string | null; pin: string; consent?: boolean }) =>
       req<Child>("POST", "/children", body),
+    /** Nana-only edits (signed-in account that owns the connection). */
+    update: (childId: string, body: { name?: string; pin?: string }) =>
+      req<{ child: Child }>("PATCH", `/children/${childId}`, body),
+    setPhoto: (childId: string, photo: string) =>
+      req<{ child: Child }>("PUT", `/children/${childId}/photo`, { photo }),
+    removePhoto: (childId: string) =>
+      req<{ child: Child }>("DELETE", `/children/${childId}/photo`),
     list: (connectionId: string) => req<Child[]>("GET", `/children/${connectionId}`),
     pinLogin: (connectionId: string, pin: string) =>
       req<{ child: Child; nanaName: string; connectionId: string }>("POST", "/children/pin-login", { connectionId, pin }),
@@ -177,7 +192,14 @@ export const api = {
   sessions: {
     publishEvent: (connectionId: string, type: string, payload: unknown) =>
       req<{ ok: boolean; subscribers: number }>("POST", `/sessions/${connectionId}/event`, { type, payload }),
-    streamUrl: (connectionId: string) => `${BASE}/sessions/${connectionId}/stream`,
+    /** `role` + `childId` register presence ("Perry is here" on Nana's Home). */
+    streamUrl: (connectionId: string, role?: "nana" | "perry", childId?: string | null) => {
+      const qs = new URLSearchParams();
+      if (role) qs.set("role", role);
+      if (childId) qs.set("childId", childId);
+      const tail = qs.toString();
+      return `${BASE}/sessions/${connectionId}/stream${tail ? `?${tail}` : ""}`;
+    },
     /** Polling fallback for environments that buffer SSE (Cloudflare Quick Tunnels). */
     getState: (connectionId: string) =>
       req<{
@@ -188,7 +210,7 @@ export const api = {
         scheduleAccepted?: { nana: boolean; perry: boolean };
         goodbyeStartTime?: number;
         goodbyePhase?: number;
-        readingTheme?: "day" | "sepia" | "night";
+        readingTheme?: string;
         /** Set by Nana's layout switcher; polled by Perry so layout choice
          *  survives SSE-buffered tunnels. */
         readingLayout?: string;
@@ -211,6 +233,13 @@ export const api = {
         lastReaction?: { emoji: string; from: "nana" | "perry"; ts: number };
         lastPointer?: { x: number; y: number; page: number; ts: number };
         lastWord?: { side: "L" | "R"; index: number; page: number; ts: number };
+        /** Word highlighted on both iPads; `cleared` when either side
+         *  dismissed it. Cleared server-side on page / book change. */
+        selection?: { wid?: string; word?: string; sentence?: string; bookId?: string; by?: "nana" | "perry"; cleared?: boolean; ts: number };
+        /** Each iPad's measured reading box, for the shared page plan. */
+        layoutProfiles?: Partial<Record<"nana" | "perry", Record<string, unknown> & { ts: number }>>;
+        /** Nana's merged page plan both iPads follow. */
+        pagePlan?: { bookId: string; key: string; mode: "single" | "double"; starts: number[]; splits: number[]; ts: number };
         lastSillyFilterNana?: string;
         lastSillyFilterPerry?: string;
         /** `host` identifies who initiated the current round so receivers
@@ -336,7 +365,32 @@ export const api = {
    *  browser can drop straight into <audio src>. Server caches per
    *  word so repeat plays are instant. */
   tts: {
-    audioUrl: (word: string) => `${BASE}/tts/${encodeURIComponent(word)}.mp3`,
+    audioUrl: (word: string) => `${BASE}/tts/v2/${encodeURIComponent(word)}.mp3`,
+  },
+
+  /** Family search of free classics (Standard Ebooks first, then
+   *  Project Gutenberg) for the Request a Book flow. */
+  library: {
+    search: (q: string, connectionId?: string) =>
+      req<{ results: Array<{
+        title: string;
+        author: string;
+        epubUrl: string;
+        coverUrl: string | null;
+        source: "standard_ebooks" | "gutenberg";
+        inCatalogBookId: string | null;
+      }> }>(
+        "GET",
+        `/library/search?q=${encodeURIComponent(q)}${connectionId ? `&connectionId=${encodeURIComponent(connectionId)}` : ""}`,
+      ).then(r => r.results),
+  },
+
+  /** Hosted single-event .ics (Safari offers "Add to Calendar"). */
+  calendar: {
+    icsUrl: (startMs: number, endMs: number) => {
+      const base = BASE.startsWith("http") ? BASE : `${window.location.origin}${BASE}`;
+      return `${base}/calendar/event.ics?start=${startMs}&end=${endMs}`;
+    },
   },
 
   /** Phonics classification — Diane's teacher-approved multi-step
@@ -374,6 +428,10 @@ export const api = {
       appVersion?: string;
       pageContext?: string;
       connectionId?: string;
+      /** Build 38: who / what / where, so a report can be traced without asking. */
+      childName?: string;
+      bookTitle?: string;
+      pageLabel?: string;
     }) =>
       req<{ feedback: { id: string; status: string; createdAt: string } }>(
         "POST", "/feedback", body,
@@ -405,6 +463,10 @@ export const api = {
       title: string;
       author?: string;
       sourceUrl?: string;
+      /** Where the book was found; standard_ebooks / gutenberg require an
+       *  allowlisted EPUB sourceUrl so admin can import it in one click. */
+      source?: "standard_ebooks" | "gutenberg" | "manual";
+      coverUrl?: string;
       childId?: string;
       requestedBy?: "nana" | "child";
     }) =>

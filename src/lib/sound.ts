@@ -6,7 +6,7 @@
 
 let ctx: AudioContext | null = null;
 
-function getContext(): AudioContext | null {
+export function getContext(): AudioContext | null {
   if (typeof window === "undefined") return null;
   if (ctx) return ctx;
   try {

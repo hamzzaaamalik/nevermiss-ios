@@ -110,6 +110,7 @@ export function TileButton({
   return (
     <button
       type="button"
+      className="nm-tile"
       onClick={onClick}
       disabled={disabled}
       aria-label={ariaLabel ?? `${label}${sublabel ? " " + sublabel : ""}`}

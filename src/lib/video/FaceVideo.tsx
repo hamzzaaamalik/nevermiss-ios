@@ -6,7 +6,7 @@ import { AudioLevelMeter } from "./AudioLevelMeter";
 import { TileIndicators } from "./TileIndicators";
 import { QUALITY_COLOR, QUALITY_LABEL, type VideoPerson } from "./types";
 import { useVideoSession } from "./VideoSessionProvider";
-import { useCameraOff, useMicMuted, useTrackPlayable, useVideoTile } from "./useVideoTile";
+import { useCameraOff, useMicMuted, useTrackPlayable, useVideoTile, useVideoTrackState } from "./useVideoTile";
 
 interface FaceVideoProps {
   person: VideoPerson;
@@ -128,6 +128,8 @@ export function FaceVideo({
       {participantId ? (
         <LiveOrFallback
           participantId={participantId}
+          isLocal={isLocal}
+          compact={compact}
           person={person}
           fallbackSrc={fallbackSrc}
           label={displayLabel}
@@ -254,6 +256,8 @@ function Indicators({
 
 function LiveOrFallback({
   participantId,
+  isLocal,
+  compact,
   person,
   fallbackSrc,
   label,
@@ -262,6 +266,8 @@ function LiveOrFallback({
   autoMirror,
 }: {
   participantId: string;
+  isLocal: boolean;
+  compact: boolean;
   person: VideoPerson;
   fallbackSrc?: string;
   label: string;
@@ -270,10 +276,30 @@ function LiveOrFallback({
   autoMirror: boolean;
 }) {
   const playable = useTrackPlayable(participantId);
+  const trackState = useVideoTrackState(participantId);
 
   if (!playable) {
     return (
-      <Fallback person={person} fallbackSrc={fallbackSrc} label={label} objectFit={objectFit} objectPosition={objectPosition} />
+      <>
+        <Fallback person={person} fallbackSrc={fallbackSrc} label={label} objectFit={objectFit} objectPosition={objectPosition} />
+        {/* Build 38: say why there's no picture instead of just initials. */}
+        {trackState === "blocked" && (
+          <div
+            role="status"
+            style={{
+              position: "absolute", left: 8, right: 8, top: compact ? 6 : 10,
+              textAlign: "center", zIndex: 6,
+              padding: compact ? "4px 8px" : "6px 10px", borderRadius: 10,
+              background: "rgba(127,29,29,0.85)", border: "1px solid rgba(248,113,113,0.6)",
+              color: "#fff", fontFamily: "DM Sans, sans-serif",
+              fontSize: compact ? 10 : 13, fontWeight: 800, lineHeight: 1.25,
+              pointerEvents: "none",
+            }}
+          >
+            {isLocal ? "Your camera is blocked" : `${label}'s camera is blocked`}
+          </div>
+        )}
+      </>
     );
   }
 

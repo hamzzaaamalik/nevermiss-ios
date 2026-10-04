@@ -11,7 +11,14 @@ import {
   Disc,
   Film,
   Hand,
+  HelpCircle,
   Home as HomeIcon,
+  ListOrdered,
+  MessageCircle,
+  Mic,
+  MicOff,
+  Settings as SettingsIcon,
+  SlidersHorizontal,
   Library as LibraryIcon,
   Mail,
   PhoneOff,
@@ -25,12 +32,15 @@ import {
   Star as StarIcon,
   Users,
   Video as VideoIcon,
+  VideoOff,
   Volume2,
   X as XIcon,
 } from "lucide-react";
 import { Button, IconButton, InstallHint, TileButton, TileGrid } from "./lib/ui";
 import { api, ApiError, type SafeUser, type ReadingSession, type Child } from "./lib/api";
 import { haptic, playPageTurn, playTap } from "./lib/sound";
+import { pronounce, primeAudio, preloadPronunciation } from "./lib/pronounce";
+import { CapacitorCalendar } from "@ebarooni/capacitor-calendar";
 import {
   Avatar,
   DraggablePiP,
@@ -39,6 +49,7 @@ import {
   ReactionOverlay,
   VideoControls,
   VideoSessionProvider,
+  useVideoSession,
   getRoleLabel,
   REACTION_KEYS,
   getReactionGlyph,
@@ -46,12 +57,39 @@ import {
   type ReactionEmoji,
   type ReactionEvent,
 } from "./lib/video";
+import { ThemeSwitcher } from "./lib/reading/ReadingChrome";
+import { NEXT_THEME, READING_THEMES, READING_THEME_LABEL, isReadingTheme, type ReadingTheme } from "./lib/reading/themes";
+import { tokenizeHalf, type WordTok } from "./lib/reading/words";
+import { APP_BUILD } from "./lib/build";
+import { pointerBus, type PointerMsg } from "./lib/reading/pointerBus";
+import { ReadingPointerLayer, localPointer } from "./lib/reading/ReadingPointer";
 import {
-  ProgressPill,
-  StickyChapter,
-  ThemeSwitcher,
-} from "./lib/reading/ReadingChrome";
-import { READING_THEMES, type ReadingTheme } from "./lib/reading/themes";
+  asPagePlan,
+  asPageProfile,
+  buildPagePlan,
+  composeSpread,
+  identityPlan,
+  profileSignature,
+  profilesClose,
+  spreadEnd,
+  spreadHasRight,
+  spreadIndexOf,
+  type ColumnSegment,
+  type PagePlan,
+  type PageProfile,
+} from "./lib/reading/pagePlan";
+import {
+  CameraMicPanel,
+  ChaptersPanel,
+  EndCallConfirm,
+  HelpFeedbackPanel,
+  MenuDrawer,
+  ReadingSetupPanel,
+  useIdleAutoClose,
+  type MenuEntry,
+  type PointerMode,
+} from "./lib/nav/MenuDrawer";
+import { AddChildModal, GrandchildrenCard, HomeView } from "./lib/home/HomeView";
 import { STICKERS } from "./lib/face-tracking/stickerCatalog";
 import { FaceTrackedOverlay } from "./lib/face-tracking/FaceTrackedOverlay";
 import * as FaceTracker from "./lib/face-tracking/FaceTracker";
@@ -73,16 +111,58 @@ type Mode = "home" | "greeting" | "icebreaker" | "library" | "reading" | "chat" 
 // broadcast to Perry so both iPads render the same arrangement.
 const READING_LAYOUTS = ["classic", "immersive", "storytime", "cozy", "kids"] as const;
 type ReadingLayout = typeof READING_LAYOUTS[number];
+// Rick's Build 33: only two layouts are offered. The other designs stay
+// in the code; any saved or received choice outside this list reads as
+// Classic.
+const VISIBLE_READING_LAYOUTS = ["classic", "immersive"] as const satisfies readonly ReadingLayout[];
+function normalizeLayout(v: unknown): ReadingLayout {
+  return (VISIBLE_READING_LAYOUTS as readonly string[]).includes(v as string) ? (v as ReadingLayout) : "classic";
+}
 const READING_LAYOUT_META: Record<ReadingLayout, { label: string; sub: string; icon: string }> = {
   classic:   { label: "Classic",   sub: "Familiar reader · book + sidebar",      icon: "📖" },
-  immersive: { label: "Immersive", sub: "Distraction-free · book full screen",   icon: "🎯" },
+  immersive: { label: "Big Book",  sub: "Book full width · faces on top",        icon: "📘" },
   storytime: { label: "Storytime", sub: "Big video on top · book below",         icon: "🎭" },
   cozy:      { label: "Cozy",      sub: "Vintage library · sepia + leather",     icon: "🪵" },
   kids:      { label: "Kids",      sub: "Playful · pastel + chunky reactions",   icon: "🎨" },
 };
 type ChallengeState = "idle" | "counting" | "flash" | "holding" | "result";
 const INVITE_CODE = "NEVMIS";
+
+// Rick's Build 33 A-8, confirmed Oct 2026: no "Chapter complete" pop-up
+// on any book; the conversation prompts cover that moment. Flip to true
+// to bring the popup back.
+const CHAPTER_END_POPUP_ENABLED = false;
+
+/** Build 38: the nav pill under the book is the one page counter
+ *  (Master Plan §5), so the printed-style folios stay hidden. Their row
+ *  is still laid out so pagination measurement doesn't change. */
+const SHOW_PAGE_FOLIOS = false;
+
+
+// Master Plan v6.1: the beta ships reading + video + phonics only. These
+// features keep their code but stay out of the UI until Rick turns them
+// back on. Flip a flag to true to restore every entry point for it.
+const FEATURES = {
+  memoryVault: false,   // Memory Vault / recordings library
+  familyJournal: false, // Family Journal + "Save a Memory" after a call
+  requestBook: false,   // Request a Book (library search + request flow)
+  recording: false,     // Rec button, consent overlay, REC badge
+} as const;
 type FamilyStoriesSubMode = "write" | "browse";
+
+/** Nana's "Great visit with Perry!" card after a visit ends (Master Plan §11). */
+interface VisitEndCardData {
+  childName: string;
+  childPhotoUrl: string | null;
+  /** Null when no book was opened during the visit. */
+  bookTitle: string | null;
+  bookEmoji: string;
+  pagesRead: number;
+  chapterLabel: string | null;
+  /** ISO start of the next saved visit, when there is one. */
+  nextVisitIso: string | null;
+  reason: "endcall" | "goodbye" | "childhangup";
+}
 
 interface FamilyStoryEntry {
   id: number;
@@ -97,6 +177,30 @@ interface FamilyStoryEntry {
 
 const INITIAL_STORIES: FamilyStoryEntry[] = [];
 type ScheduleProposal = { date: Date; time: string; proposedBy: "nana" | "perry" };
+
+/** "4:30 PM" on `date` as an absolute ISO time, so the server can keep
+ *  the visit and Home can show "Next • Today 4:30 PM" (Build 38). */
+function scheduleStartsAt(date: Date, time: string): string | null {
+  const m = /^\s*(\d{1,2}):(\d{2})\s*(AM|PM)\s*$/i.exec(time);
+  if (!m || Number.isNaN(date.getTime())) return null;
+  let h = Number(m[1]) % 12;
+  if (m[3].toUpperCase() === "PM") h += 12;
+  const d = new Date(date.getFullYear(), date.getMonth(), date.getDate(), h, Number(m[2]), 0, 0);
+  return d.toISOString();
+}
+
+/** "Today 4:00 PM", "Tomorrow 9:30 AM", "Sat, Oct 12 · 4:00 PM". */
+function formatNextVisit(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  const today = new Date();
+  const startOf = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((startOf(d) - startOf(today)) / 86_400_000);
+  if (days === 0) return `Today ${time}`;
+  if (days === 1) return `Tomorrow ${time}`;
+  return `${d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} · ${time}`;
+}
 
 /** Light-weight {placeholder} substitution for prompt strings. Unmatched
  *  placeholders are stripped so you never get raw {childName} on screen. */
@@ -129,13 +233,6 @@ function formatForOutlook(date: Date): string {
   return `https://outlook.live.com/calendar/0/deeplink/compose?subject=NeverMiss+Reading+Session&startdt=${date.toISOString()}&enddt=${end.toISOString()}&body=Time+to+read+together+on+NeverMiss!`;
 }
 
-// Rick's Build 30 review #4: Apple Calendar was silently dropping the
-// blob-URL .ics hand-off on iOS Capacitor. Root cause is that Capacitor
-// WebView doesn't route blob:// download-clicks to the system share
-// sheet the way mobile Safari does. Fix: detect Capacitor and use a
-// data: URL instead — iOS intercepts data:text/calendar and offers the
-// native Calendar picker (Apple + any third-party calendar apps
-// installed). Web path unchanged: blob + click still works in browsers.
 function isNativeIOSApp(): boolean {
   try {
     const cap = typeof window !== "undefined" ? (window as unknown as { Capacitor?: { isNativePlatform?: () => boolean } }).Capacitor : undefined;
@@ -143,49 +240,68 @@ function isNativeIOSApp(): boolean {
   } catch { return false; }
 }
 
-function downloadICS(date: Date): void {
+function isCalendarPluginAvailable(): boolean {
+  try {
+    const cap = (window as unknown as { Capacitor?: { isPluginAvailable?: (n: string) => boolean } }).Capacitor;
+    return !!cap?.isPluginAvailable?.("CapacitorCalendar");
+  } catch { return false; }
+}
+
+const CALENDAR_TITLE = "NeverMiss Reading Session";
+const CALENDAR_NOTES = "Time to read together on NeverMiss!";
+const SESSION_MINUTES = 45;
+
+/** Google / Outlook web composers. In the iOS app Capacitor hands
+ *  window.open to iOS, which opens Safari, where the family is already
+ *  signed in to their calendar. */
+function openCalendarUrl(url: string): void {
+  window.open(url, "_blank");
+}
+
+type AppleCalendarResult = "added" | "canceled" | "safari" | "downloaded" | "failed";
+
+/**
+ * Rick's Build 33: the old in-app hand-off opened a data: URL, which no
+ * iOS app handles, so nothing happened. In the app we now show Apple's
+ * own "New Event" sheet, filled in, inside NeverMiss. If the native
+ * plugin isn't in this build, Safari opens a hosted .ics and offers
+ * "Add to Calendar". On the web the .ics downloads.
+ */
+async function addToAppleCalendar(date: Date): Promise<AppleCalendarResult> {
+  const end = new Date(date.getTime() + SESSION_MINUTES * 60000);
+  if (isNativeIOSApp()) {
+    if (isCalendarPluginAvailable()) {
+      try {
+        const res = await CapacitorCalendar.createEventWithPrompt({
+          title: CALENDAR_TITLE,
+          description: CALENDAR_NOTES,
+          startDate: date.getTime(),
+          endDate: end.getTime(),
+          alerts: [-15],
+        });
+        return res.id ? "added" : "canceled";
+      } catch {
+        return "failed";
+      }
+    }
+    window.open(api.calendar.icsUrl(date.getTime(), end.getTime()), "_blank");
+    return "safari";
+  }
   const pad = (n: number) => String(n).padStart(2, "0");
-  const fmt = (d: Date) => `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}00`;
-  const end = new Date(date.getTime() + 45 * 60000);
+  const fmt = (d: Date) => `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}00`;
   const ics = [
     "BEGIN:VCALENDAR", "VERSION:2.0", "BEGIN:VEVENT",
-    "SUMMARY:NeverMiss Reading Session",
+    `SUMMARY:${CALENDAR_TITLE}`,
     `DTSTART:${fmt(date)}`, `DTEND:${fmt(end)}`,
-    "DESCRIPTION:Time to read together on NeverMiss!",
-    "END:VEVENT", "END:VCALENDAR"
-  ].join("\n");
-  if (isNativeIOSApp()) {
-    // iOS WebView: data:text/calendar in a new-tab window.open hands off
-    // to iOS's Calendar picker without navigating away from the app.
-    // window.location.href would take the whole app off-screen; anchor
-    // click+download attribute is ignored in Capacitor WebView.
-    const dataUrl = `data:text/calendar;charset=utf-8,${encodeURIComponent(ics)}`;
-    const w = window.open(dataUrl, "_blank");
-    if (!w) {
-      // Fallback if popup blocked: navigate current window (last resort).
-      window.location.href = dataUrl;
-    }
-    return;
-  }
+    `DESCRIPTION:${CALENDAR_NOTES}`,
+    "END:VEVENT", "END:VCALENDAR",
+  ].join("\r\n");
   const blob = new Blob([ics], { type: "text/calendar" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url; a.download = "nevermiss-reading.ics"; a.click();
-  URL.revokeObjectURL(url);
-}
-
-// Wraps a URL open so on iOS Capacitor we fall back to downloadICS —
-// google.com/outlook.live.com in the WebView present their web setup
-// flow instead of opening the installed calendar app (Rick's Build 30
-// review #4 regression). On iOS we prefer the data:text/calendar path
-// which surfaces the native Calendar picker (works with any installed
-// calendar app, including Google/Outlook if the user has them).
-function openCalendarUrl(url: string, fallbackDate: Date): void {
-  if (isNativeIOSApp()) {
-    downloadICS(fallbackDate);
-    return;
-  }
-  window.open(url, "_blank", "noopener,noreferrer");
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return "downloaded";
 }
 
 const showAndTellPrompts = [
@@ -481,12 +597,40 @@ function chapterBook(meta: Omit<Book, "pages" | "chapters">, chapters: BookChapt
  *  Returns null for books that don't have a `chapters` array (picture
  *  books, flat books). The `pageInChapter` field is 1-based, matching
  *  the way `currentPage` is stored elsewhere. */
+/** Pages that come before the first chapter. Imported books carry a
+ *  title page in `pages` that is in no chapter; without this offset
+ *  every chapter lookup ran one page early (Rick, Oct 2026: "the last
+ *  page gets cut off"). Hand-built books have none. */
+const chapterOffsetCache = new WeakMap<Book, number>();
+function chapterPageOffset(book: Book): number {
+  if (!book.chapters || book.chapters.length === 0) return 0;
+  const cached = chapterOffsetCache.get(book);
+  if (cached !== undefined) return cached;
+  // Where the first chapter's first page sits in `pages`. Counting can't
+  // be used: the server also appends a closing page that is in no
+  // chapter. Compare content (pages and chapters are separate copies).
+  // Text only: chapter copies don't carry the pictures (the admin and
+  // importer keep picture data in `pages` alone).
+  const key = (p: BookPage | undefined) => p ? `${p.leftBody ?? ""}|${p.rightBody ?? ""}|${p.leftChapter ?? ""}` : "";
+  const first = book.chapters.find(c => c.pages.length > 0)?.pages[0];
+  let offset = 0;
+  if (first) {
+    const want = key(first);
+    const limit = Math.min(book.pages.length, 6);
+    for (let i = 0; i < limit; i++) {
+      if (key(book.pages[i]) === want) { offset = i; break; }
+    }
+  }
+  chapterOffsetCache.set(book, offset);
+  return offset;
+}
+
 function getChapterForPage(
   book: Book,
   page: number,
 ): { chapter: BookChapter; chapterIndex: number; pageInChapter: number; pagesInChapter: number } | null {
   if (!book.chapters || book.chapters.length === 0) return null;
-  let runningStart = 0;
+  let runningStart = chapterPageOffset(book);
   for (let i = 0; i < book.chapters.length; i++) {
     const c = book.chapters[i];
     const start = runningStart + 1;
@@ -525,35 +669,118 @@ function isChapterBook(book: Book): boolean {
   return !!book.chapters && book.chapters.length > 0;
 }
 
-/** How many source pages get merged into one displayed spread for the
- *  given book at the given Nana fontScale.
- *
- *  Wish 2: chapter book pages feel sparse at smaller fonts. We pack
- *  multiple source pages per displayed spread when the font is small
- *  enough that the body wouldn't overflow. The chunk decision keys off
- *  Nana's authoritative fontScale (NEVER Perry's possibly-overridden
- *  local scale) so both iPads always agree on which source pages map
- *  to which displayed spread index.
- *
- *  Conservative defaults: XL/L → 1 (no chunking, iPad-mini safe),
- *  M → 2 (real-book density), S → 3 (extra-dense for tiny font).
- *  Picture / non-chapter books always return 1 — they're authored to
- *  one-spread-per-image. */
-function chunkSizeFor(book: Book, nanaScale: number): number {
-  if (!isChapterBook(book)) return 1;
-  if (nanaScale >= 1.25) return 1;
-  if (nanaScale >= 1.0)  return 2;
-  return 3;
+/** Pages a reader turns through per spread in one-page mode (1 or 2),
+ *  cached per plan object. */
+const sideCountCache = new WeakMap<PagePlan, number[]>();
+function sideCountsFor(pages: BookPage[], plan: PagePlan): number[] {
+  const hit = sideCountCache.get(plan);
+  if (hit) return hit;
+  const out = plan.starts.map((start, k) =>
+    (start === 1 && pages[0]?.rightIsTitle) || !spreadHasRight(pages, plan, k) ? 1 : 2);
+  sideCountCache.set(plan, out);
+  return out;
 }
 
-/** Snap an arbitrary source-page number to the start of the displayed
- *  spread that contains it, given the current chunk size. Stepping
- *  forward by `chunkSize` from this anchor lands on the next spread. */
-function chunkStartPage(sourcePage: number, chunkSize: number): number {
-  if (chunkSize <= 1) return sourcePage;
-  // 1-based pages → translate to 0-based chunk index, then back.
-  const zeroBased = sourcePage - 1;
-  return Math.floor(zeroBased / chunkSize) * chunkSize + 1;
+/** Where the reader is, in the units the reader sees: displayed pages
+ *  (spreads in two-page mode, single pages in one-page mode). */
+function readingPosition(
+  book: Book,
+  plan: PagePlan,
+  page: number,
+  side: "L" | "R",
+  pageMode: "single" | "double",
+): { pageNum: number; pageTotal: number; atStart: boolean; atEnd: boolean; chapterLabel: string | null } {
+  const pages = book.pages;
+  const k = spreadIndexOf(plan, page);
+  const K = plan.starts.length;
+  const stepsSpreads = pageMode === "double" || pages.some(p => !!p.imageUrl);
+  let pageNum = k + 1;
+  let pageTotal = K;
+  let atStart = k === 0;
+  let atEnd = k === K - 1;
+  if (!stepsSpreads) {
+    const counts = sideCountsFor(pages, plan);
+    let before = 0;
+    for (let i = 0; i < k; i++) before += counts[i];
+    const onRight = side === "R" && counts[k] === 2;
+    pageNum = before + (onRight ? 2 : 1);
+    pageTotal = counts.reduce((a, b) => a + b, 0);
+    atStart = k === 0 && !onRight;
+    atEnd = k === K - 1 && (counts[k] === 1 || onRight);
+  }
+  // Still planning later chapters: show the expected total, not the
+  // current (larger) one that shrinks as planning finishes.
+  if (plan.estimatedTotal && K > 0) {
+    pageTotal = Math.max(pageNum, Math.round(pageTotal * plan.estimatedTotal / K));
+  }
+  let chapterLabel: string | null = null;
+  if (isChapterBook(book)) {
+    const info = getChapterForPage(book, plan.starts[k] ?? page);
+    if (info) chapterLabel = `Chapter ${info.chapterIndex + 1} of ${book.chapters!.length}`;
+  }
+  return { pageNum, pageTotal, atStart, atEnd, chapterLabel };
+}
+
+// Used when no page in the spread carries an AI or hand-written prompt,
+// so Start a Conversation never goes dead (Rick's Build 33).
+const FALLBACK_NANA_PROMPTS = [
+  "Ask: What do you think will happen next?",
+  "Ask: How do you think they are feeling right now?",
+  "Ask: What picture do you see in your head on this page?",
+  "Ask: Has anything like this ever happened to you?",
+  "Ask: Was there a new word on this page? What do you think it means?",
+  "Ask: If you were in this story, what would you do?",
+  "Ask: Who is your favorite character so far, and why?",
+  "Ask: What was the most surprising part so far?",
+];
+
+/** The conversation prompt for the spread containing `page`: the first
+ *  page in the spread that has one, otherwise a rotating general one. */
+function spreadPrompt(pages: BookPage[], plan: PagePlan, page: number): string {
+  const k = spreadIndexOf(plan, page);
+  const end = spreadEnd(plan, k, pages.length);
+  for (let i = plan.starts[k] ?? page; i < end; i++) {
+    const t = pages[i - 1]?.nanaPrompt?.trim();
+    if (t) return t;
+  }
+  return FALLBACK_NANA_PROMPTS[k % FALLBACK_NANA_PROMPTS.length];
+}
+
+/** First non-empty Nana cue in the spread. */
+function spreadCue(pages: BookPage[], plan: PagePlan, page: number): string {
+  const k = spreadIndexOf(plan, page);
+  const end = spreadEnd(plan, k, pages.length);
+  for (let i = plan.starts[k] ?? page; i < end; i++) {
+    const t = pages[i - 1]?.cue?.trim();
+    if (t) return t;
+  }
+  return "";
+}
+
+/** Let's Talk questions (Build 38): this spread's prompt first, then the
+ *  prompts written for the pages just read, then the general ones, so
+ *  "Another question" always has somewhere to go. */
+function talkQuestions(pages: BookPage[], plan: PagePlan, page: number): string[] {
+  const out: string[] = [];
+  const add = (t: string | undefined | null) => {
+    const v = (t ?? "").trim();
+    if (v && !out.includes(v)) out.push(v);
+  };
+  add(spreadPrompt(pages, plan, page));
+  const k = spreadIndexOf(plan, page);
+  const end = spreadEnd(plan, k, pages.length);
+  for (let i = end - 1; i >= Math.max(1, (plan.starts[k] ?? page) - 8); i--) add(pages[i - 1]?.nanaPrompt);
+  for (const f of FALLBACK_NANA_PROMPTS) add(f);
+  return out;
+}
+
+/** 1-based first page of every chapter. */
+function chapterStartSet(book: Book): Set<number> {
+  const out = new Set<number>();
+  if (!book.chapters) return out;
+  let n = 1 + chapterPageOffset(book);
+  for (const c of book.chapters) { out.add(n); n += c.pages.length; }
+  return out;
 }
 
 /**
@@ -1272,9 +1499,22 @@ function mergeServerCatalog(serverBooks: unknown[]): void {
         };
       });
 
+    // Picture books (Rick, Oct 2026): the importer used to put an
+    // "Imported from EPUB" page in front of the book's own cover. Hide it
+    // when the next page is the cover picture.
+    const first = pages[0];
+    if (pages.length > 1 && first?.rightIsTitle && !first.imageUrl
+      && /^Imported from EPUB/.test(first.rightBody ?? "") && pages[1]?.imageUrl) {
+      pages.shift();
+    }
+    // A picture book is one story: its per-page "chapters" are ignored
+    // (no chapter labels, no chapter list, no chapter breaks).
+    const imagePages = pages.filter(p => !!p.imageUrl).length;
+    const isPictureBook = imagePages > 0 && imagePages * 2 >= pages.length;
+
     // Same normalization for chapter arrays if present.
     let chapters: BookChapter[] | undefined = undefined;
-    if (Array.isArray(b.chapters)) {
+    if (Array.isArray(b.chapters) && !isPictureBook) {
       chapters = (b.chapters as unknown[])
         .filter(c => c && typeof c === "object")
         .map((c: unknown) => {
@@ -1324,11 +1564,11 @@ function mergeServerCatalog(serverBooks: unknown[]): void {
     const derivedReadingLevel = serverAgeTier ? (gradeMap[serverAgeTier] ?? "") : "";
     // Rick's Build 32 review #B-2: use the AI triage summary as
     // fallback tagline so imported books get a parent-friendly blurb
-    // instead of empty text on the library card. Trimmed to ~140 chars
-    // to fit the card without wrapping ugly.
+    // instead of empty text on the library card. The card clamps to
+    // three lines (Build 33 B-2), so keep enough text to fill them.
     const triage = (b.triageReport && typeof b.triageReport === "object") ? b.triageReport as Record<string, unknown> : null;
     const triageSummary = typeof triage?.summary === "string" ? triage.summary : "";
-    const derivedTagline = triageSummary ? (triageSummary.length > 140 ? triageSummary.slice(0, 137) + "…" : triageSummary) : "";
+    const derivedTagline = triageSummary ? (triageSummary.length > 320 ? triageSummary.slice(0, 317) + "…" : triageSummary) : "";
 
     const existing = booksLibrary[id];
     booksLibrary[id] = {
@@ -1370,542 +1610,253 @@ function mergeServerCatalog(serverBooks: unknown[]): void {
 
 /* ─── Book content — true two-page open-book spread ─────── */
 
-/**
- * Splits a body string into word-level spans, each tagged with a stable
- * `data-w` attribute. The reading-mode tap handler uses these tags to
- * identify exactly which word Nana pointed at, then both screens highlight
- * the same word — far more useful than a generic "Nana pointed somewhere"
- * dot.
- */
-function WordWrapped({
-  text,
-  side,
-  highlightIndex,
-}: {
-  text: string;
-  side: "L" | "R";
-  highlightIndex: number | null;
-}) {
-  // Split keeps both words AND whitespace so spacing is preserved exactly.
-  const tokens = text.split(/(\s+)/);
-  let wordIdx = -1;
-  return (
-    <>
-      {tokens.map((tok, i) => {
-        if (/^\s+$/.test(tok)) return tok;
-        wordIdx += 1;
-        const idx = wordIdx;
-        const active = highlightIndex === idx;
-        return (
-          // `key` is stable per-word-index so the span identity (and any
-          // React-internal event-handler bindings) survive re-renders
-          // when font-scale or theme changes. Rick: "did not work at
-          // all after the initial test" — we want to rule out handler
-          // tear-off as a cause.
-          <span
-            key={`${side}-${idx}`}
-            data-w={`${side}-${idx}`}
-            style={{
-              backgroundColor: active ? "rgba(255,201,80,0.78)" : "transparent",
-              color: active ? "#1B2B4B" : undefined,
-              borderRadius: 4,
-              // Vertical padding widened so each word's tap target
-              // extends into the leading between lines. Rick's Build 28
-              // feedback #3: "highlighting usually grabs the word
-              // BELOW the one pressed" — that was because with only
-              // 2px vertical padding and a line-height of 1.95, most
-              // of the visual line-gap belonged to no span at all, so
-              // elementFromPoint returned whichever word span's box
-              // the finger's centroid actually intersected (usually
-              // the line below). Bumping to 7px vertical padding +
-              // matching negative vertical margin means adjacent
-              // spans meet in the middle of the leading, tap always
-              // lands on the word above/at the finger.
-              padding: "7px 3px",
-              margin: "-5px -1px",
-              cursor: "pointer",
-              touchAction: "manipulation",
-              WebkitTouchCallout: "none",
-              transition: "background-color 180ms ease, color 180ms ease",
-              boxDecorationBreak: "clone",
-              WebkitBoxDecorationBreak: "clone",
-            }}
-          >
-            {tok}
-          </span>
-        );
-      })}
-    </>
-  );
+/** Strip surrounding punctuation, keep inner apostrophes and hyphens. */
+function cleanTokenWord(tok: string): string {
+  return tok
+    .replace(/[’‘]/g, "'")
+    .replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "")
+    .replace(/^['-]+|['-]+$/g, "");
 }
 
-interface WordHighlightState {
-  page: number;
-  side: "L" | "R";
-  index: number;
+/** The sentence around token `idx`, for Save context. */
+function sentenceAround(toks: WordTok[], idx: number): string {
+  const ends = (t: string) => /[.!?]["”’)\]]*$/.test(t);
+  let a = idx;
+  while (a > 0 && !ends(toks[a - 1].text)) a--;
+  let b = idx;
+  while (b < toks.length - 1 && !ends(toks[b].text)) b++;
+  return toks.slice(a, b + 1).map((t, i, arr) => t.text + (t.glue || i === arr.length - 1 ? "" : " ")).join("").slice(0, 400);
+}
+
+/** Word selection mirrored on both iPads. `wid` is
+ *  `${sourcePage}.${"L"|"R"}.${tokenIndex}`; empty when the partner iPad
+ *  runs an older build that only sends the word. */
+interface WordSelection {
+  wid: string;
+  word: string;
+  sentence: string;
+  by: "nana" | "perry";
   ts: number;
 }
 
-/**
- * Simple syllable splitter for the "Sound it out" action. Not a real
- * phonemic parser — just breaks at vowel-consonant-vowel transitions
- * with a few common cluster exceptions kept together (ch/sh/th/ph/tr/...
- * ).  Works well enough for the early-reader vocabulary that shows up
- * in NeverMiss's book library. Fallback for unknown words is the
- * whole word spoken slowly.
- */
-function splitIntoSyllables(word: string): string[] {
-  const w = word.toLowerCase().replace(/[^a-z']/g, "");
-  if (w.length <= 3) return [w];
-  const isVowel = (c: string) => "aeiouy".includes(c);
-  const clusters = new Set(["ch","sh","th","ph","wh","tr","dr","pr","br","gr","cr","fr","st","sp","sk","sl","pl","cl","fl","gl","bl","sm","sn","sw","tw","qu"]);
-  const parts: string[] = [];
-  let cur = "";
-  for (let i = 0; i < w.length; i++) {
-    cur += w[i];
-    if (i < w.length - 1 && isVowel(w[i]) && !isVowel(w[i + 1])) {
-      // Look ahead: if the next 2 chars are a consonant cluster
-      // followed by a vowel, split before the cluster. Otherwise
-      // split after the consonant so a short vowel stays closed.
-      const next2 = w.slice(i + 1, i + 3);
-      const next3 = w.slice(i + 1, i + 4);
-      if (isVowel(w[i + 2] ?? "")) {
-        // V C V — split before the C so C starts next syllable
-        parts.push(cur);
-        cur = "";
-      } else if (clusters.has(next2) && isVowel(w[i + 3] ?? "")) {
-        parts.push(cur);
-        cur = "";
-      } else if (!isVowel(w[i + 2] ?? "") && isVowel(w[i + 3] ?? "")) {
-        // V C C V — split between the two consonants
-        cur += w[i + 1];
-        parts.push(cur);
-        cur = "";
-        i += 1;
-      }
-    }
-  }
-  if (cur) parts.push(cur);
-  return parts.filter(Boolean);
+function parseWid(wid: string): { page: number; half: "L" | "R"; index: number } | null {
+  const m = /^(\d+)\.(L|R)\.(\d+)$/.exec(wid);
+  if (!m) return null;
+  return { page: Number(m[1]), half: m[2] as "L" | "R", index: Number(m[3]) };
+}
+
+/** Resolve a word id against the book text. */
+function resolveWid(bookPages: BookPage[], wid: string): { word: string; sentence: string } | null {
+  const ref = parseWid(wid);
+  if (!ref) return null;
+  const pg = bookPages[ref.page - 1];
+  if (!pg) return null;
+  const toks = tokenizeHalf(ref.half === "L" ? pg.leftBody : pg.rightBody);
+  const tok = toks[ref.index];
+  if (!tok) return null;
+  const word = cleanTokenWord(tok.text);
+  if (!word) return null;
+  return { word, sentence: sentenceAround(toks, ref.index) };
 }
 
 /**
- * SelectionActionMenu — Rick's Aug 14 reversal of the yellow-highlight
- * custom bar. iOS native selection (Copy / Look Up / Translate) is
- * restored on book text; this menu rides ALONGSIDE that native popup
- * with our own three actions: Pronunciation (audio + IPA), Phonics
- * (Orton-Gillingham rule + Nana coaching cue), Save (persist to
- * Words We're Learning). Listens to `selectionchange` and mounts a
- * floating card next to whatever the user has selected inside the
- * book area. Auto-hides when the selection is cleared or moves out
- * of the book.
+ * Renders column segments as word spans tagged with `data-wid`. The tap
+ * handler resolves the tapped span to its word id, and both iPads paint
+ * the highlight on the span with the matching id.
  */
-function SelectionActionMenu({
+function WordWrapped({
+  segments,
+  highlightWid,
+}: {
+  segments: ColumnSegment[];
+  highlightWid: string | null;
+}) {
+  const nodes: React.ReactNode[] = [];
+  segments.forEach((seg, si) => {
+    seg.toks.forEach((tok, ti) => {
+      const wid = `${seg.key}.${seg.start + ti}`;
+      const active = highlightWid === wid;
+      nodes.push(
+        <span
+          key={wid}
+          data-wid={wid}
+          style={{
+            backgroundColor: active ? "rgba(255,201,80,0.85)" : "transparent",
+            color: active ? "#1B2B4B" : undefined,
+            boxShadow: active ? "0 0 0 2px rgba(201,146,42,0.55)" : undefined,
+            borderRadius: 4,
+            // Tall padding with matching negative margin so neighbouring
+            // lines' tap targets meet in the middle of the leading.
+            padding: "7px 3px",
+            margin: "-5px -1px",
+            transition: "background-color 180ms ease, color 180ms ease",
+            boxDecorationBreak: "clone",
+            WebkitBoxDecorationBreak: "clone",
+          }}
+        >
+          {tok.text}
+        </span>,
+      );
+      const last = si === segments.length - 1 && ti === seg.toks.length - 1;
+      if (!tok.glue && !last) nodes.push(" ");
+    });
+  });
+  return <>{nodes}</>;
+}
+
+/**
+ * Nana's actions for the word highlighted on both iPads: Pronunciation,
+ * Phonics, Save. Anchored under the highlighted word when it is on
+ * screen, docked at the bottom of the book otherwise. Never rendered on
+ * the child's iPad.
+ */
+function WordActionMenu({
   bookAreaRef,
-  isPerry = false,
+  selection,
+  childName,
+  layoutKey,
   onPronounce,
   onPhonics,
   onSave,
-  onShareSelection,
-  remoteSelection = null,
+  onClose,
   pronunciationState,
   phonicsState,
   saveState,
 }: {
   bookAreaRef: React.RefObject<HTMLDivElement | null>;
-  /** Rick's Build 30 review #3: on Perry's iPad the menu never renders.
-   *  Perry still captures + broadcasts her selection so Nana sees it, but
-   *  Perry sees NO popup and NO coaching card — Nana teaches through the
-   *  lesson herself. */
-  isPerry?: boolean;
+  selection: WordSelection;
+  childName: string;
+  /** Changes whenever the page layout may have moved the word. */
+  layoutKey: string;
   onPronounce: (word: string) => void;
   onPhonics: (word: string) => void;
   onSave: (word: string, sentence: string) => void;
-  /** Perry-only: fires with the selected word + sentence so App can
-   *  publish selection_broadcast to Nana. No-op on Nana side. */
-  onShareSelection?: (word: string, sentence: string) => void;
-  /** Nana-only: a word Perry just highlighted on her iPad. If set and no
-   *  local selection exists, the menu appears anchored to the matching
-   *  span on Nana's page so she can tap Phonics/Pronunciation from it. */
-  remoteSelection?: { word: string; sentence: string; ts: number } | null;
+  onClose: () => void;
   pronunciationState: { word: string; status: "loading" | "done" | "err" } | null;
   phonicsState: { word: string; status: "loading" | "done" | "err" } | null;
   saveState: { word: string; status: "saving" | "saved" | "already" } | null;
 }) {
-  const [state, setState] = useState<{
-    top: number;
-    left: number;
-    word: string;
-    sentence: string;
-    remote?: boolean;
-  } | null>(null);
+  const fromChild = selection.by === "perry";
+  const menuH = fromChild ? 104 : 86;
+  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
-  useEffect(() => {
-    const onChange = () => {
-      const sel = window.getSelection();
-      if (!sel || sel.isCollapsed || sel.rangeCount === 0) { if (!isPerry) setState(null); return; }
-      const range = sel.getRangeAt(0);
-      const bookArea = bookAreaRef.current;
-      if (!bookArea) { if (!isPerry) setState(null); return; }
-      // Only respond to selections inside the book area.
-      if (!bookArea.contains(range.commonAncestorContainer)) { if (!isPerry) setState(null); return; }
-      const raw = sel.toString().trim();
-      if (!raw || raw.length > 80) { if (!isPerry) setState(null); return; }
-
-      // Rick's Sep 25: selection cleanup + word-boundary detection.
-      // Old logic just split on whitespace and stripped punctuation
-      // from the raw selection. That failed in three real cases:
-      //   1. Selection starts mid-word ("bod" in "nobody") → old code
-      //      returned "bod". Now: expand outward to full word bounds.
-      //   2. Selection includes leading em-dash ("—nobody") or
-      //      trailing semi/colon ("nobody;") → old regex handled the
-      //      strip, but couldn't recover the FULL word if selection
-      //      was also mid-word. Now: bounds are derived from the
-      //      text node, not the ragged selection.
-      //   3. Curly apostrophe or hyphenated words (don't, mother-in-
-      //      law) → old regex stripped inside chars. Now: apostrophes
-      //      + hyphens preserved INSIDE word, stripped only at bounds.
-      const wordCharRegex = /[\p{L}\p{N}'’‘\-]/u;
-      let word = "";
-      // Expand from the START of the selection outward, using the
-      // start container's text. This is the container the user first
-      // touched, so it's the most reliable anchor for "which word did
-      // they mean?" Falls back to the raw normalized string if the
-      // start container isn't a text node (rare — e.g. dragged across
-      // element boundaries).
-      const startNode = range.startContainer;
-      if (startNode.nodeType === 3) {
-        const text = startNode.textContent ?? "";
-        let start = Math.min(range.startOffset, text.length);
-        let end = start;
-        while (start > 0 && wordCharRegex.test(text.charAt(start - 1))) start--;
-        while (end < text.length && wordCharRegex.test(text.charAt(end))) end++;
-        word = text.substring(start, end);
-      }
-      if (!word) {
-        // Fallback: strip surrounding punctuation from the raw
-        // selection and take the first token.
-        word = raw.split(/\s+/)[0].replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
-      }
-      // Belt-and-suspenders: even the boundary-derived word might
-      // have a stray leading/trailing apostrophe (Unicode gotcha with
-      // possessives at end of sentence). Normalize once more.
-      word = word.replace(/^['’‘\-]+|['’‘\-]+$/g, "");
-      // Normalize curly apostrophes to straight so the phonics_cache
-      // key match doesn't miss on typography differences.
-      word = word.replace(/[’‘]/g, "'");
-      if (!word) { if (!isPerry) setState(null); return; }
-      // Sentence context: the paragraph containing the selection anchor.
-      const anchor = range.commonAncestorContainer as Node;
-      const paraEl = (anchor.nodeType === 1 ? anchor as Element : anchor.parentElement)?.closest?.("p") as HTMLElement | null;
-      const sentence = (paraEl?.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 400);
-
-      // Perry side: broadcast to Nana + suppress local popup entirely.
-      // Rick's Build 30 review: "Perry really should not see any of the
-      // prompts but she should be able to highlight."
-      if (isPerry) {
-        if (onShareSelection) onShareSelection(word, sentence);
+  useLayoutEffect(() => {
+    const place = () => {
+      const area = bookAreaRef.current;
+      if (!area) return;
+      const width = Math.min(360, area.clientWidth - 16);
+      const span = selection.wid
+        ? area.querySelector<HTMLElement>(`[data-wid="${selection.wid}"]`)
+        : null;
+      if (!span) {
+        setPos({ top: Math.max(6, area.clientHeight - menuH - 10), left: (area.clientWidth - width) / 2, width });
         return;
       }
-
-      // Rick's Build 32 review #A-1: overlap regression. The old
-      // "prefer just below the selection" logic collided with iOS's
-      // Copy/Look Up bar when the selection was near the top of the
-      // viewport (iOS flips ITS bar to below in that case). Fix: pin
-      // ours to a FIXED corner of the book pane based on where the
-      // selection is vertically:
-      //   - Selection in the TOP half of the book: iOS is likely to
-      //     be BELOW the selection, so we dock at the BOTTOM edge.
-      //   - Selection in the BOTTOM half: iOS is above (standard),
-      //     so we dock at the TOP edge (safely away from iOS bar).
-      // This gives predictable placement — muscle memory — and
-      // guarantees the two never sit on top of each other.
-      const rect = range.getBoundingClientRect();
-      const bookRect = bookArea.getBoundingClientRect();
-      const menuW = 300;
-      const menuH = 74;
-      // Horizontal: keep centered on selection but clamped inside book.
-      const rawLeft = rect.left + rect.width / 2 - bookRect.left - menuW / 2;
-      const clampedLeft = Math.max(10, Math.min(bookArea.clientWidth - menuW - 10, rawLeft));
-      // Vertical: bottom-dock or top-dock based on selection position.
-      const selectionMidY = (rect.top + rect.bottom) / 2 - bookRect.top;
-      const isTopHalf = selectionMidY < bookArea.clientHeight / 2;
-      const top = isTopHalf
-        ? Math.max(10, bookArea.clientHeight - menuH - 10)  // dock bottom
-        : 10;                                                // dock top
-      setState({ top, left: clampedLeft, word, sentence });
+      const areaRect = area.getBoundingClientRect();
+      const r = span.getBoundingClientRect();
+      const left = Math.max(8, Math.min(area.clientWidth - width - 8, r.left + r.width / 2 - areaRect.left - width / 2));
+      const below = r.bottom - areaRect.top + 8;
+      const above = r.top - areaRect.top - menuH - 8;
+      const top = below + menuH <= area.clientHeight - 6 ? below : Math.max(6, above);
+      setPos({ top, left, width });
     };
-    document.addEventListener("selectionchange", onChange);
-    return () => document.removeEventListener("selectionchange", onChange);
-  }, [bookAreaRef, isPerry, onShareSelection]);
+    place();
+    const raf = requestAnimationFrame(place);
+    // The page's font auto-fit settles a frame or two after render.
+    const t = window.setTimeout(place, 320);
+    const area = bookAreaRef.current;
+    const ro = area && typeof ResizeObserver !== "undefined" ? new ResizeObserver(place) : null;
+    if (ro && area) ro.observe(area);
+    return () => { cancelAnimationFrame(raf); window.clearTimeout(t); ro?.disconnect(); };
+  }, [selection.wid, selection.ts, layoutKey, bookAreaRef, menuH]);
 
-  // Nana-only: when Perry broadcasts a selection, anchor the menu to
-  // the matching word on Nana's page. Finds the first [data-w] span
-  // whose lowercased text starts with the shared word.
-  useEffect(() => {
-    if (isPerry || !remoteSelection) return;
-    const bookArea = bookAreaRef.current;
-    if (!bookArea) return;
-    const target = remoteSelection.word.toLowerCase();
-    const spans = Array.from(bookArea.querySelectorAll<HTMLElement>("[data-w]"));
-    const match = spans.find(s => (s.textContent ?? "").trim().toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "") === target);
-    if (!match) return;
-    const bookRect = bookArea.getBoundingClientRect();
-    const wordRect = match.getBoundingClientRect();
-    const menuW = 300;
-    const menuH = 68;
-    const rawLeft = wordRect.left + wordRect.width / 2 - bookRect.left - menuW / 2;
-    const clampedLeft = Math.max(8, Math.min(bookArea.clientWidth - menuW - 8, rawLeft));
-    const spaceBelow = bookArea.clientHeight - (wordRect.bottom - bookRect.top);
-    const top = spaceBelow >= menuH + 16
-      ? (wordRect.bottom - bookRect.top + 10)
-      : Math.max(4, bookArea.clientHeight - menuH - 10);
-    setState({ top, left: clampedLeft, word: remoteSelection.word, sentence: remoteSelection.sentence, remote: true });
-  }, [remoteSelection, isPerry, bookAreaRef]);
+  if (!pos) return null;
+  const w = selection.word;
+  const pronBusy = pronunciationState?.word.toLowerCase() === w.toLowerCase() && pronunciationState.status === "loading";
+  const phonBusy = phonicsState?.word.toLowerCase() === w.toLowerCase() && phonicsState.status === "loading";
+  const saved = saveState?.word.toLowerCase() === w.toLowerCase() && saveState.status !== "saving";
 
-  // Perry never renders the popup — she still broadcasts via onShareSelection.
-  if (isPerry) return null;
-  if (!state) return null;
-
-  const btn = (icon: string, label: string, onClick: () => void, isBusy: boolean) => (
+  const btn = (icon: string, label: string, onClick: () => void, busy: boolean) => (
     <button
       onClick={(e) => { e.stopPropagation(); onClick(); }}
-      // Prevent selection loss on tap-through iOS behavior.
-      onMouseDown={(e) => e.preventDefault()}
       style={{
         display: "inline-flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-        gap: 2, flex: 1, minWidth: 0,
+        gap: 3, flex: 1, minWidth: 0, minHeight: 52,
         padding: "6px 4px",
-        background: "transparent",
+        background: "rgba(255,255,255,0.06)",
         color: CREAM,
-        border: "none",
+        border: "1px solid rgba(255,255,255,0.10)",
         borderRadius: 10,
         fontFamily: "DM Sans, sans-serif",
-        fontSize: 10, fontWeight: 700, letterSpacing: "0.04em",
+        fontSize: 12, fontWeight: 700, letterSpacing: "0.02em",
         cursor: "pointer",
         touchAction: "manipulation",
-        minHeight: 46,
       }}
     >
-      <span aria-hidden style={{ fontSize: 16, lineHeight: 1 }}>{isBusy ? "…" : icon}</span>
+      <span aria-hidden style={{ fontSize: 18, lineHeight: 1 }}>{busy ? "…" : icon}</span>
       <span>{label}</span>
     </button>
   );
 
-  const pronBusy = pronunciationState?.word.toLowerCase() === state.word.toLowerCase() && pronunciationState?.status === "loading";
-  const phonBusy = phonicsState?.word.toLowerCase() === state.word.toLowerCase() && phonicsState?.status === "loading";
-  const saved = saveState?.word.toLowerCase() === state.word.toLowerCase() && saveState.status !== "saving";
-
   return (
     <div
+      data-nm-no-book-tap
       role="dialog"
-      aria-label={`Actions for ${state.word}`}
+      aria-label={`Actions for ${w}`}
+      onPointerDown={(e) => e.stopPropagation()}
+      onPointerUp={(e) => e.stopPropagation()}
+      onTouchStart={(e) => e.stopPropagation()}
+      onTouchEnd={(e) => e.stopPropagation()}
       style={{
         position: "absolute",
-        top: state.top,
-        left: state.left,
-        width: 300,
+        top: pos.top,
+        left: pos.left,
+        width: pos.width,
         zIndex: 60,
         display: "flex",
         flexDirection: "column",
-        padding: "4px 6px",
-        background: state.remote
-          ? "linear-gradient(180deg, rgba(34,58,110,0.98), rgba(11,23,46,0.96))"
-          : "linear-gradient(180deg, rgba(11,23,46,0.98), rgba(11,23,46,0.94))",
-        border: `1px solid ${state.remote ? "rgba(134,239,172,0.60)" : "rgba(247,201,93,0.55)"}`,
-        borderRadius: 12,
+        gap: 6,
+        padding: "6px 8px 8px",
+        background: fromChild
+          ? "linear-gradient(180deg, rgba(34,58,110,0.98), rgba(11,23,46,0.97))"
+          : "linear-gradient(180deg, rgba(11,23,46,0.98), rgba(11,23,46,0.95))",
+        border: `1px solid ${fromChild ? "rgba(134,239,172,0.65)" : "rgba(247,201,93,0.55)"}`,
+        borderRadius: 14,
         boxShadow: "0 12px 30px rgba(0,0,0,0.55)",
         animation: "phase-card-up 0.20s cubic-bezier(0.22,1,0.36,1)",
+        WebkitUserSelect: "none",
+        userSelect: "none",
       }}
     >
-      {state.remote && (
-        <div style={{
-          fontFamily: "DM Sans, sans-serif", fontSize: 9.5, fontWeight: 800,
-          letterSpacing: "0.14em", color: "#86efac",
-          padding: "3px 6px 1px", textAlign: "center",
-        }}>
-          👉 GRANDCHILD HIGHLIGHTED THIS
+      <div style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 28 }}>
+        <div style={{ flex: 1, minWidth: 0, textAlign: "center", lineHeight: 1.2 }}>
+          {fromChild && (
+            <div style={{ fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 800, letterSpacing: "0.08em", color: "#86efac", textTransform: "uppercase" }}>
+              {childName || "Your grandchild"} picked this word
+            </div>
+          )}
+          <div style={{ fontFamily: "Merriweather, Georgia, serif", fontSize: 17, fontWeight: 700, color: CREAM, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            {w}
+          </div>
         </div>
-      )}
-      <div style={{ display: "flex" }}>
-        {btn("🔊", "Pronunciation", () => onPronounce(state.word), pronBusy)}
-        {btn("🔤", "Phonics",       () => onPhonics(state.word),   phonBusy)}
-        {btn(saved ? "✓" : "⭐", saved ? "Saved" : "Save", () => onSave(state.word, state.sentence), false)}
-      </div>
-    </div>
-  );
-}
-
-/**
- * WordActionBar — floating action popup that appears above the
- * currently-highlighted word, offering four reading-support actions:
- * Say it (slow TTS), Sound it out (syllable-by-syllable), What it
- * means (Free Dictionary API lookup), and Save word (persist to the
- * per-child "Words We're Learning" list). Every action broadcasts
- * via SSE so both iPads share the audio / definition moment.
- *
- * Position tracked from the word span's bounding rect within the
- * book area. Falls back gracefully if the span can't be located
- * (page turned, chunk changed, etc.).
- */
-function WordActionBar({
-  wordHighlight,
-  bookAreaRef,
-  onSay,
-  onSoundOut,
-  onDefine,
-  onSave,
-  onClose,
-  currentDefinition,
-  saveState,
-}: {
-  wordHighlight: WordHighlightState | null;
-  bookAreaRef: React.RefObject<HTMLDivElement | null>;
-  onSay: (word: string) => void;
-  onSoundOut: (word: string) => void;
-  onDefine: (word: string) => void;
-  onSave: (word: string, sentence: string) => void;
-  onClose: () => void;
-  currentDefinition: { word: string; text: string } | null;
-  saveState: { word: string; status: "saving" | "saved" | "already" } | null;
-}) {
-  const [pos, setPos] = useState<{ top: number; left: number; word: string; sentence: string } | null>(null);
-
-  useLayoutEffect(() => {
-    if (!wordHighlight || !bookAreaRef.current) { setPos(null); return; }
-    const selector = `[data-w="${wordHighlight.side}-${wordHighlight.index}"]`;
-    const el = bookAreaRef.current.querySelector(selector) as HTMLElement | null;
-    if (!el) { setPos(null); return; }
-    const bookRect = bookAreaRef.current.getBoundingClientRect();
-    const wordRect = el.getBoundingClientRect();
-    // Grab the whole paragraph text as the sentence-context for the
-    // saved word — good-enough tokenization would need punctuation
-    // splitting; the full paragraph gives Perry a rich review card.
-    const paraEl = el.closest("p") as HTMLElement | null;
-    const sentence = (paraEl?.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 400);
-    setPos({
-      top: wordRect.top - bookRect.top,
-      left: wordRect.left + wordRect.width / 2 - bookRect.left,
-      word: (el.textContent ?? "").trim().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ""),
-      sentence,
-    });
-  }, [wordHighlight, bookAreaRef]);
-
-  if (!wordHighlight || !pos || !pos.word) return null;
-
-  const barW = 320;
-  const barH = 56;
-  const bookRectW = bookAreaRef.current?.getBoundingClientRect().width ?? 999;
-  // Anchor bar centered on the word, but keep it inside the book area
-  // horizontally (16px inset). Vertically: sit ABOVE the word if there's
-  // room; otherwise flip below.
-  const rawLeft = pos.left - barW / 2;
-  const clampedLeft = Math.max(8, Math.min(bookRectW - barW - 8, rawLeft));
-  const above = pos.top >= barH + 18;
-  const top = above ? pos.top - barH - 14 : pos.top + 34;
-
-  const btnStyle: React.CSSProperties = {
-    display: "inline-flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-    gap: 2, flex: 1, minWidth: 0,
-    padding: "6px 4px",
-    background: "transparent",
-    color: "#F7F0E3",
-    border: "none",
-    borderRadius: 10,
-    fontFamily: "DM Sans, sans-serif",
-    fontSize: 10, fontWeight: 700, letterSpacing: "0.04em",
-    cursor: "pointer",
-    touchAction: "manipulation",
-    minHeight: 48,
-  };
-  const iconStyle: React.CSSProperties = { fontSize: 18, lineHeight: 1 };
-  const savedLabel = saveState && saveState.word.toLowerCase() === pos.word.toLowerCase()
-    ? (saveState.status === "saving" ? "…" : saveState.status === "already" ? "★ Saved" : "★ Saved!")
-    : "Save";
-  const savedTone = saveState && saveState.word.toLowerCase() === pos.word.toLowerCase() && saveState.status !== "saving"
-    ? "#f7c95d" : "#F7F0E3";
-
-  return (
-    <>
-      <div
-        role="dialog"
-        aria-label={`Actions for the word ${pos.word}`}
-        style={{
-          position: "absolute",
-          top, left: clampedLeft,
-          width: barW,
-          zIndex: 50,
-          display: "flex", alignItems: "stretch",
-          padding: "4px 4px",
-          background: "linear-gradient(180deg, rgba(11,23,46,0.98) 0%, rgba(11,23,46,0.94) 100%)",
-          border: "1px solid rgba(247,201,93,0.55)",
-          borderRadius: 14,
-          boxShadow: "0 12px 32px rgba(0,0,0,0.55), 0 0 0 1px rgba(0,0,0,0.35)",
-          animation: "phase-card-up 0.22s cubic-bezier(0.22,1,0.36,1)",
-        }}
-      >
-        <button style={btnStyle} onClick={() => onSay(pos.word)} aria-label={`Say the word ${pos.word}`}>
-          <span aria-hidden style={iconStyle}>🔊</span>
-          <span>Say it</span>
-        </button>
-        <button style={btnStyle} onClick={() => onSoundOut(pos.word)} aria-label={`Sound out ${pos.word}`}>
-          <span aria-hidden style={iconStyle}>🔤</span>
-          <span>Sound out</span>
-        </button>
-        <button style={btnStyle} onClick={() => onDefine(pos.word)} aria-label={`Define ${pos.word}`}>
-          <span aria-hidden style={iconStyle}>📖</span>
-          <span>Meaning</span>
-        </button>
-        <button style={{ ...btnStyle, color: savedTone }} onClick={() => onSave(pos.word, pos.sentence)} aria-label={`Save ${pos.word} for review`}>
-          <span aria-hidden style={iconStyle}>⭐</span>
-          <span>{savedLabel}</span>
-        </button>
         <button
-          onClick={onClose}
+          onClick={(e) => { e.stopPropagation(); onClose(); }}
           aria-label="Close word actions"
           style={{
-            position: "absolute", top: -10, right: -10,
-            width: 22, height: 22, borderRadius: 999,
-            background: "#0b172e", color: CREAM,
-            border: "1px solid rgba(255,255,255,0.35)",
-            fontSize: 12, lineHeight: 1, fontWeight: 700,
-            cursor: "pointer", padding: 0,
-            display: "inline-flex", alignItems: "center", justifyContent: "center",
-            touchAction: "manipulation",
+            flexShrink: 0, width: 32, height: 32, borderRadius: "50%",
+            background: "rgba(255,255,255,0.10)", color: CREAM,
+            border: "1px solid rgba(255,255,255,0.18)",
+            fontSize: 15, fontWeight: 800, lineHeight: 1,
+            cursor: "pointer", touchAction: "manipulation",
           }}
-        >×</button>
+        >✕</button>
       </div>
-
-      {/* Definition popup — anchored to the same word position but
-          below the action bar. Auto-dismisses via parent's timer. */}
-      {currentDefinition && currentDefinition.word.toLowerCase() === pos.word.toLowerCase() && (
-        <div
-          role="status"
-          aria-live="polite"
-          style={{
-            position: "absolute",
-            top: above ? pos.top + 38 : pos.top - 120,
-            left: clampedLeft,
-            width: barW,
-            zIndex: 49,
-            padding: "10px 14px",
-            background: "#f7ecd1",
-            color: "#3a2a14",
-            border: "1px solid #c9922a",
-            borderRadius: 12,
-            boxShadow: "0 10px 24px rgba(0,0,0,0.45)",
-            fontFamily: "Merriweather, serif",
-            fontSize: 13, lineHeight: 1.45,
-            animation: "phase-card-up 0.24s cubic-bezier(0.22,1,0.36,1)",
-          }}
-        >
-          <div style={{ fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: "0.14em", color: "#5C3A1E", marginBottom: 4 }}>
-            📖 {currentDefinition.word.toUpperCase()}
-          </div>
-          <div>{currentDefinition.text}</div>
-        </div>
-      )}
-    </>
+      <div style={{ display: "flex", gap: 6 }}>
+        {btn("🔊", "Pronunciation", () => onPronounce(w), pronBusy)}
+        {btn("🔤", "Phonics", () => onPhonics(w), phonBusy)}
+        {btn(saved ? "✓" : "⭐", saved ? "Saved" : "Save", () => onSave(w, selection.sentence), false)}
+      </div>
+    </div>
   );
 }
 
@@ -1914,17 +1865,19 @@ function BookContent({
   bookPages,
   bookTitle,
   fontScale = 1,
-  wordHighlight = null,
+  highlightWid = null,
   theme = "day",
   pageMode = "double",
   pageSide = "L",
-  chunkSize = 1,
+  plan = null,
+  profileRole,
+  onProfile,
 }: {
   page: number;
   bookPages: BookPage[];
   bookTitle: string;
   fontScale?: number;
-  wordHighlight?: WordHighlightState | null;
+  highlightWid?: string | null;
   theme?: ReadingTheme;
   /** "double" = open-book spread (both pages side-by-side). "single" =
    *  one page at a time; advancePage in single mode flips through L → R
@@ -1933,15 +1886,17 @@ function BookContent({
   /** Which page of the spread is visible in single mode. Ignored in
    *  double mode. */
   pageSide?: "L" | "R";
-  /** Wish 2: number of source pages to merge into one displayed spread.
-   *  Default 1 (no chunking — historical behavior). When > 1, the
-   *  displayed left column gets the first ceil(N/2) source pages'
-   *  bodies joined; right column gets the rest. Title pages and
-   *  in-chunk chapter heading collisions defer to the first source
-   *  page's metadata. */
-  chunkSize?: number;
+  /** Shared page plan (which source pages form each spread and where
+   *  the left column ends). Null = one source page per spread. */
+  plan?: PagePlan | null;
+  /** Which iPad this book is rendered for; tags the measured profile. */
+  profileRole?: "nana" | "perry";
+  /** Receives this iPad's measured reading box for the page planner. */
+  onProfile?: (p: PageProfile) => void;
 }) {
-  const themeColors = READING_THEMES[theme];
+  const themeColors = READING_THEMES[theme] ?? READING_THEMES.day;
+  // Night and White pages skip the parchment grain and spine vignette.
+  const plainPaper = theme === "night" || theme === "bright";
   // Diagnostic log so we can see exactly what BookContent renders with —
   // Rick reported "not syncing to perry" while all chain logs (publish,
   // server receive, server broadcast, perry SSE receive) confirmed the
@@ -1955,48 +1910,24 @@ function BookContent({
   // book, or a stale state from before a Phase C page-split) returns
   // `undefined` and renders a blank page — Rick's "blank G-page" report.
   const safePage = Math.max(1, Math.min(page, bookPages.length));
-  // Chunk assembly. When `chunkSize > 1` we pack consecutive source
-  // pages into one displayed spread. The synthesized "page" reuses the
-  // first source page's metadata (chapter heading, emoji, rightIsTitle
-  // flag) and concatenates bodies so the left column gets the front
-  // half and the right column the back half of the chunk.
-  const chunkPages: BookPage[] = (() => {
-    const n = Math.max(1, chunkSize);
-    if (n <= 1) return [bookPages[safePage - 1] ?? bookPages[0]];
-    const slice = bookPages.slice(safePage - 1, Math.min(safePage - 1 + n, bookPages.length));
-    return slice.length ? slice : [bookPages[safePage - 1] ?? bookPages[0]];
-  })();
-  const first = chunkPages[0];
-  const isTitleSpread = !!first.rightIsTitle;
-  // Title spreads (cover) are intentionally sparse — never chunk them.
-  const effectiveChunk = isTitleSpread ? [first] : chunkPages;
-  // Split the chunk's body halves evenly across left/right columns.
-  // For 1 source page: behave exactly as before (leftBody / rightBody).
-  // For ≥2 source pages: each source page contributes both halves as
-  // sentence runs joined with a single space; midpoint of the combined
-  // half list goes between the two columns. Examples:
-  //   N=2 → left = p0.left + p0.right, right = p1.left + p1.right
-  //   N=3 → left = p0.left + p0.right + p1.left, right = p1.right + p2.left + p2.right
-  const p: BookPage = (() => {
-    if (effectiveChunk.length <= 1) return first;
-    const halves: string[] = [];
-    for (const sp of effectiveChunk) {
-      if (sp.leftBody)  halves.push(sp.leftBody);
-      if (sp.rightBody) halves.push(sp.rightBody);
-    }
-    const mid = Math.ceil(halves.length / 2);
-    const join = (xs: string[]) => xs.join(" ").trim();
-    return {
-      ...first,
-      leftBody:  join(halves.slice(0, mid)),
-      rightBody: join(halves.slice(mid)),
-    };
-  })();
-  // Page-number labels: show a range when the chunk spans multiple
-  // source pages so the reader sees "12–15" instead of just "12".
-  const chunkLastSourcePage = safePage + effectiveChunk.length - 1;
-  const leftPageNum  = safePage === 1 ? null : (safePage - 1) * 2;
-  const rightPageNum = safePage === 1 ? null : (chunkLastSourcePage - 1) * 2 + 1;
+  // Rick's Build 33 A-3: the spread comes from the shared page plan —
+  // measured merging of short source pages plus a left/right split both
+  // iPads agree on. Without a plan, each source page is its own spread.
+  const activePlan = plan && plan.starts.length > 0 ? plan : identityPlan("", bookPages.length, pageMode);
+  const spreadIdx = spreadIndexOf(activePlan, safePage);
+  const spreadStart = activePlan.starts[spreadIdx] ?? safePage;
+  const spreadStop = spreadEnd(activePlan, spreadIdx, bookPages.length);
+  const spreadSplit = activePlan.splits[spreadIdx] ?? -1;
+  // Heading, emoji, images and title flags come from the first page.
+  const p: BookPage = bookPages[spreadStart - 1] ?? bookPages[0];
+  const isTitleSpread = !!p.rightIsTitle;
+  const isCoverSpread = spreadStart === 1;
+  const { leftSegs, rightSegs } = isTitleSpread
+    ? composeSpread(bookPages, spreadStart, spreadStart + 1, -1)
+    : composeSpread(bookPages, spreadStart, spreadStop, spreadSplit);
+  const textKey = `${spreadStart}-${spreadStop}-${spreadSplit}`;
+  const leftPageNum  = isCoverSpread ? null : spreadIdx * 2;
+  const rightPageNum = isCoverSpread ? null : spreadIdx * 2 + 1;
   const bodyFs = fontScale >= 1.5 ? "clamp(16px, 2.4vw, 22px)" : fontScale >= 1.25 ? "clamp(13px, 1.8vw, 17px)" : "clamp(10px, 1.3vw, 13px)";
   const headFs = fontScale >= 1.5 ? "clamp(20px, 2.8vw, 30px)" : fontScale >= 1.25 ? "clamp(17px, 2.4vw, 25px)" : "clamp(14px, 2vw, 20px)";
   const subFs  = fontScale >= 1.5 ? "clamp(14px, 1.8vw, 18px)" : fontScale >= 1.25 ? "clamp(12px, 1.6vw, 16px)" : "clamp(10px, 1.35vw, 13px)";
@@ -2012,7 +1943,7 @@ function BookContent({
   // fontSize onto both refs; when the effect raced with a React re-render
   // one side could be updated while the other stayed at the pre-effect
   // default, causing asymmetry.
-  const targetFontPct = fontScale >= 1.5 ? 150 : fontScale >= 1.25 ? 125 : 100;
+  const targetFontPct = fontScale >= 1.5 ? 150 : fontScale >= 1.25 ? 125 : fontScale >= 1 ? 100 : 88;
 
   // Rick's Build 32 review #A-3: pagination fix. The original behavior
   // (Aug 14) was "honor target % strictly, scroll on overflow" — which
@@ -2054,23 +1985,104 @@ function BookContent({
       // text is below. Also inject a visible "↓ MORE BELOW" pill so
       // the affordance is obvious (Rick's Build 32 A-3 root cause was
       // that the subtle fade was invisible on iPad).
+      // Last resort only: the page plan sizes spreads to fit, so this
+      // runs when a single source page is longer than the whole page.
+      // The cue sits on the page (not inside the faded scroller, where it
+      // covered the last line) and hides once the reader reaches the end.
       containers.forEach(c => {
         const overflows = c.scrollHeight > c.clientHeight + 4;
         c.style.overflowY = overflows ? "auto" : "hidden";
         c.classList.toggle("nm-book-body-overflow", overflows);
-        // Remove any existing cue then add a fresh one so the animation
-        // restarts on page change.
-        const existing = c.querySelector(".nm-scroll-cue");
-        if (existing) existing.remove();
+        const host = (c.closest(".nm-book-page") as HTMLElement | null) ?? c;
+        host.querySelectorAll(":scope > .nm-scroll-cue").forEach(el => el.remove());
+        c.onscroll = null;
         if (overflows) {
           const cue = document.createElement("div");
           cue.className = "nm-scroll-cue";
           cue.textContent = "↓ Scroll for more";
-          c.appendChild(cue);
+          host.appendChild(cue);
+          c.onscroll = () => {
+            const atEnd = c.scrollTop + c.clientHeight >= c.scrollHeight - 6;
+            cue.style.opacity = atEnd ? "0" : "1";
+          };
         }
       });
     });
-  }, [page, targetFontPct, p?.leftBody, p?.rightBody, p?.rightIsTitle]);
+  }, [textKey, targetFontPct, pageMode, pageSide]);
+
+  // Measure this iPad's reading box for the shared page planner. Only
+  // text spreads are measurable; in one-page mode only one column is on
+  // screen, so the other column's capacity is derived from it.
+  const motifRef = useRef<HTMLDivElement>(null);
+  const headingRef = useRef<HTMLDivElement>(null);
+  const imagesRef = useRef<HTMLDivElement>(null);
+  const leftFleuronRef = useRef<HTMLDivElement>(null);
+  const rightFleuronRef = useRef<HTMLDivElement>(null);
+  const headProbeRef = useRef<HTMLSpanElement>(null);
+  const lastProfileRef = useRef<PageProfile | null>(null);
+  const onProfileRef = useRef(onProfile);
+  onProfileRef.current = onProfile;
+  // Box geometry doesn't depend on the text, so any text spread
+  // (including the cover's left page) can be measured. The sign-off page
+  // hides its running header, so its box differs.
+  const measurable = !!profileRole && !p.imageUrl && !p.signOff;
+  useLayoutEffect(() => {
+    if (!measurable || !profileRole) return;
+    const measure = () => {
+      const lp = leftRef.current;
+      const rp = rightRef.current;
+      const ref = lp ?? rp;
+      if (!ref || !ref.parentElement || !onProfileRef.current) return;
+      const parentPx = parseFloat(getComputedStyle(ref.parentElement).fontSize) || 16;
+      const cs = getComputedStyle(ref);
+      const curPx = parseFloat(cs.fontSize) || parentPx;
+      const lhPx = parseFloat(cs.lineHeight);
+      const lhFactor = Number.isFinite(lhPx) && lhPx > 0 ? lhPx / curPx : 1.95;
+      const fontPx = parentPx * targetFontPct / 100;
+      const prev = lastProfileRef.current && lastProfileRef.current.mode === pageMode ? lastProfileRef.current : null;
+      const outerH = (el: HTMLElement) => {
+        const st = getComputedStyle(el);
+        return el.offsetHeight + (parseFloat(st.marginTop) || 0) + (parseFloat(st.marginBottom) || 0);
+      };
+      const motifH = motifRef.current ? outerH(motifRef.current) : prev ? Math.max(0, prev.capRightPx - prev.capLeftPlainPx) : 62;
+      let capLeftPlainPx = prev?.capLeftPlainPx ?? 0;
+      let capRightPx = prev?.capRightPx ?? 0;
+      if (lp && lp.parentElement) {
+        const fleur = leftFleuronRef.current ? leftFleuronRef.current.offsetHeight : 0;
+        const imgs = imagesRef.current ? outerH(imagesRef.current) : 0;
+        const head = headingRef.current ? outerH(headingRef.current) : 0;
+        capLeftPlainPx = lp.parentElement.clientHeight - fleur - imgs + head;
+        if (!rp) capRightPx = capLeftPlainPx + motifH;
+      }
+      if (rp && rp.parentElement) {
+        const fleur = rightFleuronRef.current ? rightFleuronRef.current.offsetHeight : 0;
+        capRightPx = rp.parentElement.clientHeight - fleur;
+        if (!lp) capLeftPlainPx = capRightPx - motifH;
+      }
+      if (capLeftPlainPx <= 0 || capRightPx <= 0 || ref.clientWidth <= 0) return;
+      const profile: PageProfile = {
+        role: profileRole,
+        mode: pageMode,
+        colWidth: ref.clientWidth,
+        fontFamily: cs.fontFamily,
+        fontPx,
+        lineHeightPx: lhFactor * fontPx,
+        letterSpacingEm: (parseFloat(cs.letterSpacing) || 0) / curPx,
+        wordSpacingEm: (parseFloat(cs.wordSpacing) || 0) / curPx,
+        fontFeatureSettings: cs.fontFeatureSettings || "normal",
+        capLeftPlainPx,
+        capRightPx,
+        headNameFontPx: headProbeRef.current ? parseFloat(getComputedStyle(headProbeRef.current).fontSize) || 20 : 20,
+      };
+      lastProfileRef.current = profile;
+      onProfileRef.current(profile);
+    };
+    measure();
+    const host = (leftRef.current ?? rightRef.current)?.closest(".nm-book-page")?.parentElement;
+    const ro = host && typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => measure()) : null;
+    if (ro && host) ro.observe(host);
+    return () => ro?.disconnect();
+  }, [measurable, profileRole, pageMode, pageSide, targetFontPct, textKey]);
 
   // Rick's Sep 25 (C-1): fixed-layout / image-page render path. When
   // the current page carries an imageUrl (either an Aubrees-style
@@ -2120,7 +2132,7 @@ function BookContent({
             fontSize: `${targetFontPct}%`,
             lineHeight: 1.5,
             textAlign: "center",
-            borderTop: `1px solid ${LEATHER}22`,
+            borderTop: `1px solid ${themeColors.muted}22`,
           }}>
             {caption}
           </div>
@@ -2130,7 +2142,7 @@ function BookContent({
           <div style={{
             position: "absolute", bottom: 4, left: 0, right: 0,
             textAlign: "center",
-            color: LEATHER, fontFamily: "Merriweather, serif", fontSize: 9,
+            color: themeColors.muted, fontFamily: "Merriweather, serif", fontSize: 9,
             opacity: 0.45, letterSpacing: "0.1em",
             fontVariantNumeric: "oldstyle-nums",
             pointerEvents: "none",
@@ -2142,12 +2154,17 @@ function BookContent({
     );
   }
 
+  // One-page mode on a wide iPad: cap the page at a comfortable line
+  // length instead of stretching text across the whole screen.
+  const singlePageCap: React.CSSProperties = pageMode === "single" ? { maxWidth: 740 } : {};
   return (
     <div style={{
       display: "flex", width: "100%", height: "100%",
+      justifyContent: "center",
       boxShadow: "0 8px 32px rgba(0,0,0,0.55), 0 1px 4px rgba(0,0,0,0.3)",
       position: "relative",
     }}>
+      <span ref={headProbeRef} aria-hidden style={{ position: "absolute", visibility: "hidden", pointerEvents: "none", fontSize: headFs, fontFamily: "Playfair Display, serif" }}>A</span>
       {/* Premium book typography settings — applied via class so both
           pages and the chapter heading inherit consistent hyphenation,
           ligatures, and legibility hints. Keeps the iPad rendering
@@ -2160,8 +2177,8 @@ function BookContent({
           font-variant-numeric: oldstyle-nums;
         }
         .nm-book-body {
-          hyphens: auto;
-          -webkit-hyphens: auto;
+          hyphens: manual;
+          -webkit-hyphens: manual;
           word-spacing: 0.01em;
           letter-spacing: 0.005em;
         }
@@ -2297,10 +2314,11 @@ function BookContent({
           (cover) special case from collapsing — there the right side is
           the title page and the left has no content, so we always show
           the right in single mode regardless of pageSide. */}
-      {!(pageMode === "single" && (pageSide === "R" || safePage === 1)) && (
-      <div className={`nm-book-page${theme === "night" ? " nm-book-page-night" : ""}`} style={{
+      {!(pageMode === "single" && (pageSide === "R" || isCoverSpread)) && (
+      <div className={`nm-book-page${plainPaper ? " nm-book-page-night" : ""}`} style={{
         position: "relative",
         flex: 1, backgroundColor: themeColors.page,
+        ...singlePageCap,
         display: "flex", flexDirection: "column",
         padding: "10px 14px 10px 18px",
         boxShadow: `inset -5px 0 14px ${themeColors.spineShadow}`,
@@ -2308,8 +2326,8 @@ function BookContent({
         transition: "background-color 240ms ease",
       }}>
         {/* Running header — small caps, refined letter-spacing */}
-        <div style={{ borderBottom: `1px solid ${LEATHER}`, paddingBottom: "4px", marginBottom: "10px", display: "flex", justifyContent: "center", opacity: 0.55 }}>
-          <span style={{ color: LEATHER, fontFamily: "Merriweather, serif", fontSize: "9px", fontStyle: "italic", letterSpacing: "0.14em", textTransform: "uppercase" }}>
+        <div style={{ borderBottom: `1px solid ${themeColors.muted}`, paddingBottom: "4px", marginBottom: "10px", display: "flex", justifyContent: "center", opacity: 0.55 }}>
+          <span style={{ color: themeColors.muted, fontFamily: "Merriweather, serif", fontSize: "9px", fontStyle: "italic", letterSpacing: "0.14em", textTransform: "uppercase" }}>
             {bookTitle}
           </span>
         </div>
@@ -2318,7 +2336,7 @@ function BookContent({
             Mirrors the printed-book convention of a small spot
             illustration above a chapter opener (Rick / NOOK feedback:
             "the book remains central, no clutter"). */}
-        <div style={{
+        <div ref={motifRef} style={{
           textAlign: "center",
           margin: "0 0 6px",
           padding: 0,
@@ -2341,20 +2359,20 @@ function BookContent({
           const chapterNum  = parts.length > 1 ? parts[0] : null;
           const chapterName = parts.length > 1 ? parts.slice(1).join(" · ") : p.leftChapter;
           return (
-            <div style={{ textAlign: "center", marginBottom: "12px" }}>
+            <div ref={headingRef} style={{ textAlign: "center", marginBottom: "12px" }}>
               {chapterNum && (
-                <span style={{ display: "block", color: LEATHER, fontFamily: "Merriweather, serif", fontSize: "10px", fontWeight: 700, letterSpacing: "0.22em", textTransform: "uppercase", marginBottom: "6px", opacity: 0.65 }}>
+                <span style={{ display: "block", color: themeColors.muted, fontFamily: "Merriweather, serif", fontSize: "10px", fontWeight: 700, letterSpacing: "0.22em", textTransform: "uppercase", marginBottom: "6px", opacity: 0.65 }}>
                   {chapterNum}
                 </span>
               )}
-              <span style={{ display: "block", color: BOOK_TEXT, fontFamily: "Playfair Display, serif", fontSize: headFs, fontWeight: 700, lineHeight: 1.15, marginBottom: "4px", letterSpacing: "0.005em" }}>
+              <span style={{ display: "block", color: themeColors.text, fontFamily: "Playfair Display, serif", fontSize: headFs, fontWeight: 700, lineHeight: 1.15, marginBottom: "4px", letterSpacing: "0.005em" }}>
                 {chapterName}
               </span>
               {/* Ornamental rule — tiny diamond between two short lines */}
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginTop: 8, opacity: 0.45 }}>
-                <span style={{ width: 24, height: 1, backgroundColor: LEATHER }} />
-                <span style={{ color: LEATHER, fontSize: 8, transform: "translateY(-1px)" }}>◆</span>
-                <span style={{ width: 24, height: 1, backgroundColor: LEATHER }} />
+                <span style={{ width: 24, height: 1, backgroundColor: themeColors.muted }} />
+                <span style={{ color: themeColors.muted, fontSize: 8, transform: "translateY(-1px)" }}>◆</span>
+                <span style={{ width: 24, height: 1, backgroundColor: themeColors.muted }} />
               </div>
             </div>
           );
@@ -2376,7 +2394,7 @@ function BookContent({
               attaches them). Each image is a data: URL, sized to fit
               the page width. */}
           {p.images && p.images.length > 0 && (
-            <div style={{
+            <div ref={imagesRef} style={{
               display: "flex", flexDirection: "column",
               gap: 10, marginBottom: 12, alignItems: "center",
               // Give illustrations roughly half the page height so
@@ -2415,37 +2433,29 @@ function BookContent({
             // above — this fixes Rick's "font only changes right page".
             fontSize: `${targetFontPct}%`,
           }}>
-            <WordWrapped
-              text={p.leftBody}
-              side="L"
-              highlightIndex={
-                wordHighlight && wordHighlight.page === page && wordHighlight.side === "L"
-                  ? wordHighlight.index
-                  : null
-              }
-            />
+            <WordWrapped segments={leftSegs} highlightWid={highlightWid} />
           </p>
           {/* End-of-section fleuron — small printed-book ornament that
               fills the empty space when body doesn't reach the gutter.
               Soft enough to feel like a real chapter break. */}
-          <div aria-hidden style={{
+          <div ref={leftFleuronRef} aria-hidden style={{
             display: "flex", alignItems: "center", justifyContent: "center",
             gap: 10, opacity: 0.32, marginTop: "auto", paddingTop: 12,
-            color: LEATHER, fontSize: 14,
+            color: themeColors.muted, fontSize: 14,
           }}>
-            <span style={{ width: 28, height: 1, backgroundColor: LEATHER }} />
+            <span style={{ width: 28, height: 1, backgroundColor: themeColors.muted }} />
             ❦
-            <span style={{ width: 28, height: 1, backgroundColor: LEATHER }} />
+            <span style={{ width: 28, height: 1, backgroundColor: themeColors.muted }} />
           </div>
         </div>
 
         {/* Page number — centered, refined. Hidden on sign-off pages
             per Rick's Build 32 review #B-6. */}
-        {leftPageNum && !p.signOff && (
-          <div style={{ textAlign: "center", marginTop: 4, position: "relative", zIndex: 1 }}>
-            <span style={{ color: LEATHER, fontFamily: "Merriweather, serif", fontSize: 9, opacity: 0.5, letterSpacing: "0.1em", fontVariantNumeric: "oldstyle-nums" }}>· {leftPageNum} ·</span>
-          </div>
-        )}
+        {/* Row is always laid out (hidden where there's no number) so
+            every spread has the same text box for the page planner. */}
+        <div aria-hidden style={{ textAlign: "center", marginTop: 4, position: "relative", zIndex: 1, visibility: SHOW_PAGE_FOLIOS && leftPageNum && !p.signOff ? "visible" : "hidden" }}>
+          <span style={{ color: themeColors.muted, fontFamily: "Merriweather, serif", fontSize: 9, opacity: 0.5, letterSpacing: "0.1em", fontVariantNumeric: "oldstyle-nums" }}>· {leftPageNum ?? 0} ·</span>
+        </div>
       </div>
       )}
 
@@ -2465,10 +2475,11 @@ function BookContent({
       {/* ── RIGHT PAGE ── hidden in single mode when pageSide==="L"
           (except on the cover page, where the right side IS the content
           and we always render it). */}
-      {!(pageMode === "single" && pageSide === "L" && safePage !== 1) && (
-      <div className={`nm-book-page nm-book-page-right${theme === "night" ? " nm-book-page-night" : ""}`} style={{
+      {!(pageMode === "single" && pageSide === "L" && !isCoverSpread) && (
+      <div className={`nm-book-page nm-book-page-right${plainPaper ? " nm-book-page-night" : ""}`} style={{
         position: "relative",
         flex: 1, backgroundColor: themeColors.page,
+        ...singlePageCap,
         display: "flex", flexDirection: "column",
         padding: "10px 18px 10px 14px",
         boxShadow: `inset 5px 0 14px ${themeColors.spineShadow}`,
@@ -2480,8 +2491,8 @@ function BookContent({
             it reads as a distinct branded closing rather than another
             body page. */}
         {!p.signOff && (
-          <div style={{ borderBottom: `1px solid ${LEATHER}`, paddingBottom: "4px", marginBottom: "10px", display: "flex", justifyContent: "center", opacity: 0.55 }}>
-            <span style={{ color: LEATHER, fontFamily: "Merriweather, serif", fontSize: "9px", fontStyle: "italic", letterSpacing: "0.14em", textTransform: "uppercase" }}>
+          <div style={{ borderBottom: `1px solid ${themeColors.muted}`, paddingBottom: "4px", marginBottom: "10px", display: "flex", justifyContent: "center", opacity: 0.55 }}>
+            <span style={{ color: themeColors.muted, fontFamily: "Merriweather, serif", fontSize: "9px", fontStyle: "italic", letterSpacing: "0.14em", textTransform: "uppercase" }}>
               {(bookPages[0]?.rightTitleSub ?? "").replace(/^by\s*/i, "")}
             </span>
           </div>
@@ -2493,24 +2504,24 @@ function BookContent({
         <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "flex-start", overflow: "hidden" }}>
           {p.rightIsTitle ? (
             <>
-              <h2 style={{ color: BOOK_TEXT, fontFamily: "Playfair Display, serif", fontSize: headFs, fontWeight: 700, textAlign: "center", marginBottom: 8, marginTop: 14, lineHeight: 1.2, letterSpacing: "0.005em" }}>
+              <h2 style={{ color: themeColors.text, fontFamily: "Playfair Display, serif", fontSize: headFs, fontWeight: 700, textAlign: "center", marginBottom: 8, marginTop: 14, lineHeight: 1.2, letterSpacing: "0.005em" }}>
                 {p.rightTitle}
               </h2>
-              <p style={{ color: LEATHER, fontStyle: "italic", fontFamily: "Merriweather, serif", fontSize: subFs, textAlign: "center", marginBottom: 14, opacity: 0.8 }}>
+              <p style={{ color: themeColors.muted, fontStyle: "italic", fontFamily: "Merriweather, serif", fontSize: subFs, textAlign: "center", marginBottom: 14, opacity: 0.8 }}>
                 {p.rightTitleSub}
               </p>
               {/* Ornamental rule */}
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, margin: "4px auto 16px", opacity: 0.4 }}>
-                <span style={{ width: 36, height: 1, backgroundColor: LEATHER }} />
-                <span style={{ color: LEATHER, fontSize: 9, transform: "translateY(-1px)" }}>◆</span>
-                <span style={{ width: 36, height: 1, backgroundColor: LEATHER }} />
+                <span style={{ width: 36, height: 1, backgroundColor: themeColors.muted }} />
+                <span style={{ color: themeColors.muted, fontSize: 9, transform: "translateY(-1px)" }}>◆</span>
+                <span style={{ width: 36, height: 1, backgroundColor: themeColors.muted }} />
               </div>
-              <p className="nm-book-body" style={{ color: BOOK_TEXT, fontFamily: "Merriweather, serif", fontSize: bodyFs, lineHeight: 1.85, textAlign: "center", opacity: 0.92 }}>
+              <p className="nm-book-body" style={{ color: themeColors.text, fontFamily: "Merriweather, serif", fontSize: bodyFs, lineHeight: 1.85, textAlign: "center", opacity: 0.92 }}>
                 {p.rightBody}
               </p>
             </>
           ) : (
-            <div style={{ flex: 1, display: "flex", flexDirection: "column", position: "relative", zIndex: 1 }}>
+            <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative", zIndex: 1 }}>
               <p ref={rightRef} className="book-body nm-book-body" style={{
                 color: themeColors.text,
                 margin: 0,
@@ -2522,25 +2533,17 @@ function BookContent({
                 // Match LEFT — see leftRef paragraph above.
                 fontSize: `${targetFontPct}%`,
               }}>
-                <WordWrapped
-                  text={p.rightBody}
-                  side="R"
-                  highlightIndex={
-                    wordHighlight && wordHighlight.page === page && wordHighlight.side === "R"
-                      ? wordHighlight.index
-                      : null
-                  }
-                />
+                <WordWrapped segments={rightSegs} highlightWid={highlightWid} />
               </p>
               {/* End ornament — same fleuron when there's empty space below body */}
-              <div aria-hidden style={{
+              <div ref={rightFleuronRef} aria-hidden style={{
                 display: "flex", alignItems: "center", justifyContent: "center",
                 gap: 10, opacity: 0.32, marginTop: "auto", paddingTop: 12,
-                color: LEATHER, fontSize: 14,
+                color: themeColors.muted, fontSize: 14,
               }}>
-                <span style={{ width: 28, height: 1, backgroundColor: LEATHER }} />
+                <span style={{ width: 28, height: 1, backgroundColor: themeColors.muted }} />
                 ❦
-                <span style={{ width: 28, height: 1, backgroundColor: LEATHER }} />
+                <span style={{ width: 28, height: 1, backgroundColor: themeColors.muted }} />
               </div>
             </div>
           )}
@@ -2549,11 +2552,11 @@ function BookContent({
         {/* Page number — centered, refined. Hidden on sign-off pages
             (Rick's Build 32 review #B-6: branded closing beat should
             read as a page distinct from the story pagination). */}
-        {rightPageNum && !p.signOff && (
-          <div style={{ textAlign: "center", marginTop: 4, position: "relative", zIndex: 1 }}>
-            <span style={{ color: LEATHER, fontFamily: "Merriweather, serif", fontSize: 9, opacity: 0.5, letterSpacing: "0.1em", fontVariantNumeric: "oldstyle-nums" }}>· {rightPageNum} ·</span>
-          </div>
-        )}
+        {/* Row is always laid out (hidden where there's no number) so
+            every spread has the same text box for the page planner. */}
+        <div aria-hidden style={{ textAlign: "center", marginTop: 4, position: "relative", zIndex: 1, visibility: SHOW_PAGE_FOLIOS && rightPageNum && !p.signOff ? "visible" : "hidden" }}>
+          <span style={{ color: themeColors.muted, fontFamily: "Merriweather, serif", fontSize: 9, opacity: 0.5, letterSpacing: "0.1em", fontVariantNumeric: "oldstyle-nums" }}>· {rightPageNum ?? 0} ·</span>
+        </div>
       </div>
       )}
 
@@ -2649,6 +2652,7 @@ function ProminentHomePill({
 function ChatModeView({
   isNana,
   nanaPromptText,
+  questions,
   onStartReading,
   childName,
   nanaName,
@@ -2658,6 +2662,8 @@ function ChatModeView({
 }: {
   isNana: boolean;
   nanaPromptText: string;
+  /** Let's Talk: questions Nana can cycle with "Another question". */
+  questions?: string[];
   onStartReading: () => void;
   childName: string;
   nanaName: string;
@@ -2669,6 +2675,10 @@ function ChatModeView({
 }) {
   const otherName = isNana ? (childName || getRoleLabel("child")) : (nanaName || getRoleLabel("nana"));
   const selfName  = isNana ? (nanaName || getRoleLabel("nana"))  : (childName || getRoleLabel("child"));
+  const list = questions && questions.length > 0 ? questions : [nanaPromptText];
+  const [qIdx, setQIdx] = useState(0);
+  const question = list[qIdx % list.length] ?? nanaPromptText;
+  void onCycleFontScale; void onGoHome;
 
   // Rick's Jun 22 spec: "I'd like to explore using a layout similar to
   // Show & Tell for Chat Mode … big picture on top, words/content below."
@@ -2683,13 +2693,15 @@ function ChatModeView({
     }}>
       {/* ── TOP: Big video ─── */}
       <div style={{ flex: "1 1 0", minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: 12, position: "relative", overflow: "hidden" }}>
-        <div style={{ width: "100%", maxWidth: 900, height: "100%", position: "relative" }}>
+        <div style={{ width: "100%", height: "100%", position: "relative", borderRadius: 16, overflow: "hidden" }}>
           <FaceVideoStage
             bigPerson={isNana ? "child" : "nana"}
             pipPerson={isNana ? "nana" : "child"}
             bigName={otherName}
             pipName={selfName}
             bigObjectFit="contain"
+            pipWidth={128}
+            pipHeight={170}
           />
           {/* Floating mode badge — matches Show & Tell. */}
           <div style={{
@@ -2703,7 +2715,7 @@ function ChatModeView({
             fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800,
             letterSpacing: "0.16em",
           }}>
-            💬 CHAT MODE
+            💬 LET'S TALK
           </div>
         </div>
       </div>
@@ -2734,45 +2746,49 @@ function ChatModeView({
                 >
                   <span style={{ fontSize: 14, lineHeight: 1 }} aria-hidden>📖</span>
                 </div>
-                <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: "0.14em" }}>
-                  READING PROMPT
+                <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 800, letterSpacing: "0.14em" }}>
+                  ASK {otherName.toUpperCase()}
                 </span>
+                {list.length > 1 && (
+                  <span style={{ marginLeft: "auto", color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700 }}>
+                    {(qIdx % list.length) + 1} of {list.length}
+                  </span>
+                )}
               </div>
-              <div style={{ maxHeight: "22vh", overflow: "auto" }}>
-                <ChatModePrompt text={nanaPromptText} fontScale={fontScale} />
+              <div style={{ maxHeight: "22vh", overflow: "auto" }} data-testid="talk-question">
+                <ChatModePrompt text={question} fontScale={fontScale} />
               </div>
             </div>
 
-            {/* Actions — Back to Reading + Font. Home lives in the drawer. */}
-            <div style={{ display: "flex", justifyContent: "center", gap: 10, flexWrap: "wrap" }}>
-              <TileButton
-                icon="←"
-                label="Back to"
-                sublabel="Reading"
-                tone="primary"
-                size="md"
+            {/* Back to the book, or another question. Home lives in the Menu. */}
+            <div style={{ display: "flex", justifyContent: "center", gap: 12, flexWrap: "wrap" }}>
+              <button
+                type="button"
                 onClick={onStartReading}
-              />
-              {onCycleFontScale && (
-                <TileButton
-                  icon={`A${fontScale >= 1.5 ? "﹢﹢" : fontScale >= 1.25 ? "﹢" : ""}`}
-                  label="Font"
-                  sublabel={fontScale >= 1.5 ? "X-Large" : fontScale >= 1.25 ? "Large" : fontScale >= 1 ? "Medium" : "Small"}
-                  tone="secondary"
-                  size="md"
-                  onClick={onCycleFontScale}
-                  ariaLabel="Cycle chat font size"
-                />
-              )}
-              {onGoHome && (
-                <TileButton
-                  icon="🏠"
-                  label="Home"
-                  sublabel="Dashboard"
-                  tone="ghost"
-                  size="md"
-                  onClick={onGoHome}
-                />
+                data-testid="talk-back"
+                style={{
+                  minHeight: 58, padding: "0 26px", borderRadius: 999, border: "none",
+                  background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 60%, #d97706 100%)",
+                  color: NAVY, fontFamily: "DM Sans, sans-serif", fontSize: 18, fontWeight: 800,
+                  boxShadow: "0 6px 20px rgba(201,146,42,0.4)", cursor: "pointer", touchAction: "manipulation",
+                }}
+              >
+                ← Back to the Book
+              </button>
+              {list.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => setQIdx(i => i + 1)}
+                  data-testid="talk-another"
+                  style={{
+                    minHeight: 58, padding: "0 24px", borderRadius: 999,
+                    background: "rgba(255,255,255,0.07)", border: "1.5px solid rgba(201,146,42,0.55)",
+                    color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 18, fontWeight: 800,
+                    cursor: "pointer", touchAction: "manipulation",
+                  }}
+                >
+                  ↻ Another question
+                </button>
               )}
             </div>
           </>
@@ -3290,6 +3306,12 @@ function ShowAndTellView({
   const otherName = isNana ? (childName || getRoleLabel("child")) : (nanaName || getRoleLabel("nana"));
   const selfName  = isNana ? (nanaName  || getRoleLabel("nana"))  : (childName || getRoleLabel("child"));
   const totalPrompts = showAndTellPrompts.length;
+  // Master Plan §8: flip to the back camera to show a pet, a project or
+  // the room. Leaving Show & Tell puts the front camera back.
+  const { canFlipCamera, flipCamera, resetCamera, isCameraFlipped } = useVideoSession();
+  const resetCameraRef = useRef(resetCamera);
+  resetCameraRef.current = resetCamera;
+  useEffect(() => () => resetCameraRef.current(), []);
 
   return (
     <div style={{
@@ -3310,15 +3332,38 @@ function ShowAndTellView({
           Wrap Up junction when the bottom strip's content grew past
           its 30% allowance (Rick: "next prompt is empty and the
           layout does not fix properly"). */}
-      <div style={{ flex: "1 1 0", minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: 12, position: "relative", overflow: "hidden" }}>
-        <div style={{ width: "100%", maxWidth: 900, height: "100%", position: "relative" }}>
+      <div style={{ flex: "1 1 0", minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: 10, position: "relative", overflow: "hidden" }}>
+        <div style={{ width: "100%", height: "100%", position: "relative", borderRadius: 16, overflow: "hidden" }}>
           <FaceVideoStage
             bigPerson={isNana ? "child" : "nana"}
             pipPerson={isNana ? "nana" : "child"}
             bigName={otherName}
             pipName={selfName}
             bigObjectFit="contain"
+            pipWidth={140}
+            pipHeight={186}
           />
+          {canFlipCamera && (
+            <button
+              type="button"
+              data-testid="sat-flip-camera"
+              onClick={flipCamera}
+              style={{
+                position: "absolute", right: 14, bottom: 14, zIndex: 12,
+                minHeight: 56, padding: "0 20px", borderRadius: 999,
+                background: isCameraFlipped ? AMBER : "rgba(11,23,46,0.82)",
+                color: isCameraFlipped ? NAVY : CREAM,
+                border: `1.5px solid ${isCameraFlipped ? AMBER : "rgba(255,255,255,0.35)"}`,
+                fontFamily: "DM Sans, sans-serif", fontSize: 17, fontWeight: 800,
+                display: "inline-flex", alignItems: "center", gap: 8,
+                backdropFilter: "blur(6px)", cursor: "pointer", touchAction: "manipulation",
+                boxShadow: "0 6px 20px rgba(0,0,0,0.45)",
+              }}
+            >
+              <span aria-hidden style={{ fontSize: 20 }}>🔄</span>
+              {isCameraFlipped ? "Front camera" : "Flip camera"}
+            </button>
+          )}
           {/* Tiny floating mode badge on the video so users always know
               where they are without leaving the video full-bleed. */}
           <div style={{
@@ -3452,25 +3497,23 @@ function ShowAndTellView({
         <div style={{
           backgroundColor: "#0b172e",
           backgroundImage: "radial-gradient(560px 280px at 50% 130%, rgba(34,197,94,0.18), transparent 70%)",
-          padding: "16px 14px",
-          display: "flex", flexDirection: "column",
-          alignItems: "center", justifyContent: "center", gap: 8,
+          padding: "14px 18px 16px",
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 16,
           borderTop: "1px solid rgba(255,255,255,0.08)",
-          flex: 1, overflow: "hidden",
+          flexShrink: 0,
         }}>
-          <div style={{ fontSize: 36, animation: "sat-mascot-bob 2.2s ease-in-out infinite", filter: "drop-shadow(0 6px 14px rgba(34,197,94,0.35))" }}>🌟</div>
-          <div style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-            <div style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: "#22c55e", animation: "sat-pulse-dot 1.6s ease-in-out infinite", flexShrink: 0 }} />
-            <span style={{ color: "rgba(255,255,255,0.85)", fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700 }}>
-              Nana can see you!
+          <div style={{ fontSize: 40, animation: "sat-mascot-bob 2.2s ease-in-out infinite", filter: "drop-shadow(0 6px 14px rgba(34,197,94,0.35))" }}>🌟</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+              <div style={{ width: 10, height: 10, borderRadius: "50%", backgroundColor: "#22c55e", animation: "sat-pulse-dot 1.6s ease-in-out infinite", flexShrink: 0 }} />
+              <span style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 20, fontWeight: 800 }}>
+                {otherName} can see you!
+              </span>
+            </div>
+            <span style={{ color: "rgba(255,255,255,0.7)", fontFamily: "Merriweather, serif", fontSize: 16, fontStyle: "italic", lineHeight: 1.45 }}>
+              Show {otherName} something special{canFlipCamera ? ". Tap Flip camera to use the back camera." : " from your room."}
             </span>
           </div>
-          <span style={{ color: "rgba(255,255,255,0.55)", fontFamily: "Merriweather, serif", fontSize: 12, fontStyle: "italic", textAlign: "center", lineHeight: 1.5, maxWidth: 240 }}>
-            Show Nana something special from your room
-          </span>
-          <span style={{ color: "rgba(255,255,255,0.32)", fontFamily: "DM Sans, sans-serif", fontSize: 10, textAlign: "center", letterSpacing: "0.04em" }}>
-            She'll react with a prompt on her screen ✨
-          </span>
         </div>
       )}
     </div>
@@ -3495,31 +3538,25 @@ function BookSpread({
   isRecording = false,
   pointerHighlight = null,
   onPointer,
-  wordHighlight = null,
-  onWord,
+  wordSelection = null,
+  onSelectWord,
+  childName = "",
   readingTheme = "day",
   readingStartedAt,
   pageMode = "double",
   pageSide = "L",
-  chunkSize = 1,
-  // Word action bar wiring — Rick's Aug 8 feature.
-  onWordSay,
-  onWordSoundOut,
-  onWordDefine,
-  onWordSave,
-  wordDefinition,
-  wordSaveState,
-  onWordActionsClose,
-  // Rick's Aug 14 rewrite (#7-11): iOS native selection back +
-  // SelectionActionMenu with Pronunciation / Phonics / Save.
+  pagePlan = null,
+  onPageProfile,
   onSelectionPronounce,
   onSelectionPhonics,
   onSelectionSave,
-  onShareSelection,
-  remoteSelection = null,
   selectionPronunciationState = null,
   selectionPhonicsState = null,
   selectionSaveState = null,
+  isFullscreen = false,
+  onToggleFullscreen,
+  pointerMode = "finger",
+  pointerSuppressed = false,
 }: {
   displayPage: number;
   isNana: boolean;
@@ -3536,31 +3573,31 @@ function BookSpread({
   isRecording?: boolean;
   pointerHighlight?: { x: number; y: number; page: number; ts: number } | null;
   onPointer?: (x: number, y: number, page: number) => void;
-  wordHighlight?: WordHighlightState | null;
-  onWord?: (side: "L" | "R", index: number, page: number) => void;
+  /** The word highlighted on both iPads. */
+  wordSelection?: WordSelection | null;
+  /** Tap on a word (or null to clear). Publishes to the other iPad. */
+  onSelectWord?: (sel: { wid: string; word: string; sentence: string } | null) => void;
+  childName?: string;
   readingTheme?: ReadingTheme;
   readingStartedAt?: number;
   pageMode?: "single" | "double";
   pageSide?: "L" | "R";
-  chunkSize?: number;
-  onWordSay?: (word: string) => void;
-  onWordSoundOut?: (word: string) => void;
-  onWordDefine?: (word: string) => void;
-  onWordSave?: (word: string, sentence: string) => void;
-  wordDefinition?: { word: string; text: string } | null;
-  wordSaveState?: { word: string; status: "saving" | "saved" | "already" } | null;
-  onWordActionsClose?: () => void;
+  /** Shared page plan (see lib/reading/pagePlan). */
+  pagePlan?: PagePlan | null;
+  onPageProfile?: (p: PageProfile) => void;
   onSelectionPronounce?: (word: string) => void;
   onSelectionPhonics?: (word: string) => void;
   onSelectionSave?: (word: string, sentence: string) => void;
-  /** Perry-only: broadcast her selection so Nana's SelectionActionMenu
-   *  can appear anchored to the matching word on Nana's page. */
-  onShareSelection?: (word: string, sentence: string) => void;
-  /** Nana-only: the word Perry most recently highlighted. */
-  remoteSelection?: { word: string; sentence: string; ts: number } | null;
   selectionPronunciationState?: { word: string; status: "loading" | "done" | "err" } | null;
   selectionPhonicsState?: { word: string; status: "loading" | "done" | "err" } | null;
   selectionSaveState?: { word: string; status: "saving" | "saved" | "already" } | null;
+  /** Nana only: labeled full-screen toggle on the book's own top row. */
+  isFullscreen?: boolean;
+  onToggleFullscreen?: () => void;
+  /** Nana's reading pointer style; "off" keeps drags as plain swipes. */
+  pointerMode?: PointerMode;
+  /** A phonics card is open: the pointer steps aside. */
+  pointerSuppressed?: boolean;
 }) {
   // Clamp the requested page so we never deref past the end of the book.
   // Cached `displayPage` from a previous session (or pre-Phase-C splits)
@@ -3571,218 +3608,142 @@ function BookSpread({
   const touchStartY = useRef<number | null>(null);
   const bookAreaRef = useRef<HTMLDivElement>(null);
 
-  // Prime the Web Speech API on first user gesture. iOS Safari needs the
-  // first speak() call to come from a user gesture context, AND Safari
-  // can quietly suspend speechSynthesis after the page is backgrounded
-  // or when WebRTC audio takes over the audio session. Calling resume()
-  // on every tap is cheap and forgives both situations.
-  const speakWord = (word: string) => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    try {
-      const synth = window.speechSynthesis;
-      // Safari may have paused itself silently — re-arm before speaking.
-      if (synth.paused) synth.resume();
-      synth.cancel();
-      const cleaned = word.replace(/[^\p{L}\p{N}'-]/gu, "");
-      if (!cleaned) return;
-      const utter = () => {
-        const u = new SpeechSynthesisUtterance(cleaned);
-        u.rate = 0.85;
-        u.pitch = 1.0;
-        u.lang = "en-US";
-        // Pick an English voice if voices have loaded; otherwise the
-        // system default is used and that's fine.
-        const voices = synth.getVoices();
-        const en = voices.find(v => v.lang.startsWith("en"));
-        if (en) u.voice = en;
-        synth.speak(u);
-      };
-      // Voices load asynchronously on Safari. If they're not ready
-      // yet, wait one event-loop tick and try again — this prevents
-      // the very first tap of a session from being a silent no-op.
-      if (synth.getVoices().length === 0) {
-        const onVoices = () => {
-          synth.removeEventListener("voiceschanged", onVoices);
-          utter();
-        };
-        synth.addEventListener("voiceschanged", onVoices);
-        // Belt-and-suspenders: also try after a 150ms timeout in case
-        // the voiceschanged event never fires (some Safari builds).
-        window.setTimeout(() => {
-          synth.removeEventListener("voiceschanged", onVoices);
-          if (synth.speaking) return;
-          utter();
-        }, 150);
-      } else {
-        utter();
+  // Tap a word to highlight it on both iPads; tap it again, or tap off
+  // the text, to clear. iOS text selection is off on the book, so the
+  // system Copy / Look Up / Translate menu never appears. A press that
+  // moves more than TAP_SLOP is a swipe or scroll, never a tap (on iOS
+  // pointerup arrives before touchend, so the swipe flag alone is late).
+  const TAP_SLOP = 14;
+  // Reading pointer (Rick's spec): a touch that barely moves is a word
+  // tap; a slow drag becomes Nana's pointer; a quick flick (under 300ms,
+  // over 50px sideways) still turns the page.
+  const pointerDownRef = useRef<{ x: number; y: number; id: number; t: number; dragging: boolean } | null>(null);
+  const lastPtrSendRef = useRef(0);
+  const pointerOn = isNana && pointerMode !== "off";
+  const POINTER_LIFT = pointerMode === "ruler" ? 22 : 34; // draw above the fingertip
+
+  const findWordAt = (target: HTMLElement | null, x: number, y: number): HTMLElement | null => {
+    const area = bookAreaRef.current;
+    if (!area) return null;
+    const direct = target?.closest?.("[data-wid]") as HTMLElement | null;
+    if (direct && area.contains(direct)) return direct;
+    if (typeof document.elementsFromPoint === "function") {
+      for (const n of document.elementsFromPoint(x, y)) {
+        const el = n as HTMLElement;
+        if (el.closest?.("[data-nm-no-book-tap]")) return null;
+        const w = el.closest?.("[data-wid]") as HTMLElement | null;
+        if (w && area.contains(w)) return w;
       }
-    } catch {
-      // Speech synthesis unavailable on this device — silent.
     }
+    // Taps in the leading between lines: nearest word, vertical distance
+    // weighted double so the line under the finger wins.
+    const spans = area.querySelectorAll<HTMLElement>("[data-wid]");
+    let best: HTMLElement | null = null;
+    let bestD = Infinity;
+    for (let i = 0; i < spans.length; i++) {
+      const r = spans[i].getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) continue;
+      const d = Math.hypot(r.left + r.width / 2 - x, (r.top + r.height / 2 - y) * 2);
+      if (d < bestD && d < 60) { bestD = d; best = spans[i]; }
+    }
+    return best;
   };
 
-  // Bulletproof word highlight — Rick's Build 28 #3/#4 flagged both
-  // "wrong word grabbed" and "Perry can't highlight at all". Previous
-  // long-press-only version was fragile: iPad Mini's finger jitter
-  // tripped the movement threshold, tight vertical padding meant taps
-  // in line-leading missed spans, and the long-press timing left a
-  // window where nothing happened at all.
-  //
-  // This version:
-  //   1. ANY tap on a word span (or nearest word to the tap point) →
-  //      instant highlight. iOS text-selection callout is already
-  //      disabled via CSS on the book area, so there's no OS UI to
-  //      compete with — the "distinct from tap-to-select" concern
-  //      from Rick's original spec is moot.
-  //   2. If the tap lands in whitespace between words, we find the
-  //      geometrically nearest [data-w] span within a small radius
-  //      and highlight THAT. Kills the "grabs word below" bug for
-  //      taps that land in line-leading.
-  //   3. Long-press (300ms hold) STILL works as a redundant path —
-  //      if the pointerup somehow gets dropped, the long-press
-  //      timer independently fires the same highlight code.
-  //   4. Diagnostic console.log so if this STILL fails on Perry's
-  //      iPad, the screen recording will surface the "why".
-  const longPressTimerRef = useRef<number | null>(null);
-  const longPressFiredRef = useRef<boolean>(false);
-  const pointerDownXYRef = useRef<{ x: number; y: number } | null>(null);
-
-  const doWordHighlightAt = (target: HTMLElement | null, x: number, y: number, reason: string): boolean => {
-    // Direct hit: target already has data-w, or an ancestor does.
-    let wordEl = target?.closest?.("[data-w]") as HTMLElement | null;
-    // Fallback: use elementsFromPoint at the tap coord and pick the
-    // first one with a data-w attribute. Catches the case where the
-    // tap landed on a text node whose parent isn't a span (extremely
-    // rare) or on a decorative overlay that sits on top of the text.
-    if (!wordEl && typeof document.elementsFromPoint === "function") {
-      const stack = document.elementsFromPoint(x, y);
-      for (const el of stack) {
-        const w = (el as HTMLElement).closest?.("[data-w]") as HTMLElement | null;
-        if (w) { wordEl = w; break; }
-      }
+  const selectAt = (target: HTMLElement | null, x: number, y: number, allowToggleOff: boolean): boolean => {
+    if (!onSelectWord) return false;
+    const wid = findWordAt(target, x, y)?.dataset.wid;
+    if (!wid) return false;
+    if (wordSelection?.wid === wid) {
+      if (allowToggleOff) onSelectWord(null);
+      return true;
     }
-    // Geometric-nearest fallback: search the bookArea for every
-    // data-w span within a 40px radius and pick the one whose center
-    // is closest to (x, y). Kills "grabs word below/above" for taps
-    // in the line-leading gap between words. 40px covers the widest
-    // line-height on the largest font-scale.
-    if (!wordEl && bookAreaRef.current) {
-      const spans = bookAreaRef.current.querySelectorAll("[data-w]");
-      let best: HTMLElement | null = null;
-      let bestDist = Infinity;
-      for (let i = 0; i < spans.length; i++) {
-        const s = spans[i] as HTMLElement;
-        const r = s.getBoundingClientRect();
-        const cx = r.left + r.width / 2;
-        const cy = r.top + r.height / 2;
-        // Distance from tap point to span's center, biased so vertical
-        // gap counts double (a word directly above/below matters more
-        // than one to the side at the same distance).
-        const dx = cx - x;
-        const dy = (cy - y) * 2;
-        const d = Math.hypot(dx, dy);
-        if (d < bestDist && d < 80) {
-          bestDist = d;
-          best = s;
-        }
-      }
-      if (best) wordEl = best;
-    }
-
-    if (!wordEl || !onWord) {
-      if (import.meta.env.DEV || typeof window !== "undefined") {
-        // eslint-disable-next-line no-console
-        console.log("[nm-hl] miss", { reason, x: Math.round(x), y: Math.round(y), hasOnWord: !!onWord, isNana });
-      }
-      return false;
-    }
-    const wordRef = wordEl.dataset.w;
-    const wordText = wordEl.textContent ?? "";
-    if (!wordRef) return false;
-    const dash = wordRef.indexOf("-");
-    if (dash <= 0) return false;
-    const side = wordRef.slice(0, dash) as "L" | "R";
-    const idx = Number(wordRef.slice(dash + 1));
-    if ((side !== "L" && side !== "R") || !Number.isFinite(idx)) return false;
-
-    // eslint-disable-next-line no-console
-    console.log("[nm-hl] fire", { reason, side, idx, page: displayPage, isNana, word: wordText.trim().slice(0, 20) });
-    onWord(side, idx, displayPage);
-    if (!isNana && wordText.trim()) speakWord(wordText.trim());
-    if (typeof navigator !== "undefined" && "vibrate" in navigator) {
-      try { (navigator as Navigator).vibrate?.(12); } catch {}
-    }
+    const resolved = resolveWid(bookPages, wid);
+    if (!resolved) return false;
+    onSelectWord({ wid, word: resolved.word, sentence: resolved.sentence });
     return true;
   };
 
-  const cancelLongPress = () => {
-    if (longPressTimerRef.current !== null) {
-      window.clearTimeout(longPressTimerRef.current);
-      longPressTimerRef.current = null;
+  /** Pointer message for the point `lift` px above the fingertip. */
+  const pointerMsgAt = (clientX: number, clientY: number, phase: "move" | "up"): PointerMsg | null => {
+    const area = bookAreaRef.current;
+    if (!area) return null;
+    const a = area.getBoundingClientRect();
+    const px = clientX;
+    const py = clientY - POINTER_LIFT;
+    const w = findWordAt(null, px, py);
+    const msg: PointerMsg = {
+      t: "ptr", ts: Date.now(), phase,
+      style: pointerMode === "ruler" ? "ruler" : "finger",
+      x: Math.max(0, Math.min(1, (px - a.left) / a.width)),
+      y: Math.max(0, Math.min(1, (py - a.top) / a.height)),
+      page: displayPage,
+    };
+    if (w?.dataset.wid) {
+      const r = w.getBoundingClientRect();
+      msg.wid = w.dataset.wid;
+      msg.ox = r.width > 0 ? Math.max(0, Math.min(1, (px - r.left) / r.width)) : 0.5;
+      msg.oy = r.height > 0 ? Math.max(0, Math.min(1, (py - r.top) / r.height)) : 0.5;
     }
+    return msg;
+  };
+  const sendPointer = (m: PointerMsg, force = false) => {
+    localPointer.emit(m);
+    const now = Date.now();
+    if (!force && now - lastPtrSendRef.current < 45) return; // ~22 per second
+    lastPtrSendRef.current = now;
+    pointerBus.send(m);
+  };
+  const endPointer = (clientX: number, clientY: number) => {
+    const m = pointerMsgAt(clientX, clientY, "up");
+    if (m) sendPointer(m, true);
   };
 
-  const handlePointerDownForLongPress = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (justSwipedRef.current) return;
-    longPressFiredRef.current = false;
-    pointerDownXYRef.current = { x: e.clientX, y: e.clientY };
-    // Capture the DOM target + coord NOW — the React SyntheticEvent
-    // is recycled before the timer fires.
+  const handleBookPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!e.isPrimary) return;
+    primeAudio();
     const target = e.target as HTMLElement | null;
-    const dx = e.clientX;
-    const dy = e.clientY;
-    cancelLongPress();
-    // 300ms redundant-path timer. Backup only — the primary trigger
-    // is the immediate handleBookTap on pointerup. This fires only if
-    // pointerup doesn't reach us within 300ms (rare, mostly a safety
-    // net for touch events that get consumed by an intermediary).
-    longPressTimerRef.current = window.setTimeout(() => {
-      longPressTimerRef.current = null;
-      if (justSwipedRef.current) return;
-      if (doWordHighlightAt(target, dx, dy, "longpress")) {
-        longPressFiredRef.current = true;
-      }
-    }, 300);
+    if (target?.closest?.("[data-nm-no-book-tap]")) { pointerDownRef.current = null; return; }
+    pointerDownRef.current = { x: e.clientX, y: e.clientY, id: e.pointerId, t: Date.now(), dragging: false };
   };
 
-  const handlePointerMoveForLongPress = (e: React.PointerEvent<HTMLDivElement>) => {
-    const start = pointerDownXYRef.current;
-    if (!start) return;
-    // Very generous 24px threshold — only real scrolling/swiping
-    // cancels the pending highlight. Static hold with normal finger
-    // jitter (even on iPad Mini) doesn't trip.
-    if (Math.abs(e.clientX - start.x) > 24 || Math.abs(e.clientY - start.y) > 24) {
-      cancelLongPress();
-      pointerDownXYRef.current = null;
+  const handleBookPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = pointerDownRef.current;
+    if (!d || e.pointerId !== d.id) return;
+    if (!d.dragging && (Math.abs(e.clientX - d.x) > TAP_SLOP || Math.abs(e.clientY - d.y) > TAP_SLOP)) {
+      if (!pointerOn || pointerSuppressed) { pointerDownRef.current = null; return; }
+      d.dragging = true;
+    }
+    if (d.dragging) {
+      const m = pointerMsgAt(e.clientX, e.clientY, "move");
+      if (m) sendPointer(m);
     }
   };
 
-  const handleBookTap = (e: React.PointerEvent<HTMLDivElement> | React.MouseEvent<HTMLDivElement>) => {
-    // If the redundant long-press timer already fired the highlight,
-    // this pointerup is just the tail — no-op.
-    if (longPressFiredRef.current) {
-      longPressFiredRef.current = false;
-      pointerDownXYRef.current = null;
-      cancelLongPress();
+  const handleBookPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = pointerDownRef.current;
+    pointerDownRef.current = null;
+    if (!d || e.pointerId !== d.id) return;
+    if (d.dragging) {
+      endPointer(e.clientX, e.clientY);
+      // A quick sideways flick still turns the page.
+      const dx = e.clientX - d.x;
+      const dy = e.clientY - d.y;
+      if (Date.now() - d.t < 300 && Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) {
+        justSwipedRef.current = true;
+        window.setTimeout(() => { justSwipedRef.current = false; }, 350);
+        if (dx < 0) onSwipeNext?.(); else onSwipePrev?.();
+      }
       return;
     }
-    cancelLongPress();
-    pointerDownXYRef.current = null;
-
-    // A swipe just turned the page — don't also count the gesture's
-    // tail-end as a tap on whatever word is now under the finger.
+    if (Math.abs(e.clientX - d.x) > TAP_SLOP || Math.abs(e.clientY - d.y) > TAP_SLOP) return;
     if (justSwipedRef.current) return;
-
     const target = e.target as HTMLElement | null;
-    // PRIMARY path — any tap on / near a word highlights.
-    if (doWordHighlightAt(target, e.clientX, e.clientY, "tap")) return;
-
-    // No pointer-highlight circle on text taps — Rick's Build 28 #5.
-    const isInsideText = !!target?.closest?.(".book-body, .nm-book-body, .nm-book-dropcap");
-    if (isInsideText) return;
-
-    // Illustration / margin tap — soft look-here circle.
-    if (!onPointer) return;
+    if (selectAt(target, e.clientX, e.clientY, true)) return;
+    if (wordSelection && onSelectWord) onSelectWord(null);
+    // Nana tapping an illustration or margin drops a "look here" ring on
+    // both iPads.
+    if (!isNana || !onPointer) return;
+    if (target?.closest?.(".book-body, .nm-book-body, .nm-book-dropcap")) return;
     const el = bookAreaRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
@@ -3791,6 +3752,13 @@ function BookSpread({
     if (nx < 0 || nx > 1 || ny < 0 || ny > 1) return;
     onPointer(nx, ny, displayPage);
   };
+
+  const handleBookPointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = pointerDownRef.current;
+    pointerDownRef.current = null;
+    if (d?.dragging) endPointer(e.clientX, e.clientY);
+  };
+
   // The conversation prompt used to live as a 218px bookmark panel
   // floating in the book corner (with a minimize-to-badge toggle and a
   // left/right toggle). Rick: "doesn't need to display text on screen
@@ -3801,9 +3769,11 @@ function BookSpread({
   // promptState/promptMinimized state, the side-toggle button, and the
   // minimize handling all gone with that change.
 
+  const touchStartTRef = useRef(0);
   const handleTouchStart = (e: React.TouchEvent) => {
     touchStartX.current = e.touches[0].clientX;
     touchStartY.current = e.touches[0].clientY;
+    touchStartTRef.current = Date.now();
   };
 
   // When the user swipes to turn the page we DON'T want the tap handler
@@ -3819,6 +3789,10 @@ function BookSpread({
     touchStartX.current = null;
     touchStartY.current = null;
     if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy)) return;
+    // With Nana's pointer on, a slow drag is the pointer (the pointer
+    // handlers turn the page for a quick flick). While the phonics card
+    // has the pointer stepped aside, a swipe turns the page as before.
+    if (pointerOn && !pointerSuppressed) return;
     justSwipedRef.current = true;
     // Clear the flag a tick later — long enough to suppress the
     // synthetic pointerUp that follows but short enough that the next
@@ -3830,31 +3804,6 @@ function BookSpread({
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-      {/* Top chrome bar — sticky chapter heading (left) + progress pill
-          (right). Slim padding so the book gets more vertical space.
-          Rick: "maximize the book display area." */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "2px 8px",
-          gap: 8,
-          flexShrink: 0,
-          backgroundColor: "rgba(0,0,0,0.18)",
-          borderBottom: "1px solid rgba(255,255,255,0.05)",
-          minHeight: 0,
-        }}
-      >
-        <StickyChapter chapterText={p?.leftChapter ?? null} bookTitle={bookTitle} theme={readingTheme} />
-        <ProgressPill
-          currentPage={displayPage}
-          totalPages={bookPages.length}
-          sessionStart={readingStartedAt ?? Date.now()}
-          theme={readingTheme}
-        />
-      </div>
-
       {/* Book — fills all available space.
           We listen on `onPointerUp` instead of `onClick` for the word
           tap. iOS Safari's `click` synthesis adds a 300ms delay AND can
@@ -3865,57 +3814,49 @@ function BookSpread({
           for direction detection. */}
       <div
         ref={bookAreaRef}
+        className="nm-book-area"
         style={{
           flex: 1, position: "relative", overflow: "hidden",
           cursor: "default",
-          // Rick's Aug 14 reversal (#9): restore standard iOS text
-          // selection on book text. Native Copy / Look Up / Translate
-          // returns; our custom Pronunciation / Phonics / Save actions
-          // ride alongside via SelectionActionMenu (rendered in
-          // BookSpread below). No more user-select: none, no more
-          // long-press-to-yellow-highlight.
-          WebkitUserSelect: "text",
-          userSelect: "text",
-          WebkitTouchCallout: "default",
+          // Rick's Build 33 A-1: no iOS selection on book text, so the
+          // system Copy / Look Up / Translate menu never appears on
+          // either iPad. Words are picked by tap (handlers above).
+          WebkitUserSelect: "none",
+          userSelect: "none",
+          WebkitTouchCallout: "none",
+          // Nana's drag is the reading pointer; the browser mustn't pan.
+          touchAction: pointerOn ? "none" : undefined,
         }}
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
+        onPointerDown={handleBookPointerDown}
+        onPointerMove={handleBookPointerMove}
+        onPointerUp={handleBookPointerUp}
+        onPointerCancel={handleBookPointerCancel}
       >
-        {/* Native-selection floating menu — Rick's Aug 14 rewrite.
-            Renders when the user selects a word via standard iOS text
-            selection. Positioned inside bookAreaRef so its coords are
-            relative to the book area. */}
-        {onSelectionPronounce && onSelectionPhonics && onSelectionSave && (
-          <SelectionActionMenu
+        {isNana && wordSelection && onSelectWord && onSelectionPronounce && onSelectionPhonics && onSelectionSave && (
+          <WordActionMenu
             bookAreaRef={bookAreaRef}
-            isPerry={!isNana}
+            selection={wordSelection}
+            childName={childName}
+            layoutKey={`${displayPage}|${pageSide}|${pageMode}|${fontScale}|${pagePlan?.key ?? ""}`}
             onPronounce={onSelectionPronounce}
             onPhonics={onSelectionPhonics}
             onSave={onSelectionSave}
-            onShareSelection={onShareSelection}
-            remoteSelection={remoteSelection ?? null}
+            onClose={() => onSelectWord(null)}
             pronunciationState={selectionPronunciationState ?? null}
             phonicsState={selectionPhonicsState ?? null}
             saveState={selectionSaveState ?? null}
           />
         )}
 
-        {/* Legacy word action bar — kept but no longer wired (long-press
-            gesture removed). Left for one-more-cycle safety, will be
-            deleted next round. */}
-        {onWordSay && onWordSoundOut && onWordDefine && onWordSave && onWordActionsClose && (
-          <WordActionBar
-            wordHighlight={wordHighlight && wordHighlight.page === displayPage ? wordHighlight : null}
-            bookAreaRef={bookAreaRef}
-            onSay={onWordSay}
-            onSoundOut={onWordSoundOut}
-            onDefine={onWordDefine}
-            onSave={onWordSave}
-            onClose={onWordActionsClose}
-            currentDefinition={wordDefinition ?? null}
-            saveState={wordSaveState ?? null}
-          />
-        )}
+        {/* Reading pointer: Nana sees her own; the child sees it smoothed. */}
+        <ReadingPointerLayer
+          areaRef={bookAreaRef}
+          source={isNana ? "local" : "remote"}
+          suppressed={!!wordSelection || pointerSuppressed}
+          page={displayPage}
+        />
 
         {/* Pointer highlight ring — visible on both devices when Nana taps the book */}
         {pointerHighlight && pointerHighlight.page === displayPage && (
@@ -4002,8 +3943,10 @@ function BookSpread({
                     alt={imagePage.leftChapter || bookTitle || `Page ${idxPage}`}
                     draggable={false}
                     style={{
-                      maxWidth: "100%",
-                      maxHeight: "100%",
+                      // Fill the whole page box (scaling small art up),
+                      // never crop (Master Plan §6).
+                      width: "100%",
+                      height: "100%",
                       objectFit: "contain",
                       display: "block",
                       userSelect: "none",
@@ -4021,11 +3964,13 @@ function BookSpread({
                 bookPages={bookPages}
                 bookTitle={bookTitle}
                 fontScale={fontScale}
-                wordHighlight={wordHighlight}
+                highlightWid={wordSelection?.wid || null}
                 theme={readingTheme}
                 pageMode={pageMode}
                 pageSide={pageSide}
-                chunkSize={chunkSize}
+                plan={pagePlan}
+                profileRole={isNana ? "nana" : "perry"}
+                onProfile={onPageProfile}
               />
             );
           })()}
@@ -4041,9 +3986,9 @@ function BookSpread({
                 left: back ? "0" : "50%",
                 width: "50%", height: "100%",
                 transformOrigin: back ? "right center" : "left center",
-                backgroundColor: PARCHMENT,
-                borderTop: `3px solid ${LEATHER}`,
-                borderBottom: `3px solid ${LEATHER}`,
+                backgroundColor: READING_THEMES[readingTheme].page,
+                borderTop: `3px solid ${READING_THEMES[readingTheme].spine}`,
+                borderBottom: `3px solid ${READING_THEMES[readingTheme].spine}`,
                 ...(back
                   ? { borderLeft: `3px solid ${LEATHER}` }
                   : { borderRight: `3px solid ${LEATHER}` }),
@@ -4068,30 +4013,6 @@ function BookSpread({
             book never has anything floating on top of the text. */}
       </div>
 
-      {/* Bottom strip — cue only on Nana's view, progress bar on both.
-          Kept deliberately minimal so the book stays central (Rick's
-          NOOK feedback: "no clutter, the book remains central"). */}
-      <div style={{
-        backgroundColor: "#0b172e",
-        padding: "4px 12px 5px",
-        display: "flex", flexDirection: "column", gap: 2,
-        borderTop: "1px solid rgba(255,255,255,0.06)",
-        flexShrink: 0,
-      }}>
-        {isNana && (
-          <span style={{ color: AMBER, fontFamily: "Merriweather, serif", fontWeight: 600, fontSize: 12, textAlign: "center", lineHeight: 1.4, fontStyle: "italic", opacity: 0.9, letterSpacing: "0.01em" }}>
-            {p.cue}
-          </span>
-        )}
-        <div style={{ height: 2, backgroundColor: "rgba(201,146,42,0.16)", borderRadius: 2, marginTop: isNana ? 2 : 0 }}>
-          <div style={{
-            height: "100%", width: `${(displayPage / bookPages.length) * 100}%`,
-            backgroundColor: AMBER, borderRadius: 2,
-            transition: "width 0.4s ease",
-            boxShadow: "0 0 6px rgba(201,146,42,0.45)",
-          }} />
-        </div>
-      </div>
     </div>
   );
 }
@@ -4107,6 +4028,7 @@ function LibraryView({
   readOnly = false,
   onScroll,
   scrollTop,
+  onFindMoreBooks,
 }: {
   selectedBookId: string;
   onSelectBook: (id: string) => void;
@@ -4131,6 +4053,8 @@ function LibraryView({
   /** Perry-side: incoming scrollTop from Nana — applied imperatively to
    *  the bookshelf scroll container so her view tracks Nana's scrolling. */
   scrollTop?: number;
+  /** Nana: open Request a Book searching free classics (Build 33). */
+  onFindMoreBooks?: (query: string) => void;
 }) {
   // Ref to the bookshelf scroll container. EITHER side publishes its
   // scrollTop, and EITHER side applies the other's incoming scrollTop —
@@ -4423,7 +4347,9 @@ function LibraryView({
               style={{
                 display: "flex", alignItems: "center", gap: 16,
                 background: "linear-gradient(135deg, rgba(247,201,93,0.20) 0%, rgba(201,146,42,0.12) 100%)",
-                border: `2px solid ${AMBER}`,
+                borderTop: `2px solid ${AMBER}`,
+                borderRight: `2px solid ${AMBER}`,
+                borderBottom: `2px solid ${AMBER}`,
                 borderLeft: `10px solid ${b.spineColor}`,
                 borderRadius: 16,
                 padding: "18px 20px 18px 16px",
@@ -4527,6 +4453,19 @@ function LibraryView({
                 cursor: "pointer",
               }}
             >Clear filters</button>
+            {onFindMoreBooks && !readOnly && (
+              <button
+                onClick={() => onFindMoreBooks(searchQuery.trim())}
+                style={{
+                  display: "block", width: "100%", marginTop: 10,
+                  background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+                  border: "none", borderRadius: 999,
+                  padding: "12px 16px", minHeight: 48,
+                  color: NAVY, fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 800,
+                  cursor: "pointer", touchAction: "manipulation",
+                }}
+              >🔎 Search free classics{searchQuery.trim() ? ` for "${searchQuery.trim()}"` : ""}</button>
+            )}
           </div>
         )}
         {filteredBooks.map(book => {
@@ -4565,7 +4504,9 @@ function LibraryView({
               style={{
                 display: "flex", alignItems: "center", gap: "14px",
                 backgroundColor: sel ? "rgba(201,146,42,0.10)" : "rgba(255,255,255,0.035)",
-                border: `1px solid ${sel ? AMBER : "rgba(255,255,255,0.10)"}`,
+                borderTop: `1px solid ${sel ? AMBER : "rgba(255,255,255,0.10)"}`,
+                borderRight: `1px solid ${sel ? AMBER : "rgba(255,255,255,0.10)"}`,
+                borderBottom: `1px solid ${sel ? AMBER : "rgba(255,255,255,0.10)"}`,
                 borderLeft: `6px solid ${book.spineColor}`,
                 borderRadius: "10px",
                 padding: "16px 18px 16px 14px",
@@ -4643,7 +4584,12 @@ function LibraryView({
                     </span>
                   )}
                 </div>
-                <div style={{ color: "rgba(247,240,227,0.8)", fontFamily: "Merriweather, serif", fontSize: "13px", fontStyle: "italic", lineHeight: 1.55, marginBottom: "6px" }}>
+                {/* Rick's Build 33 B-2: short blurbs stay one line, long
+                    ones grow to at most three lines. */}
+                <div style={{
+                  color: "rgba(247,240,227,0.8)", fontFamily: "Merriweather, serif", fontSize: "13px", fontStyle: "italic", lineHeight: 1.55, marginBottom: "6px",
+                  display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden",
+                }}>
                   {book.tagline}
                 </div>
                 {/* Per-card progress strip — shown for books with saved
@@ -4731,27 +4677,31 @@ function LibraryView({
           );
         })}
 
-        {/* Add a book — coming soon. Hidden on Perry's read-only mirror;
-            she can't add a book and the placeholder would just be noise. */}
-        {!readOnly && (
-          <button style={{
-            display: "flex", alignItems: "center", gap: "10px",
-            backgroundColor: "transparent",
-            border: "1px dashed rgba(255,255,255,0.13)",
-            borderRadius: "8px",
-            padding: "9px 11px",
-            cursor: "default",
-            width: "100%",
-            opacity: 0.45,
-            flexShrink: 0,
-          }}>
-            <span style={{ fontSize: "18px", flexShrink: 0 }}>📎</span>
-            <div>
-              <div style={{ color: "rgba(247,240,227,0.6)", fontFamily: "DM Sans, sans-serif", fontSize: "11px", fontWeight: 700, textAlign: "left" }}>
-                Add a Book
+        {/* Rick's Build 33: find a book that isn't on the shelf yet —
+            opens Request a Book searching free classics. */}
+        {!readOnly && onFindMoreBooks && (
+          <button
+            onClick={() => onFindMoreBooks("")}
+            style={{
+              display: "flex", alignItems: "center", gap: 12,
+              backgroundColor: "rgba(201,146,42,0.10)",
+              border: "1px dashed rgba(201,146,42,0.55)",
+              borderRadius: 12,
+              padding: "12px 14px",
+              cursor: "pointer",
+              width: "100%",
+              flexShrink: 0,
+              minHeight: 56,
+              touchAction: "manipulation",
+            }}
+          >
+            <span aria-hidden style={{ fontSize: 22, flexShrink: 0 }}>🔎</span>
+            <div style={{ textAlign: "left" }}>
+              <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 800 }}>
+                Can't find a book? Search free classics
               </div>
-              <div style={{ color: "rgba(247,240,227,0.35)", fontFamily: "DM Sans, sans-serif", fontSize: "8px", marginTop: "2px", textAlign: "left" }}>
-                Standard eBooks · Project Gutenberg · PDF / ePub upload · Coming soon
+              <div style={{ color: "rgba(247,240,227,0.6)", fontFamily: "DM Sans, sans-serif", fontSize: 12, marginTop: 2 }}>
+                Standard Ebooks · Project Gutenberg
               </div>
             </div>
           </button>
@@ -4947,7 +4897,12 @@ function OnboardingView({
   const [codeEntry, setCodeEntry] = useState("");
   const [childName, setChildName] = useState("");
   const [pinEntry, setPinEntry] = useState("");
-  const [birthdayOptOut, setBirthdayOptOut] = useState(false);
+  // Sibling tile the child tapped on the PIN screen (visual only; the
+  // PIN itself decides who logs in).
+  const [pickedReaderId, setPickedReaderId] = useState<string | null>(null);
+  const pinInputRef = useRef<HTMLInputElement | null>(null);
+  // Build 38: no birthday or age is asked for any more.
+  const [birthdayOptOut, setBirthdayOptOut] = useState(true);
   const [childBirthMonth, setChildBirthMonth] = useState("");
   const [childBirthDay, setChildBirthDay] = useState("");
   const [childBirthYear, setChildBirthYear] = useState("");
@@ -5710,13 +5665,13 @@ function OnboardingView({
             <span>Back to home</span>
           </button>
         )}
-        <div style={{ width: "100%", maxWidth: "280px" }}>
-          <div style={{ textAlign: "center", marginBottom: "16px" }}>
-            <div style={{ fontSize: "36px", marginBottom: "8px" }}>🔐</div>
-            <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "15px", fontWeight: 700 }}>
+        <div style={{ width: "100%", maxWidth: "420px" }}>
+          <div style={{ textAlign: "center", marginBottom: "18px" }}>
+            {pinScreenChildren.length <= 1 && <div style={{ fontSize: "40px", marginBottom: "8px" }}>🔐</div>}
+            <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: "28px", fontWeight: 700 }}>
               Reading with {nanaDisplayName}
             </div>
-            <div style={{ color: "rgba(247,240,227,0.65)", fontFamily: "DM Sans, sans-serif", fontSize: "11px", marginTop: "6px", lineHeight: 1.5 }}>
+            <div style={{ color: "rgba(247,240,227,0.72)", fontFamily: "DM Sans, sans-serif", fontSize: "16px", marginTop: "8px", lineHeight: 1.5 }}>
               {pinScreenExpectedChild
                 ? <>It's <strong>{pinScreenExpectedChild.name}</strong>'s turn — enter your 4-digit PIN to take over.</>
                 : pinScreenChildren.length > 1
@@ -5729,59 +5684,81 @@ function OnboardingView({
               multiple kids. Pure UI hint; PIN matching still happens
               server-side across all children. Tapping an avatar focuses
               the PIN input. Only renders for multi-child connections. */}
-          {pinScreenChildren.length > 1 && (
+          {pinScreenChildren.length >= 1 && (
             <div
               role="group"
               aria-label="Brothers and sisters on this iPad"
               style={{
-                display: "flex", gap: 8, justifyContent: "center",
-                flexWrap: "wrap", marginBottom: 12,
+                display: "flex", gap: 18, justifyContent: "center",
+                flexWrap: "wrap", marginBottom: 18,
                 padding: "0 4px",
               }}
             >
               {pinScreenChildren.map((c) => {
                 const pal = paletteForChild(c.id);
                 const initial = c.name.trim().charAt(0).toUpperCase() || "?";
+                const picked = (pickedReaderId ?? pinScreenExpectedChild?.id ?? null) === c.id;
                 return (
-                  <div
+                  <button
+                    type="button"
                     key={c.id}
+                    aria-pressed={picked}
+                    aria-label={`I am ${c.name || "this reader"}`}
+                    onClick={() => {
+                      setPickedReaderId(c.id);
+                      setPinEntry("");
+                      pinInputRef.current?.focus();
+                    }}
                     style={{
                       display: "inline-flex", flexDirection: "column",
-                      alignItems: "center", gap: 4,
-                      width: 56,
+                      alignItems: "center", gap: 6,
+                      width: 104, padding: "4px 0",
+                      background: "transparent", border: "none",
+                      cursor: "pointer", touchAction: "manipulation",
+                      opacity: pickedReaderId && !picked ? 0.55 : 1,
                     }}
                   >
+                    {c.photoUrl ? (
+                      <img src={c.photoUrl} alt="" draggable={false} style={{
+                        width: 88, height: 88, borderRadius: "50%", objectFit: "cover",
+                        border: picked ? `4px solid ${AMBER}` : `2px solid ${pal.border}`,
+                        boxShadow: picked ? "0 0 0 4px rgba(201,146,42,0.30)" : "0 6px 18px rgba(0,0,0,0.35)",
+                      }} />
+                    ) : (
                     <span
                       aria-hidden
                       style={{
-                        width: 44, height: 44, borderRadius: "50%",
+                        width: 88, height: 88, borderRadius: "50%",
                         backgroundColor: pal.bg,
-                        border: `2px solid ${pal.border}`,
+                        border: picked ? `4px solid ${AMBER}` : `2px solid ${pal.border}`,
+                        boxShadow: picked ? "0 0 0 4px rgba(201,146,42,0.30)" : "none",
                         color: pal.text,
                         display: "inline-flex", alignItems: "center", justifyContent: "center",
                         fontFamily: "DM Sans, sans-serif",
-                        fontSize: 18, fontWeight: 800,
+                        fontSize: 34, fontWeight: 800,
                       }}
                     >{initial}</span>
+                    )}
                     <span style={{
-                      color: "rgba(247,240,227,0.78)",
+                      color: "rgba(247,240,227,0.9)",
                       fontFamily: "DM Sans, sans-serif",
-                      fontSize: 11, fontWeight: 700,
-                      letterSpacing: "0.02em",
+                      fontSize: 17, fontWeight: 800,
+                      letterSpacing: "0.01em",
                       textAlign: "center",
                       lineHeight: 1.2,
-                      maxWidth: 56,
+                      maxWidth: 100,
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
                     }}>{c.name || "Unnamed"}</span>
-                  </div>
+                  </button>
                 );
               })}
             </div>
           )}
           <div style={card}>
             <input
+              ref={pinInputRef}
               value={pinEntry}
               onChange={e => setPinEntry((e.target as HTMLInputElement).value.replace(/\D/g, "").slice(0, 4))}
               placeholder="••••"
@@ -5797,7 +5774,7 @@ function OnboardingView({
               }}
             />
             {perryPinError && (
-              <div style={{ color: "#ef4444", fontFamily: "DM Sans, sans-serif", fontSize: "11px", textAlign: "center" }}>
+              <div role="alert" style={{ color: "#fca5a5", fontFamily: "DM Sans, sans-serif", fontSize: "15px", textAlign: "center" }}>
                 {perryPinError}
               </div>
             )}
@@ -6012,13 +5989,14 @@ function OnboardingView({
       {renderStepNav(2, 2)}
       <div style={{ textAlign: "center", marginBottom: "14px" }}>
         <div style={{ fontSize: "26px", marginBottom: "4px" }}>📚</div>
-        <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "13px", fontWeight: 700 }}>Tell us about your reader</div>
+        <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: "22px", fontWeight: 700 }}>Tell us about your reader</div>
       </div>
       <div style={card}>
         <div>
-          <div style={{ color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: "8px", marginBottom: "5px" }}>CHILD'S NAME</div>
+          <div style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: "13px", fontWeight: 700, marginBottom: "6px" }}>Child's name</div>
           <input value={childName} onChange={e => setChildName((e.target as HTMLInputElement).value)} placeholder="e.g. Perry" style={inputStyle} autoFocus />
         </div>
+        {!birthdayOptOut && (
         <div>
           <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer", marginBottom: "6px" }}>
             <input
@@ -6091,8 +6069,9 @@ function OnboardingView({
             </>
           )}
         </div>
+        )}
         <div>
-          <div style={{ color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: "8px", marginBottom: "5px" }}>4-DIGIT PIN (for your child to log in)</div>
+          <div style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: "13px", fontWeight: 700, marginBottom: "6px" }}>4-digit PIN (your child signs in with it)</div>
           <input
             ref={childPin_ref}
             value={childPin}
@@ -6135,10 +6114,10 @@ function OnboardingView({
           <div style={{
             color: "rgba(247,240,227,0.75)",
             fontFamily: "DM Sans, sans-serif",
-            fontSize: 10, lineHeight: 1.5,
+            fontSize: 13, lineHeight: 1.5,
           }}>
             I am the parent or legal guardian of <strong style={{ color: CREAM }}>{childName.trim() || "this child"}</strong>{" "}
-            and I consent to NeverMiss collecting their first name, optional date of birth, and 4-digit PIN to enable family reading sessions, as described in our{" "}
+            and I consent to NeverMiss collecting their first name, an optional photo, and a 4-digit PIN to enable family reading sessions, as described in our{" "}
             <a
               href="https://nevermiss.family/data/NeverMiss_Privacy_Policy_v3.pdf"
               target="_blank"
@@ -6165,19 +6144,27 @@ function OnboardingView({
     </div>
   );
 
+  // The child's waiting room after setup or a PIN login. Nana starts
+  // the visit from her iPad, so there is nothing to tap here (the old
+  // "Begin first session" button ran Nana's start routine on the
+  // child's iPad and did nothing visible).
+  void onBeginSession;
+  const nanaLabel = nanaDisplayName || getRoleLabel("nana");
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#0b172e", padding: "20px 16px", alignItems: "center", justifyContent: "center" }}>
-      <div style={{ textAlign: "center", animation: "fade-in 0.5s ease-out" }}>
-        <div style={{ fontSize: "44px", marginBottom: "12px" }}>🎉</div>
-        <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "15px", fontWeight: 700, marginBottom: "6px" }}>
-          You're connected with {nanaDisplayName}!
+    <div data-testid="child-waiting" style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#0b172e", padding: "20px 16px", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ textAlign: "center", animation: "fade-in 0.5s ease-out", maxWidth: 460 }}>
+        <div style={{ fontSize: "56px", marginBottom: "12px" }}>🎉</div>
+        <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: "30px", fontWeight: 700, marginBottom: "10px", lineHeight: 1.2 }}>
+          You're connected with {nanaLabel}!
         </div>
-        <div style={{ color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: "9px", lineHeight: 1.6, marginBottom: "20px" }}>
-          All set! Your reading adventure begins now.
+        <div style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: "18px", lineHeight: 1.5 }}>
+          Waiting for {nanaLabel} to start reading…
         </div>
-        <button onClick={onBeginSession} style={{ ...primaryBtn, width: "auto", padding: "11px 24px" }}>
-          Begin first session →
-        </button>
+        <div style={{ marginTop: "20px", display: "flex", gap: "8px", justifyContent: "center" }}>
+          {[0, 1, 2].map(i => (
+            <div key={i} style={{ width: "11px", height: "11px", borderRadius: "50%", backgroundColor: AMBER, animation: `dot-bounce 1.4s ease-in-out ${i * 0.16}s infinite` }} />
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -6497,811 +6484,6 @@ function SayHelloView({
   );
 }
 
-function NanaHomeView({
-  nanaName,
-  childName,
-  scheduleProposal,
-  onStartReading,
-  onOpenLibrary,
-  onOpenVault,
-  onOpenSchedule,
-  onOpenBookRequests,
-  onOpenSettings,
-  onSwitchDevice,
-  onSignOut,
-  publicMode = false,
-  onSignIn,
-  onJoinAsChild,
-  perryConnected = false,
-  // Family Journal — Rick: "doesn't feel prominent to me right now —
-  // worth revisiting." Adding a sidebar nav item, a home quick-tile,
-  // and a hero "Latest Memory" surface so the journal stops being a
-  // hidden corner of the reading-mode toolbar.
-  onOpenFamilyStories,
-  familyStoryEntries = [],
-  // Multi-child support — list of siblings on this connection plus the
-  // current active one. Empty list = single-child legacy path; the
-  // picker hides itself. Rick: "real workflow gap — Nana reads with
-  // Perry, finishes, now wants to read with Cooper."
-  childrenList = [],
-  activeChildId = null,
-  onSelectChild,
-  onOpenAddChild,
-}: {
-  nanaName: string;
-  childName: string;
-  scheduleProposal: ScheduleProposal | null;
-  onStartReading: () => void;
-  onOpenLibrary: () => void;
-  onOpenVault: () => void;
-  onOpenSchedule: () => void;
-  onOpenBookRequests: () => void;
-  onOpenSettings: () => void;
-  onSwitchDevice: () => void;
-  /** Rick's Build 30 review #5: sidebar "Sign out" replaces the old
-   *  "Switch User" that was wiping mid-session state. Graceful signout
-   *  notifies Perry first, then clears. */
-  onSignOut?: () => void;
-  /** When true, show the homepage to a logged-out visitor with a Sign In CTA. */
-  publicMode?: boolean;
-  onSignIn?: () => void;
-  onJoinAsChild?: () => void;
-  /** When true, show a "Perry is here, waiting" badge in the hero. Drives
-   *  Nana's awareness that Perry is currently connected and waiting for
-   *  her to start the session. */
-  perryConnected?: boolean;
-  onOpenFamilyStories?: () => void;
-  familyStoryEntries?: FamilyStoryEntry[];
-  childrenList?: Child[];
-  activeChildId?: string | null;
-  onSelectChild?: (childId: string) => void;
-  onOpenAddChild?: () => void;
-}) {
-  // Rick's Build 30 review #5: inline modal instead of window.confirm
-  // (unreliable in iPad Safari PWA — see EndCallConfirm precedent).
-  const [signOutConfirmOpen, setSignOutConfirmOpen] = useState(false);
-  const greeting = publicMode ? "Welcome" : timeOfDayGreeting();
-  const nextSessionLabel = publicMode
-    ? "Sign in to schedule your next reading session."
-    : scheduleProposal
-    ? `${scheduleProposal.date.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })} at ${scheduleProposal.time}`
-    : "Not scheduled yet — start a session anytime";
-
-  return (
-    <div
-      className={`nm-home ${publicMode ? "nm-home-public" : ""}`}
-      style={{
-        flex: 1,
-        display: "flex",
-        flexDirection: "row",
-        backgroundColor: "#0b172e",
-        backgroundImage: "radial-gradient(900px 480px at 85% -10%, rgba(201,146,42,0.18), transparent 70%), radial-gradient(700px 420px at -10% 110%, rgba(96,165,250,0.14), transparent 70%)",
-        overflow: "auto",
-        minHeight: "100%",
-      }}
-    >
-      <style>{`
-        .nm-home { font-family: "DM Sans", sans-serif; }
-
-        /* ─── Playful animations for the kids-friendly homepage ─── */
-        @keyframes nm-bounce-soft { 0%,100% { transform: translateY(0) rotate(-3deg); } 50% { transform: translateY(-12px) rotate(3deg); } }
-        @keyframes nm-float-slow  { 0%,100% { transform: translateY(0) translateX(0); } 50% { transform: translateY(-10px) translateX(6px); } }
-        @keyframes nm-spin-slow   { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-        @keyframes nm-twinkle     { 0%,100% { opacity: 0.35; transform: scale(0.85); } 50% { opacity: 1; transform: scale(1.15); } }
-        @keyframes nm-pulse-glow  { 0%,100% { box-shadow: 0 8px 28px rgba(201,146,42,0.45), 0 0 0 0 rgba(201,146,42,0.4); } 50% { box-shadow: 0 12px 36px rgba(201,146,42,0.6), 0 0 0 14px rgba(201,146,42,0); } }
-        @keyframes nm-rainbow-shift { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
-        @keyframes nm-tilt-wobble { 0%,100% { transform: rotate(-2deg); } 50% { transform: rotate(2deg); } }
-        @keyframes nm-rise-in { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes nm-pop-in { 0% { opacity: 0; transform: scale(0.6); } 70% { transform: scale(1.08); } 100% { opacity: 1; transform: scale(1); } }
-
-        .nm-home .nm-home-hero-illus { position: relative; overflow: hidden; }
-        .nm-home .nm-home-hero-illus::before {
-          content: "";
-          position: absolute; inset: -10% -10% auto auto;
-          width: 220px; height: 220px; border-radius: 50%;
-          background: radial-gradient(closest-side, rgba(247,201,93,0.30), transparent 70%);
-          animation: nm-float-slow 6s ease-in-out infinite;
-          pointer-events: none;
-        }
-        .nm-home .nm-home-hero-illus::after {
-          content: "";
-          position: absolute; inset: auto auto -20% -10%;
-          width: 200px; height: 200px; border-radius: 50%;
-          background: radial-gradient(closest-side, rgba(167,139,250,0.25), transparent 70%);
-          animation: nm-float-slow 7s ease-in-out infinite reverse;
-          pointer-events: none;
-        }
-        .nm-floater { position: absolute; pointer-events: none; user-select: none; filter: drop-shadow(0 4px 10px rgba(0,0,0,0.25)); }
-        .nm-mascot { animation: nm-bounce-soft 2.6s ease-in-out infinite; transform-origin: center bottom; }
-        .nm-cta-primary { animation: nm-pulse-glow 2.4s ease-in-out infinite; }
-        .nm-cta-primary:hover { transform: translateY(-2px) scale(1.02); }
-        .nm-cta-primary:active { transform: translateY(0) scale(0.98); }
-
-        /* Game-like quick tiles: gradient border + lift + animated icon — applies in both modes */
-        .nm-home .nm-home-tile { transition: transform 220ms cubic-bezier(0.22,1,0.36,1), box-shadow 220ms ease, border-color 220ms ease; }
-        .nm-home .nm-home-tile:hover { transform: translateY(-6px) scale(1.02); box-shadow: 0 18px 40px rgba(0,0,0,0.35); }
-        .nm-home .nm-home-tile:hover .nm-tile-icon { animation: nm-tilt-wobble 0.6s ease-in-out infinite; }
-
-        /* Sparkles scattered behind the hero */
-        .nm-spark { position: absolute; pointer-events: none; font-size: 14px; animation: nm-twinkle 2.2s ease-in-out infinite; }
-
-        /* Steps strip */
-        .nm-step-card { animation: nm-rise-in 0.6s both; }
-
-        /* Desktop ≥1200px — generous breathing room, larger sidebar/typography */
-        @media (min-width: 1200px) {
-          .nm-home-aside { width: 220px !important; padding: 22px 14px !important; gap: 14px !important; }
-          .nm-home-aside .nm-profile-avatar { width: 72px !important; height: 72px !important; font-size: 30px !important; }
-          .nm-home-aside .nm-profile-name { font-size: 16px !important; }
-          .nm-home-aside .nm-sidebar-label { font-size: 14px !important; }
-          .nm-home-header { padding: 22px 36px 14px !important; }
-          .nm-home-hero-pad { padding: 14px 36px 18px !important; }
-          .nm-home-hero { padding: 22px 24px !important; gap: 24px !important; }
-          .nm-home-hero-eyebrow-title { font-size: 26px !important; }
-          .nm-home-tiles-pad { padding: 12px 36px 28px !important; }
-          .nm-home-tiles { gap: 16px !important; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)) !important; }
-          .nm-home-tile { padding: 22px 14px 20px !important; }
-        }
-
-        /* Wide-enough tablets/laptops 900–1199 — keep balanced */
-        @media (min-width: 900px) and (max-width: 1199px) {
-          .nm-home-hero-pad { padding: 10px 26px 14px !important; }
-          .nm-home-hero { padding: 16px 20px !important; gap: 18px !important; }
-          .nm-home-tiles-pad { padding: 10px 26px 22px !important; }
-          .nm-home-tiles { gap: 14px !important; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)) !important; }
-        }
-
-        /* Narrow tablet — collapse sidebar to icon-only rail but keep hero side-by-side */
-        @media (max-width: 900px) {
-          .nm-home-aside { width: 68px !important; padding: 14px 6px !important; }
-          .nm-home-aside .nm-sidebar-label { display: none !important; }
-          .nm-home-aside .nm-profile-name { display: none !important; }
-          .nm-home-aside .nm-profile-avatar { width: 44px !important; height: 44px !important; font-size: 20px !important; }
-        }
-
-        /* Phone-ish — stack hero banner vertically + 2-col tiles + 1-col steps + bigger touch targets */
-        @media (max-width: 700px) {
-          .nm-home-hero { flex-direction: column !important; align-items: stretch !important; gap: 10px !important; padding: 14px !important; }
-          .nm-home-hero > .nm-mascot { align-self: center; }
-          .nm-hero-cta-wrap { flex-direction: row !important; }
-          .nm-hero-cta-wrap button { flex: 1 !important; }
-          .nm-home-tiles { grid-template-columns: repeat(2, 1fr) !important; }
-          .nm-steps { grid-template-columns: 1fr !important; }
-          .nm-home-tile { padding: 14px 10px 12px !important; }
-        }
-
-        /* Tiny phones — single-column tiles, single-column CTA */
-        @media (max-width: 420px) {
-          .nm-home-tiles { grid-template-columns: 1fr !important; }
-          .nm-home-header { padding: 12px 14px 6px !important; }
-          .nm-hero-cta-wrap { flex-direction: column !important; }
-        }
-
-        /* Phone — stack everything, hide sidebar entirely on public mode */
-        @media (max-width: 600px) {
-          .nm-home-public .nm-home-aside { display: none !important; }
-          .nm-home-header { flex-wrap: wrap !important; gap: 10px !important; padding: 12px 16px 8px !important; }
-          .nm-home-header-cta { width: 100% !important; justify-content: stretch !important; }
-          .nm-home-header-cta button { flex: 1 !important; padding: 10px 14px !important; font-size: 12px !important; }
-          .nm-home-hero-pad { padding: 8px 16px 12px !important; }
-          .nm-home-tiles-pad { padding: 8px 16px 24px !important; }
-          .nm-home-hero-illus { padding: 22px 16px !important; }
-          .nm-home-hero-illus-emoji { font-size: 64px !important; }
-          .nm-home-hero-headline { font-size: 22px !important; }
-          .nm-home-hero-eyebrow-title { font-size: 22px !important; }
-        }
-      `}</style>
-
-      {/* ── LEFT SIDEBAR ─────────────────────────────────────── */}
-      <aside
-        className="nm-home-aside"
-        style={{
-          width: 168,
-          flexShrink: 0,
-          backgroundColor: "rgba(8,18,38,0.65)",
-          borderRight: "1px solid rgba(255,255,255,0.07)",
-          display: "flex",
-          flexDirection: "column",
-          padding: "14px 8px",
-          gap: 10,
-          backdropFilter: "blur(6px)",
-        }}
-      >
-        {/* Profile pill */}
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6, padding: "10px 4px 14px", borderBottom: "1px solid rgba(255,255,255,0.06)", marginBottom: 6 }}>
-          <div
-            className="nm-profile-avatar"
-            style={{
-              width: 56, height: 56, borderRadius: "50%",
-              backgroundColor: publicMode ? "rgba(201,146,42,0.18)" : "#A66B2E",
-              color: publicMode ? AMBER : "#FFF8EC",
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontFamily: "Inter, sans-serif", fontWeight: 700, fontSize: 24,
-              border: `2px solid ${publicMode ? "rgba(201,146,42,0.55)" : "rgba(255,255,255,0.16)"}`,
-            }}
-          >
-            {publicMode ? "📖" : ((nanaName || "Nana").trim()[0]?.toUpperCase() ?? "N")}
-          </div>
-          <div className="nm-profile-name" style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontWeight: 700, fontSize: 14, textAlign: "center" }}>
-            {publicMode ? "NeverMiss" : (nanaName || "Nana")}
-          </div>
-        </div>
-
-        <SidebarItem label="Home" icon="🏠" active onClick={() => {}} />
-        <SidebarItem label="Library" icon="📚" onClick={onOpenLibrary} />
-        {/* Family Journal in the main nav — promoted from a small toolbar
-            icon. Sits between Vault and Schedule because Journal and Vault
-            are both "memory" surfaces, while Schedule and Book Requests
-            are forward-looking planning. */}
-        {onOpenFamilyStories && (
-          <SidebarItem label="Family Journal" icon="📖" onClick={onOpenFamilyStories} />
-        )}
-        <SidebarItem label="Memory Vault" icon="📼" onClick={onOpenVault} />
-        <SidebarItem label="Schedule" icon="📅" onClick={onOpenSchedule} />
-        <SidebarItem label="Book Requests" icon="✉️" onClick={onOpenBookRequests} />
-
-        {/* Subtle divider instead of a flex-grow spacer that pushed
-            Settings/Switch User off the bottom of the iPad viewport. */}
-        <div style={{ height: 1, backgroundColor: "rgba(255,255,255,0.06)", margin: "6px 4px" }} />
-        <SidebarItem label="Settings" icon="⚙️" onClick={onOpenSettings} />
-        {/* Rick's Build 30 review #5: the old "Switch User" here called
-            the full-wipe handleSwitchDevice which killed the connection
-            AND dropped both iPads to the splash. Rick expected profile
-            swap. To switch grandchildren, use the child picker in the
-            hero above. This row is a graceful sign-out only. */}
-        {!publicMode && onSignOut && (
-          <SidebarItem label="Sign out" icon="🚪" onClick={() => setSignOutConfirmOpen(true)} />
-        )}
-      </aside>
-
-      {/* Sign-out confirm modal — Rick's Build 30 review #5. */}
-      {signOutConfirmOpen && onSignOut && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="signout-title"
-          onClick={() => setSignOutConfirmOpen(false)}
-          style={{
-            position: "fixed", inset: 0, zIndex: 200,
-            background: "rgba(8,15,30,0.82)",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            padding: 24,
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: "min(400px, 100%)",
-              background: "linear-gradient(180deg, #14223e 0%, #0b172e 100%)",
-              border: "1px solid rgba(201,146,42,0.45)",
-              borderRadius: 16,
-              padding: "22px 22px 18px",
-              boxShadow: "0 24px 60px rgba(0,0,0,0.6)",
-              textAlign: "center",
-            }}
-          >
-            <div style={{ fontSize: 44, marginBottom: 10 }}>🚪</div>
-            <div id="signout-title" style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 22, fontWeight: 700, marginBottom: 6 }}>
-              Sign out of NeverMiss?
-            </div>
-            <div style={{ color: "rgba(247,240,227,0.65)", fontFamily: "DM Sans, sans-serif", fontSize: 13, lineHeight: 1.5, marginBottom: 18 }}>
-              You'll come back to the sign-in screen. Your grandchild's iPad will drop back to the PIN screen.
-            </div>
-            <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
-              <button
-                onClick={() => setSignOutConfirmOpen(false)}
-                style={{
-                  background: "transparent",
-                  color: "rgba(247,240,227,0.75)",
-                  border: "1px solid rgba(255,255,255,0.20)",
-                  borderRadius: 999,
-                  padding: "10px 22px",
-                  fontFamily: "DM Sans, sans-serif",
-                  fontSize: 13, fontWeight: 700,
-                  cursor: "pointer",
-                  minHeight: 44, touchAction: "manipulation",
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => { setSignOutConfirmOpen(false); onSignOut(); }}
-                style={{
-                  background: "linear-gradient(135deg, rgba(239,68,68,0.90) 0%, rgba(220,38,38,0.90) 100%)",
-                  color: "#fff",
-                  border: "none",
-                  borderRadius: 999,
-                  padding: "10px 22px",
-                  fontFamily: "DM Sans, sans-serif",
-                  fontSize: 13, fontWeight: 800, letterSpacing: "0.02em",
-                  cursor: "pointer",
-                  minHeight: 44, touchAction: "manipulation",
-                  boxShadow: "0 6px 16px rgba(239,68,68,0.35)",
-                }}
-              >
-                Yes, sign out
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── RIGHT CONTENT ────────────────────────────────────── */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "auto", minWidth: 0 }}>
-
-        {/* Top header row */}
-        <div className="nm-home-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 16px 4px", gap: 10 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <span style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: "clamp(18px, 2.4vw, 22px)", fontWeight: 700 }}>NeverMiss</span>
-            <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 9, letterSpacing: "0.16em", opacity: 0.85 }}>READ · CONNECT · REMEMBER</span>
-          </div>
-          {publicMode ? (
-            <div className="nm-home-header-cta" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <button
-                type="button"
-                onClick={onJoinAsChild}
-                style={{
-                  background: "none",
-                  color: "#cfe3ff",
-                  border: "1px solid rgba(96,165,250,0.55)",
-                  borderRadius: 999,
-                  padding: "10px 18px",
-                  fontFamily: "DM Sans, sans-serif",
-                  fontSize: 13,
-                  fontWeight: 700,
-                  letterSpacing: "0.04em",
-                  cursor: "pointer",
-                  touchAction: "manipulation",
-                }}
-              >
-                🧒 Join as Grandchild
-              </button>
-              <button
-                type="button"
-                onClick={onSignIn}
-                style={{
-                  backgroundColor: AMBER,
-                  color: NAVY,
-                  border: "none",
-                  borderRadius: 999,
-                  padding: "10px 22px",
-                  fontFamily: "DM Sans, sans-serif",
-                  fontSize: 14,
-                  fontWeight: 800,
-                  letterSpacing: "0.04em",
-                  cursor: "pointer",
-                  boxShadow: "0 6px 18px rgba(201,146,42,0.42)",
-                  touchAction: "manipulation",
-                }}
-              >
-                👵 Sign In as Grandparent →
-              </button>
-            </div>
-          ) : (
-            <div style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 18, fontWeight: 600 }}>
-              {greeting}, <span style={{ color: AMBER, fontWeight: 800 }}>{nanaName || "Nana"}!</span>
-            </div>
-          )}
-        </div>
-
-        {/* Hero banner — single horizontal row that fits any viewport */}
-        <div className="nm-home-hero-pad" style={{ padding: "6px 16px 10px" }}>
-          <div className="nm-home-hero nm-home-hero-illus" style={{
-            position: "relative",
-            display: "flex",
-            alignItems: "center",
-            gap: 14,
-            backgroundColor: "rgba(201,146,42,0.08)",
-            border: "1px solid rgba(201,146,42,0.22)",
-            borderRadius: 18,
-            padding: "14px 16px",
-            overflow: "hidden",
-          }}>
-            {/* Decorative twinkles + floaters absolutely positioned */}
-            <span className="nm-spark" style={{ top: "18%", left: "8%", animationDelay: "0s" }}>✨</span>
-            <span className="nm-spark" style={{ top: "60%", left: "15%", animationDelay: "0.4s", fontSize: 14 }}>⭐</span>
-            <span className="nm-spark" style={{ top: "20%", right: "32%", animationDelay: "0.9s", fontSize: 13 }}>💫</span>
-            <span className="nm-spark" style={{ bottom: "18%", right: "30%", animationDelay: "1.3s" }}>✨</span>
-
-            {/* Mascot — always small + bouncing, never grows monstrously */}
-            <div
-              className="nm-mascot"
-              style={{
-                fontSize: "clamp(44px, 5.6vw, 72px)",
-                lineHeight: 1,
-                flexShrink: 0,
-                position: "relative",
-                zIndex: 1,
-                filter: "drop-shadow(0 6px 16px rgba(201,146,42,0.35))",
-              }}
-            >
-              🐰
-            </div>
-
-            {/* Middle text block — eyebrow, headline, body */}
-            <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2, position: "relative", zIndex: 1 }}>
-              <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 800, letterSpacing: "0.16em" }}>
-                {publicMode ? "GET STARTED" : "NEXT READING SESSION"}
-              </div>
-              <div className="nm-home-hero-eyebrow-title" style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: "clamp(18px, 2.6vw, 26px)", fontWeight: 700, lineHeight: 1.2 }}>
-                {publicMode ? "Read together, even apart" : (childName || "Your grandchild")}
-              </div>
-              {/* Bumped body line from clamp(10–12)→clamp(13–16). Rick:
-                  "Font sizes throughout could generally be a bit larger —
-                  the proposed time display in particular could use a bump."
-                  This is where the scheduled-session time renders on home. */}
-              <div style={{ color: "rgba(247,240,227,0.8)", fontFamily: "DM Sans, sans-serif", fontSize: "clamp(13px, 1.6vw, 16px)", fontWeight: 500, lineHeight: 1.45 }}>
-                {publicMode
-                  ? "The iPad co-reading app for grandparents & grandkids."
-                  : nextSessionLabel}
-              </div>
-              {/* Connection status — show both states. Connected = green
-                  "Perry's ready" pulse, not-connected = amber "Waiting for
-                  Perry…" so Nana always knows where she stands without
-                  having to guess. Rick: "session start sequencing" polish. */}
-              {!publicMode && (
-                <div style={{
-                  display: "inline-flex", alignItems: "center", gap: 6,
-                  marginTop: 6, alignSelf: "flex-start",
-                  background: perryConnected ? "rgba(134,239,172,0.10)" : "rgba(247,201,93,0.10)",
-                  border: `1px solid ${perryConnected ? "rgba(134,239,172,0.35)" : "rgba(247,201,93,0.35)"}`,
-                  borderRadius: 999,
-                  padding: "4px 10px",
-                  color: perryConnected ? "#86efac" : "#fbd07a",
-                  fontFamily: "DM Sans, sans-serif",
-                  fontSize: 10, fontWeight: 700,
-                  letterSpacing: "0.04em",
-                }}>
-                  <span style={{
-                    width: 7, height: 7, borderRadius: "50%",
-                    background: perryConnected ? "#86efac" : "#fbd07a",
-                    boxShadow: perryConnected ? "0 0 8px rgba(134,239,172,0.7)" : "0 0 8px rgba(247,201,93,0.55)",
-                    animation: "nm-twinkle 1.6s ease-in-out infinite",
-                  }} />
-                  {perryConnected
-                    ? `${childName || "your grandchild"} is here — start when you're ready`
-                    : `Waiting for ${childName || "your grandchild"} to join…`}
-                </div>
-              )}
-
-              {/* Multi-child picker — only renders for real connections.
-                  Single-child families still see "+ Add a sibling" so the
-                  feature is discoverable. Switching child wipes the active
-                  book selection (handled by App.handleSelectChild) so
-                  Cooper doesn't inherit Perry's mid-pick state. */}
-              {!publicMode && onSelectChild && onOpenAddChild && (
-                <div style={{ marginTop: 10 }}>
-                  <div style={{
-                    color: "rgba(247,240,227,0.5)",
-                    fontFamily: "DM Sans, sans-serif",
-                    fontSize: 9, fontWeight: 800, letterSpacing: "0.16em",
-                    marginBottom: 5,
-                  }}>READING WITH</div>
-                  <ChildPicker
-                    children={childrenList}
-                    activeChildId={activeChildId}
-                    onSelect={onSelectChild}
-                    onAddNew={onOpenAddChild}
-                  />
-                </div>
-              )}
-            </div>
-
-            {/* Primary CTA — sized for the row, never overflows */}
-            <div className="nm-hero-cta-wrap" style={{ flexShrink: 0, display: "flex", flexDirection: "column", gap: 8, alignItems: "stretch", position: "relative", zIndex: 1 }}>
-              <button
-                onClick={publicMode ? onSignIn : onStartReading}
-                className="nm-cta-primary"
-                style={{
-                  background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
-                  color: NAVY,
-                  border: "none",
-                  borderRadius: 999,
-                  padding: "11px 18px",
-                  fontFamily: "DM Sans, sans-serif",
-                  fontSize: "clamp(12px, 1.5vw, 14px)",
-                  fontWeight: 800,
-                  letterSpacing: "0.02em",
-                  cursor: "pointer",
-                  boxShadow: "0 8px 24px rgba(201,146,42,0.45)",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  gap: 8,
-                  whiteSpace: "nowrap",
-                  touchAction: "manipulation",
-                  // Pulse glow when Perry is connected and waiting — draws
-                  // Nana's eye to the "your move" CTA.
-                  animation: !publicMode && perryConnected ? "nm-pulse-glow 2.4s ease-in-out infinite" : undefined,
-                }}
-              >
-                {publicMode ? "👵 Sign In →" : "📖 Start Reading →"}
-              </button>
-              {publicMode && (
-                <button
-                  onClick={onJoinAsChild}
-                  style={{
-                    backgroundColor: "rgba(96,165,250,0.14)",
-                    color: "#cfe3ff",
-                    border: "1px solid rgba(96,165,250,0.55)",
-                    borderRadius: 999,
-                    padding: "9px 16px",
-                    fontFamily: "DM Sans, sans-serif",
-                    fontSize: "clamp(11px, 1.3vw, 12px)",
-                    fontWeight: 700,
-                    letterSpacing: "0.02em",
-                    cursor: "pointer",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    gap: 6,
-                    whiteSpace: "nowrap",
-                    touchAction: "manipulation",
-                  }}
-                >
-                  🧒 Join as Grandchild
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Latest Memory — surfaces the most recent Family Journal entry
-            right on the home page so the journal feels alive instead of
-            buried in a sub-screen. When there are no entries yet, shows
-            an empty-state CTA inviting Nana to write her first memory.
-            Rick: "I like the concept, but it doesn't feel prominent to me
-            right now — worth revisiting." Only on the logged-in view. */}
-        {!publicMode && onOpenFamilyStories && (
-          <div style={{ padding: "0 16px 8px" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, paddingLeft: 2 }}>
-              <span aria-hidden style={{ fontSize: 13 }}>📖</span>
-              <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 800, letterSpacing: "0.18em" }}>FAMILY JOURNAL</span>
-              <span style={{ flex: 1, height: 1, background: "linear-gradient(to right, rgba(201,146,42,0.4), transparent)" }} />
-              <button
-                onClick={onOpenFamilyStories}
-                style={{
-                  background: "none", border: "none",
-                  color: AMBER, fontFamily: "DM Sans, sans-serif",
-                  fontSize: 11, fontWeight: 700, letterSpacing: "0.04em",
-                  cursor: "pointer", padding: "2px 4px",
-                }}
-              >
-                {familyStoryEntries.length > 0 ? `See all ${familyStoryEntries.length} →` : "Open →"}
-              </button>
-            </div>
-            {familyStoryEntries.length > 0 ? (() => {
-              const latest = familyStoryEntries[0];
-              return (
-                <button
-                  onClick={onOpenFamilyStories}
-                  style={{
-                    width: "100%", textAlign: "left",
-                    display: "flex", alignItems: "stretch", gap: 12,
-                    background: "linear-gradient(135deg, rgba(244,114,182,0.12) 0%, rgba(244,114,182,0.04) 60%, rgba(255,255,255,0.03) 100%)",
-                    border: "1px solid rgba(244,114,182,0.32)",
-                    borderRadius: 16,
-                    padding: "14px 16px",
-                    cursor: "pointer",
-                    boxShadow: "0 4px 16px rgba(244,114,182,0.10)",
-                    transition: "transform 180ms cubic-bezier(0.22,1,0.36,1), box-shadow 180ms ease, border-color 180ms ease",
-                    color: CREAM,
-                    fontFamily: "DM Sans, sans-serif",
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.transform = "translateY(-2px)";
-                    e.currentTarget.style.boxShadow = "0 12px 32px rgba(244,114,182,0.22)";
-                    e.currentTarget.style.borderColor = "rgba(244,114,182,0.55)";
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.transform = "translateY(0)";
-                    e.currentTarget.style.boxShadow = "0 4px 16px rgba(244,114,182,0.10)";
-                    e.currentTarget.style.borderColor = "rgba(244,114,182,0.32)";
-                  }}
-                >
-                  {/* Mini book-spine on the left */}
-                  <div style={{
-                    width: 44, height: 60,
-                    borderRadius: 6,
-                    background: latest.bookColor,
-                    border: `2px solid ${latest.bookColor}`,
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    fontSize: 24, flexShrink: 0,
-                    boxShadow: "2px 3px 8px rgba(0,0,0,0.4)",
-                  }}>
-                    {latest.bookEmoji}
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                      <span style={{ color: "#f9a8d4", fontSize: 10, fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase" }}>
-                        💝 Latest memory
-                      </span>
-                      <span style={{ color: "rgba(247,240,227,0.45)", fontSize: 10 }}>·</span>
-                      <span style={{ color: "rgba(247,240,227,0.6)", fontSize: 11, fontWeight: 600 }}>
-                        {latest.date}
-                      </span>
-                    </div>
-                    <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 14, fontWeight: 700, lineHeight: 1.25, marginBottom: 4 }}>
-                      {latest.book}
-                    </div>
-                    <div style={{
-                      color: "rgba(247,240,227,0.85)", fontFamily: "Merriweather, serif",
-                      fontSize: 13, fontStyle: "italic", lineHeight: 1.55,
-                      display: "-webkit-box",
-                      WebkitLineClamp: 2,
-                      WebkitBoxOrient: "vertical" as const,
-                      overflow: "hidden",
-                    }}>
-                      "{latest.note}"
-                    </div>
-                  </div>
-                </button>
-              );
-            })() : (
-              <button
-                onClick={onOpenFamilyStories}
-                style={{
-                  width: "100%", textAlign: "left",
-                  display: "flex", alignItems: "center", gap: 14,
-                  background: "linear-gradient(135deg, rgba(244,114,182,0.10) 0%, rgba(244,114,182,0.03) 70%)",
-                  border: "1px dashed rgba(244,114,182,0.45)",
-                  borderRadius: 16,
-                  padding: "16px 18px",
-                  cursor: "pointer",
-                  color: CREAM,
-                  fontFamily: "DM Sans, sans-serif",
-                  transition: "border-color 180ms ease, background 180ms ease",
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.borderColor = "rgba(244,114,182,0.75)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.borderColor = "rgba(244,114,182,0.45)"; }}
-              >
-                <div style={{
-                  width: 44, height: 44, borderRadius: "50%",
-                  background: "rgba(244,114,182,0.22)",
-                  border: "1px solid rgba(244,114,182,0.45)",
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  fontSize: 22, flexShrink: 0,
-                }}>💝</div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 15, fontWeight: 700, marginBottom: 2 }}>
-                    Start your family journal
-                  </div>
-                  <div style={{ color: "rgba(247,240,227,0.65)", fontSize: 12, lineHeight: 1.45 }}>
-                    Save a note after each session — a moment {(childName || "your grandchild")} will be able to read for years.
-                  </div>
-                </div>
-                <span style={{ color: "#f9a8d4", fontSize: 18, flexShrink: 0 }}>→</span>
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* How it works — playful 3-step strip (publicMode only) */}
-        {publicMode && (
-          <div style={{ padding: "4px 20px 10px" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, paddingLeft: 2 }}>
-              <SparklesIcon size={14} color={AMBER} strokeWidth={2.4} />
-              <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 800, letterSpacing: "0.18em" }}>HOW IT WORKS</span>
-              <span style={{ flex: 1, height: 1, background: "linear-gradient(to right, rgba(201,146,42,0.4), transparent)" }} />
-            </div>
-            <div className="nm-steps" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
-              <HowItWorksStep n={1} Illust={IllustFamily} title="Set up the family" body="Create your circle in 2 minutes — no tech help needed." color="#f7c95d" delay="0s" />
-              <HowItWorksStep n={2} Illust={IllustPhone} title="Open and tap" body="Tap your grandkid's photo to start a face-to-face call." color="#60a5fa" delay="0.15s" />
-              <HowItWorksStep n={3} Illust={IllustReadStar} title="Read together" body="Pages turn in sync. Earn stars. Save the memory." color="#a78bfa" delay="0.3s" />
-            </div>
-          </div>
-        )}
-
-        {/* Bottom 4 quick-tile row */}
-        <div className="nm-home-tiles-pad" style={{ padding: "4px 16px 12px" }}>
-          {publicMode && (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, paddingLeft: 2 }}>
-              <StarIcon size={14} color={AMBER} strokeWidth={2.4} />
-              <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 800, letterSpacing: "0.18em" }}>WHAT'S INSIDE</span>
-              <span style={{ flex: 1, height: 1, background: "linear-gradient(to right, rgba(201,146,42,0.4), transparent)" }} />
-            </div>
-          )}
-          <div className="nm-home-tiles" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 10 }}>
-            <HomeQuickTile Illust={IllustLibrary} title="Library" subtitle="Pick a book" onClick={onOpenLibrary} accent="#C9922A" />
-            {/* Family Journal — added as a first-class tile so it sits in
-                the same row of affordances Nana already scans. Pink accent
-                pairs with the heart in the open-book illustration. */}
-            {onOpenFamilyStories && (
-              <HomeQuickTile Illust={IllustJournal} title="Family Journal" subtitle="Save a memory" onClick={onOpenFamilyStories} accent="#f472b6" />
-            )}
-            <HomeQuickTile Illust={IllustVault} title="Memory Vault" subtitle="Past readings" onClick={onOpenVault} accent="#a78bfa" />
-            <HomeQuickTile Illust={IllustSchedule} title="Schedule" subtitle="Plan a session" onClick={onOpenSchedule} accent="#60a5fa" />
-            <HomeQuickTile Illust={IllustMail} title="Book Requests" subtitle="From the family" onClick={onOpenBookRequests} accent="#f87171" />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SidebarItem({ label, icon, active, onClick }: { label: string; icon: string; active?: boolean; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={label}
-      aria-label={label}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "flex-start",
-        gap: 10,
-        padding: "10px 12px",
-        borderRadius: 12,
-        border: "1px solid " + (active ? "rgba(201,146,42,0.6)" : "transparent"),
-        backgroundColor: active ? "rgba(201,146,42,0.20)" : "transparent",
-        color: active ? CREAM : "rgba(247,240,227,0.78)",
-        fontFamily: "DM Sans, sans-serif",
-        fontSize: 13,
-        fontWeight: active ? 700 : 600,
-        cursor: "pointer",
-        textAlign: "left",
-        width: "100%",
-        touchAction: "manipulation",
-        transition: "background-color 160ms ease, border-color 160ms ease, color 160ms ease",
-      }}
-      onMouseEnter={(e) => {
-        if (!active) e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.05)";
-      }}
-      onMouseLeave={(e) => {
-        if (!active) e.currentTarget.style.backgroundColor = "transparent";
-      }}
-    >
-      <span aria-hidden style={{ fontSize: 18, lineHeight: 1, width: 22, textAlign: "center", flexShrink: 0 }}>{icon}</span>
-      <span className="nm-sidebar-label" style={{ flex: 1 }}>{label}</span>
-    </button>
-  );
-}
-
-function HomeQuickTile({ Illust, title, subtitle, onClick, accent }: { Illust: React.ComponentType<{ color: string; size?: number }>; title: string; subtitle: string; onClick: () => void; accent: string }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="nm-home-tile"
-      style={{
-        position: "relative",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 4,
-        padding: "10px 8px 10px",
-        backgroundImage: `linear-gradient(155deg, color-mix(in srgb, ${accent} 18%, rgba(255,255,255,0.04)) 0%, rgba(255,255,255,0.04) 70%)`,
-        backgroundColor: "rgba(255,255,255,0.05)",
-        border: `1px solid color-mix(in srgb, ${accent} 38%, rgba(255,255,255,0.10))`,
-        borderRadius: 18,
-        color: CREAM,
-        cursor: "pointer",
-        touchAction: "manipulation",
-        overflow: "hidden",
-      }}
-      onMouseDown={(e) => { e.currentTarget.style.transform = "translateY(-4px) scale(0.98)"; }}
-      onMouseUp={(e) => { e.currentTarget.style.transform = ""; }}
-    >
-      <span
-        aria-hidden
-        className="nm-tile-icon nm-home-tile-illust-wrap"
-        style={{
-          width: 48, height: 48,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          marginBottom: 1,
-          filter: `drop-shadow(0 4px 12px color-mix(in srgb, ${accent} 55%, transparent))`,
-        }}
-      >
-        <Illust color={accent} size={42} />
-      </span>
-      <div style={{ fontFamily: "Playfair Display, serif", fontWeight: 700, fontSize: 13 }}>{title}</div>
-      <div style={{ fontFamily: "DM Sans, sans-serif", fontSize: 10, color: "rgba(247,240,227,0.62)", textAlign: "center" }}>{subtitle}</div>
-    </button>
-  );
-}
-
 /* ─── Illustrated SVG icons — gradient-filled, layered, kid-friendly ─── */
 
 function IllustGradient({ id, color }: { id: string; color: string }) {
@@ -7310,63 +6492,6 @@ function IllustGradient({ id, color }: { id: string; color: string }) {
       <stop offset="0%" stopColor={color} stopOpacity="1" />
       <stop offset="100%" stopColor={color} stopOpacity="0.55" />
     </linearGradient>
-  );
-}
-
-function IllustLibrary({ color, size = 56 }: { color: string; size?: number }) {
-  const id = "il-lib";
-  return (
-    <svg viewBox="0 0 64 64" width={size} height={size} aria-hidden>
-      <defs><IllustGradient id={id} color={color} /></defs>
-      <rect x="6"  y="18" width="11" height="34" rx="2.5" fill={`url(#${id})`} opacity="0.55" transform="rotate(-6 11.5 35)" />
-      <rect x="20" y="12" width="11" height="40" rx="2.5" fill={`url(#${id})`} opacity="0.92" />
-      <rect x="34" y="20" width="11" height="32" rx="2.5" fill={`url(#${id})`} opacity="0.78" transform="rotate(4 39.5 36)" />
-      <rect x="22" y="20" width="7"  height="2.5" rx="1" fill="#fff" opacity="0.45" />
-      <rect x="36" y="28" width="7"  height="2.5" rx="1" fill="#fff" opacity="0.45" transform="rotate(4 39.5 29.5)" />
-      <path d="M52 14 l1.6 -3.2 l1.6 3.2 l3.2 1.6 l-3.2 1.6 l-1.6 3.2 l-1.6 -3.2 l-3.2 -1.6 z" fill="#FFF6DC" opacity="0.95" />
-      <circle cx="55" cy="46" r="1.8" fill="#FFF6DC" opacity="0.75" />
-      <circle cx="9"  cy="10" r="1.6" fill="#FFF6DC" opacity="0.7" />
-    </svg>
-  );
-}
-
-function IllustVault({ color, size = 56 }: { color: string; size?: number }) {
-  const id = "il-vault";
-  return (
-    <svg viewBox="0 0 64 64" width={size} height={size} aria-hidden>
-      <defs><IllustGradient id={id} color={color} /></defs>
-      <rect x="8" y="16" width="48" height="32" rx="6" fill={`url(#${id})`} />
-      <rect x="6" y="20" width="6" height="6" rx="1" fill="#0b172e" opacity="0.85" />
-      <rect x="6" y="30" width="6" height="6" rx="1" fill="#0b172e" opacity="0.85" />
-      <rect x="6" y="40" width="6" height="6" rx="1" fill="#0b172e" opacity="0.85" />
-      <rect x="52" y="20" width="6" height="6" rx="1" fill="#0b172e" opacity="0.85" />
-      <rect x="52" y="30" width="6" height="6" rx="1" fill="#0b172e" opacity="0.85" />
-      <rect x="52" y="40" width="6" height="6" rx="1" fill="#0b172e" opacity="0.85" />
-      <rect x="16" y="22" width="32" height="20" rx="3" fill="#FFF6DC" opacity="0.92" />
-      <path d="M32 26 l1.6 3.4 l3.7 0.4 l-2.8 2.6 l0.8 3.7 l-3.3 -1.9 l-3.3 1.9 l0.8 -3.7 l-2.8 -2.6 l3.7 -0.4 z" fill={color} />
-      <path d="M50 8 l1.4 -2.8 l1.4 2.8 l2.8 1.4 l-2.8 1.4 l-1.4 2.8 l-1.4 -2.8 l-2.8 -1.4 z" fill="#FFF6DC" opacity="0.85" />
-    </svg>
-  );
-}
-
-function IllustSchedule({ color, size = 56 }: { color: string; size?: number }) {
-  const id = "il-cal";
-  return (
-    <svg viewBox="0 0 64 64" width={size} height={size} aria-hidden>
-      <defs><IllustGradient id={id} color={color} /></defs>
-      <rect x="8" y="14" width="48" height="42" rx="6" fill={`url(#${id})`} />
-      <rect x="8" y="14" width="48" height="12" rx="6" fill={color} opacity="0.92" />
-      <rect x="16" y="8" width="4" height="12" rx="2" fill="#0b172e" opacity="0.85" />
-      <rect x="44" y="8" width="4" height="12" rx="2" fill="#0b172e" opacity="0.85" />
-      <rect x="14" y="32" width="6" height="6" rx="1.2" fill="#FFF6DC" opacity="0.6" />
-      <rect x="24" y="32" width="6" height="6" rx="1.2" fill="#FFF6DC" opacity="0.6" />
-      <rect x="34" y="32" width="6" height="6" rx="1.2" fill="#FFF6DC" />
-      <rect x="44" y="32" width="6" height="6" rx="1.2" fill="#FFF6DC" opacity="0.6" />
-      <rect x="14" y="42" width="6" height="6" rx="1.2" fill="#FFF6DC" opacity="0.6" />
-      <rect x="24" y="42" width="6" height="6" rx="1.2" fill="#FFF6DC" opacity="0.6" />
-      <path d="M37 33.4 l-3.5 3.5 l-1.6 -1.6" stroke={color} strokeWidth="1.6" strokeLinecap="round" fill="none" />
-      <path d="M52 6 l1.2 -2.5 l1.2 2.5 l2.5 1.2 l-2.5 1.2 l-1.2 2.5 l-1.2 -2.5 l-2.5 -1.2 z" fill="#FFF6DC" opacity="0.85" />
-    </svg>
   );
 }
 
@@ -7381,45 +6506,6 @@ function IllustMail({ color, size = 56 }: { color: string; size?: number }) {
       <circle cx="32" cy="34" r="6" fill="#fff" opacity="0.95" />
       <path d="M32 36 l-3 -3 a2 2 0 1 1 3 -2 a2 2 0 1 1 3 2 z" fill={color} />
       <path d="M52 8 l1.2 -2.5 l1.2 2.5 l2.5 1.2 l-2.5 1.2 l-1.2 2.5 l-1.2 -2.5 l-2.5 -1.2 z" fill="#FFF6DC" opacity="0.85" />
-    </svg>
-  );
-}
-
-function IllustJournal({ color, size = 56 }: { color: string; size?: number }) {
-  const id = "il-jrn";
-  return (
-    <svg viewBox="0 0 64 64" width={size} height={size} aria-hidden>
-      <defs><IllustGradient id={id} color={color} /></defs>
-      {/* Open book — two pages meeting at a center spine. */}
-      <path d="M8 18 q4 -3 12 -3 q8 0 12 4 q4 -4 12 -4 q8 0 12 3 v34 q-4 -3 -12 -3 q-8 0 -12 4 q-4 -4 -12 -4 q-8 0 -12 3 z" fill={`url(#${id})`} />
-      {/* Page rule lines for visual texture. */}
-      <line x1="14" y1="26" x2="28" y2="26" stroke="#FFF6DC" strokeWidth="1.4" opacity="0.6" strokeLinecap="round" />
-      <line x1="14" y1="32" x2="26" y2="32" stroke="#FFF6DC" strokeWidth="1.4" opacity="0.5" strokeLinecap="round" />
-      <line x1="36" y1="26" x2="50" y2="26" stroke="#FFF6DC" strokeWidth="1.4" opacity="0.6" strokeLinecap="round" />
-      <line x1="36" y1="32" x2="48" y2="32" stroke="#FFF6DC" strokeWidth="1.4" opacity="0.5" strokeLinecap="round" />
-      {/* Heart at the center spine — the "memory" mark that distinguishes
-          this from the plain Library tile. */}
-      <path
-        d="M32 46 l-7 -6 a4.5 4.5 0 1 1 7 -5 a4.5 4.5 0 1 1 7 5 z"
-        fill="#FFF6DC"
-        opacity="0.96"
-      />
-      {/* Small sparkle to echo the other home tiles. */}
-      <path d="M54 10 l1 -2 l1 2 l2 1 l-2 1 l-1 2 l-1 -2 l-2 -1 z" fill="#FFF6DC" opacity="0.85" />
-    </svg>
-  );
-}
-
-function IllustFamily({ color, size = 36 }: { color: string; size?: number }) {
-  const id = "il-fam";
-  return (
-    <svg viewBox="0 0 64 64" width={size} height={size} aria-hidden>
-      <defs><IllustGradient id={id} color={color} /></defs>
-      <circle cx="20" cy="22" r="9" fill={`url(#${id})`} />
-      <circle cx="44" cy="22" r="9" fill={`url(#${id})`} opacity="0.85" />
-      <circle cx="32" cy="40" r="7" fill={`url(#${id})`} opacity="0.95" />
-      <path d="M8 54 q12 -10 24 0 q12 -10 24 0 v8 H8 z" fill={`url(#${id})`} opacity="0.7" />
-      <path d="M32 14 l1 -2 l1 2 l2 1 l-2 1 l-1 2 l-1 -2 l-2 -1 z" fill="#FFF6DC" opacity="0.9" />
     </svg>
   );
 }
@@ -7454,49 +6540,12 @@ function IllustReadStar({ color, size = 36 }: { color: string; size?: number }) 
   );
 }
 
-function HowItWorksStep({ n, Illust, title, body, color, delay }: { n: number; Illust: React.ComponentType<{ color: string; size?: number }>; title: string; body: string; color: string; delay: string }) {
-  return (
-    <div
-      className="nm-step-card"
-      style={{
-        position: "relative",
-        backgroundImage: `linear-gradient(150deg, color-mix(in srgb, ${color} 18%, rgba(255,255,255,0.03)) 0%, rgba(255,255,255,0.03) 70%)`,
-        border: `1px solid color-mix(in srgb, ${color} 38%, rgba(255,255,255,0.10))`,
-        borderRadius: 16,
-        padding: "12px 16px",
-        animationDelay: delay,
-      }}
-    >
-      <div style={{
-        position: "absolute", top: -10, left: 14,
-        width: 24, height: 24, borderRadius: "50%",
-        backgroundColor: color, color: "#0b172e",
-        display: "flex", alignItems: "center", justifyContent: "center",
-        fontFamily: "DM Sans, sans-serif", fontWeight: 800, fontSize: 12,
-        boxShadow: `0 6px 18px color-mix(in srgb, ${color} 45%, transparent)`,
-      }}>
-        {n}
-      </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 4 }}>
-        <span style={{ flexShrink: 0, filter: `drop-shadow(0 4px 12px color-mix(in srgb, ${color} 55%, transparent))` }}>
-          <Illust color={color} size={42} />
-        </span>
-        <div>
-          <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontWeight: 700, fontSize: 15, marginBottom: 2 }}>{title}</div>
-          <div style={{ color: "rgba(247,240,227,0.72)", fontFamily: "DM Sans, sans-serif", fontSize: 12, lineHeight: 1.4 }}>
-            {body}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 /* ─── Stub: Book Requests + Settings ──────────────────────── */
 
 /* ─── Real Settings page ─────────────────────────────────── */
 
 function SettingsView({
+  grandchildren = null,
   onBack,
   onSwitchDevice,
   onSignOut,
@@ -7520,6 +6569,8 @@ function SettingsView({
   openWith = "home",
   onOpenWithChange,
 }: {
+  /** Build 38: photos, names and PINs for each grandchild. */
+  grandchildren?: ReactNode;
   onBack: () => void;
   onSwitchDevice: () => void;
   onSignOut?: () => void;
@@ -7656,8 +6707,8 @@ function SettingsView({
   };
   // Derive the current theme + font-size from the wired props; fall back
   // to local stub if the parent didn't pass them in (defensive).
-  const defaultTheme: "day" | "sepia" | "night" = readingTheme ?? "day";
-  const setDefaultTheme = (t: "day" | "sepia" | "night") => onThemeChange?.(t);
+  const defaultTheme: ReadingTheme = readingTheme ?? "day";
+  const setDefaultTheme = (t: ReadingTheme) => onThemeChange?.(t);
   const fontSizeFromScale: "S" | "M" | "L" | "XL" =
     fontScale == null ? "M"
     : fontScale >= 1.5 ? "XL"
@@ -7704,13 +6755,19 @@ function SettingsView({
             she and the child can say hi before picking a book. Both
             paths reach the library; this just controls which screen
             shows first after login. */}
+        {grandchildren && (
+          <SettingsCard title="Grandchildren" icon="👧" delay="0s" wide>
+            {grandchildren}
+          </SettingsCard>
+        )}
+
         {onOpenWithChange && (
         <SettingsCard title="Opening screen" icon="🏠" delay="0s">
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: "0.1em" }}>WHERE TO START</div>
             <div style={{ display: "flex", gap: 8 }}>
               {([
-                { k: "home" as const,  icon: "🏠", title: "Home menu",   sub: "Dashboard with tiles" },
+                { k: "home" as const,  icon: "🏠", title: "Home",        sub: "Your grandchildren" },
                 { k: "video" as const, icon: "📹", title: "Video chat",  sub: "See each other first" },
               ]).map(o => {
                 const active = openWith === o.k;
@@ -7742,14 +6799,14 @@ function SettingsView({
             <div style={{ color: "rgba(247,240,227,0.45)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2, lineHeight: 1.5 }}>
               {openWith === "video"
                 ? "After login you'll land on the live video stage. Tap Pick a Book when you're ready."
-                : "After login you'll land on the home menu. Tap Start Reading to begin a session."}
+                : "After login you'll see your grandchildren. Tap the big button to start reading."}
             </div>
           </div>
         </SettingsCard>
         )}
 
         {/* Profile card */}
-        <SettingsCard title="Account" icon="👤" delay="0s">
+        <SettingsCard title="Profile" icon="👤" delay="0s">
           <SettingsRow label="Name" value={nanaName || "Nana"} />
           <SettingsRow label="Reading with" value={childName || "Your grandchild"} />
           <SettingsRow label="Plan" value={<span style={{ color: AMBER, fontWeight: 700 }}>Founding Family</span>} />
@@ -7760,7 +6817,7 @@ function SettingsView({
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: "0.1em" }}>THEME</div>
             <div style={{ display: "flex", gap: 8 }}>
-              {([{k:"day",label:"Day",bg:"#FFF8EC",fg:"#0b172e"},{k:"sepia",label:"Sepia",bg:"#F4E4BC",fg:"#3a2f1b"},{k:"night",label:"Night",bg:"#1a2540",fg:"#cbd5e1"}] as const).map(t => (
+              {([{k:"day",label:"Day",bg:"#F2E4C4",fg:"#2D1A08"},{k:"bright",label:"White",bg:"#FFFFFF",fg:"#1A1A1A"},{k:"sepia",label:"Sepia",bg:"#EFE0BD",fg:"#3F2208"},{k:"night",label:"Night",bg:"#1B2030",fg:"#D8C8A8"}] as const).map(t => (
                 <button key={t.k} onClick={() => setDefaultTheme(t.k)} style={{
                   flex: 1, padding: "10px 12px", borderRadius: 12,
                   border: defaultTheme === t.k ? `2px solid ${AMBER}` : "1px solid rgba(255,255,255,0.12)",
@@ -7774,20 +6831,20 @@ function SettingsView({
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
             <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: "0.1em" }}>FONT SIZE</div>
             <div style={{ display: "flex", gap: 8 }}>
-              {(["M","L","XL"] as const).map(s => (
+              {(["S","M","L","XL"] as const).map(s => (
                 <button key={s} onClick={() => setDefaultFontSize(s)} style={{
                   flex: 1, padding: "10px 12px", borderRadius: 12,
                   border: defaultFontSize === s ? `2px solid ${AMBER}` : "1px solid rgba(255,255,255,0.12)",
                   backgroundColor: defaultFontSize === s ? "rgba(201,146,42,0.18)" : "rgba(255,255,255,0.05)",
                   color: defaultFontSize === s ? AMBER : CREAM,
                   fontFamily: "Merriweather, serif",
-                  fontSize: s === "M" ? 14 : s === "L" ? 16 : 18,
+                  fontSize: s === "S" ? 12 : s === "M" ? 14 : s === "L" ? 16 : 18,
                   fontWeight: 700, cursor: "pointer",
                 }}>{s}</button>
               ))}
             </div>
             <div style={{ color: "rgba(247,240,227,0.45)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2 }}>
-              Applies to the open book in Reading Mode. Same control as the AA toggle in the reading toolbar — change here to set the default.
+              Both iPads use this size. Same as Menu → Reading Setup while you read.
             </div>
           </div>
           {/* Page mode: single page per tap vs the open-book spread. Same
@@ -7816,45 +6873,23 @@ function SettingsView({
               </div>
             </div>
           )}
-          {/* Reading layout — surface alongside the in-toolbar dropdown so
-              Nana can pick a default layout that applies the moment she
-              enters reading mode (instead of every time she taps in). */}
-          {onLayoutChange && readingLayout && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
-              <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: "0.1em" }}>READING LAYOUT</div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 8 }}>
-                {READING_LAYOUTS.map(k => {
-                  const m = READING_LAYOUT_META[k];
-                  const active = k === readingLayout;
-                  return (
-                    <button key={k} onClick={() => onLayoutChange(k)} style={{
-                      padding: "10px 8px", borderRadius: 12,
-                      border: active ? `2px solid ${AMBER}` : "1px solid rgba(255,255,255,0.12)",
-                      backgroundColor: active ? "rgba(201,146,42,0.18)" : "rgba(255,255,255,0.05)",
-                      color: active ? AMBER : CREAM,
-                      fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700, cursor: "pointer",
-                      display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4,
-                    }}>
-                      <span style={{ fontSize: 18 }}>{m.icon}</span>
-                      <span>{m.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
         </SettingsCard>
 
-        {/* Notifications */}
+        {/* Notifications: no push or email service exists yet, so these
+            toggles stay hidden instead of pretending to work. */}
+        {false && (
         <SettingsCard title="Notifications" icon="🔔" delay="0.1s">
           <SettingsToggle label="Push notifications" sub="Get pinged when your grandchild's iPad joins" value={pushNotif} onChange={setPushNotif} />
           <SettingsToggle label="Email reminders" sub="Day-before reminder for scheduled sessions" value={emailReminder} onChange={setEmailReminder} />
         </SettingsCard>
+        )}
 
         {/* Recording */}
+        {FEATURES.recording && FEATURES.memoryVault && (
         <SettingsCard title="Recording" icon="🎬" delay="0.15s">
           <SettingsToggle label="Auto-save sessions to Memory Vault" sub="Recordings are private to your family" value={autoRecord} onChange={setAutoRecord} />
         </SettingsCard>
+        )}
 
         {/* Help & guidance — master toggle + per-phase reset. The
             corner HelpToggle handles in-the-moment on/off; this card
@@ -8110,7 +7145,7 @@ function SettingsView({
             </div>
             <div style={{ color: "rgba(247,240,227,0.78)", fontFamily: "DM Sans, sans-serif", fontSize: 13, lineHeight: 1.55, marginBottom: 14 }}>
               This permanently removes your NeverMiss account and{" "}
-              <strong>every connection, child profile, reading session, progress entry, and Memory Vault recording</strong>{" "}
+              <strong>every connection, child profile and photo, reading session, progress entry, and saved word</strong>{" "}
               tied to it. This action is immediate and cannot be undone.
             </div>
             <div style={{ color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginBottom: 6 }}>
@@ -8269,9 +7304,10 @@ function SettingsView({
   );
 }
 
-function SettingsCard({ title, icon, children, delay = "0s" }: { title: string; icon: string; children: React.ReactNode; delay?: string }) {
+function SettingsCard({ title, icon, children, delay = "0s", wide = false }: { title: string; icon: string; children: React.ReactNode; delay?: string; wide?: boolean }) {
   return (
     <div style={{
+      gridColumn: wide ? "1 / -1" : undefined,
       backgroundColor: "rgba(255,255,255,0.04)",
       border: "1px solid rgba(255,255,255,0.10)",
       borderRadius: 14, padding: "12px 14px",
@@ -8666,11 +7702,14 @@ function LearnedWordsView({
   connectionId,
   activeChildId,
   childName,
+  canRemove = true,
 }: {
   onGoHome: () => void;
   connectionId?: string;
   activeChildId?: string | null;
   childName: string;
+  /** Child's iPad: no remove (the server only lets Nana remove words). */
+  canRemove?: boolean;
 }) {
   const [words, setWords] = useState<Array<{
     id: string;
@@ -8707,20 +7746,6 @@ function LearnedWordsView({
   }, [connectionId, activeChildId]);
 
   useEffect(() => { load(); }, [load]);
-
-  const speak = (word: string) => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    try {
-      const synth = window.speechSynthesis;
-      if (synth.paused) synth.resume();
-      synth.cancel();
-      const u = new SpeechSynthesisUtterance(word);
-      u.rate = 0.85; u.pitch = 1.0; u.lang = "en-US";
-      const en = synth.getVoices().find(v => v.lang.startsWith("en"));
-      if (en) u.voice = en;
-      synth.speak(u);
-    } catch {}
-  };
 
   const remove = async (id: string) => {
     setRemoving(id);
@@ -8829,19 +7854,7 @@ function LearnedWordsView({
                       }}
                     >
                       <button
-                        onClick={() => {
-                          // Prefer the persisted dictionary audio (real
-                          // voice); fall back to Web Speech TTS on any
-                          // error (mp3 blocked, offline, etc.).
-                          if (w.audioUrl) {
-                            try {
-                              const a = new Audio(w.audioUrl);
-                              a.play().catch(() => speak(w.word));
-                              return;
-                            } catch { /* fall through to TTS */ }
-                          }
-                          speak(w.word);
-                        }}
+                        onClick={() => { void pronounce(w.word); }}
                         aria-label={`Play the word ${w.word}`}
                         style={{
                           flexShrink: 0,
@@ -8906,7 +7919,7 @@ function LearnedWordsView({
                           {new Date(w.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
                         </div>
                       </div>
-                      <button
+                      {canRemove && <button
                         onClick={() => remove(w.id)}
                         disabled={removing === w.id}
                         aria-label={`Remove ${w.word} from list`}
@@ -8922,7 +7935,7 @@ function LearnedWordsView({
                           opacity: removing === w.id ? 0.4 : 1,
                           touchAction: "manipulation",
                         }}
-                      >🗑</button>
+                      >🗑</button>}
                     </div>
                   ))}
                 </div>
@@ -9016,7 +8029,9 @@ function VaultView({ onGoHome, connectionId, activeChildId }: { onGoHome: () => 
             <div key={entry.id} style={{
               display: "flex", alignItems: "center", gap: "10px",
               backgroundColor: isLatest ? "rgba(201,146,42,0.08)" : "rgba(255,255,255,0.035)",
-              border: `1px solid ${isLatest ? "rgba(201,146,42,0.35)" : "rgba(255,255,255,0.08)"}`,
+              borderTop: `1px solid ${isLatest ? "rgba(201,146,42,0.35)" : "rgba(255,255,255,0.08)"}`,
+              borderRight: `1px solid ${isLatest ? "rgba(201,146,42,0.35)" : "rgba(255,255,255,0.08)"}`,
+              borderBottom: `1px solid ${isLatest ? "rgba(201,146,42,0.35)" : "rgba(255,255,255,0.08)"}`,
               borderLeft: `4px solid ${book.spineColor}`,
               borderRadius: "8px", padding: "14px 16px 14px 14px",
             }}>
@@ -9157,7 +8172,9 @@ function StoriesEntryCard({ entry }: { entry: FamilyStoryEntry }) {
   return (
     <div style={{
       backgroundColor: entry.isNew ? "rgba(201,146,42,0.07)" : "rgba(255,255,255,0.032)",
-      border: `1px solid ${entry.isNew ? "rgba(201,146,42,0.3)" : "rgba(255,255,255,0.07)"}`,
+      borderTop: `1px solid ${entry.isNew ? "rgba(201,146,42,0.3)" : "rgba(255,255,255,0.07)"}`,
+      borderRight: `1px solid ${entry.isNew ? "rgba(201,146,42,0.3)" : "rgba(255,255,255,0.07)"}`,
+      borderBottom: `1px solid ${entry.isNew ? "rgba(201,146,42,0.3)" : "rgba(255,255,255,0.07)"}`,
       borderLeft: `4px solid ${entry.bookColor}`,
       borderRadius: "8px", padding: "10px 11px",
     }}>
@@ -9205,6 +8222,9 @@ function FamilyStoriesView({
   activeChildId = null,
   onSelectChild,
   onOpenAddChild,
+  /** Tapping a child on the "Memory saved!" screen starts that child's
+   *  reading session straight away (Rick's Build 33). */
+  onReadWithChild,
   /** Returns Nana to her home dashboard. Wired to App.handleGoHome. */
   onGoHome,
   /** NEED 3 — chain another book in the same reading session without
@@ -9231,6 +8251,7 @@ function FamilyStoriesView({
   activeChildId?: string | null;
   onSelectChild?: (childId: string) => void;
   onOpenAddChild?: () => void;
+  onReadWithChild?: (childId: string) => void;
   onGoHome?: () => void;
   onReadAnotherBook?: () => void;
   onDisconnectSession?: () => void;
@@ -9419,6 +8440,7 @@ function FamilyStoriesView({
                     children={childrenList}
                     activeChildId={activeChildId}
                     onSelect={(id) => {
+                      if (onReadWithChild) { onReadWithChild(id); return; }
                       onSelectChild(id);
                       if (onGoHome) onGoHome();
                     }}
@@ -9652,6 +8674,126 @@ function FamilyStoriesView({
 const GOODBYE_NUMS  = [5, 4, 3, 2, 1];
 const GOODBYE_HANDS = ["🖐️", "🖖", "🤟", "✌️", "☝️"];
 
+/**
+ * Nana's end-of-visit card (Master Plan §11): who they read with, what
+ * they read, the next saved visit, and one big Home button. Returns to
+ * Home on its own after a minute so an iPad left on the stand resets.
+ */
+function VisitEndCard({ data, onHome, autoHomeMs = 60_000 }: { data: VisitEndCardData; onHome: () => void; autoHomeMs?: number }) {
+  const [left, setLeft] = useState(Math.round(autoHomeMs / 1000));
+  const onHomeRef = useRef(onHome);
+  onHomeRef.current = onHome;
+  useEffect(() => {
+    const until = Date.now() + autoHomeMs;
+    const t = window.setInterval(() => {
+      const s = Math.max(0, Math.round((until - Date.now()) / 1000));
+      setLeft(s);
+      if (s <= 0) { window.clearInterval(t); onHomeRef.current(); }
+    }, 1000);
+    return () => window.clearInterval(t);
+  }, [autoHomeMs]);
+  const initial = (data.childName.trim()[0] ?? "★").toUpperCase();
+  const next = data.nextVisitIso ? formatNextVisit(data.nextVisitIso) : "";
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Great visit with ${data.childName}`}
+      data-testid="visit-end-card"
+      style={{
+        position: "fixed", inset: 0, zIndex: 9000,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: 16,
+        background: "radial-gradient(900px 600px at 50% 20%, rgba(247,201,93,0.16), transparent 70%), linear-gradient(180deg, #13213d 0%, #0b172e 100%)",
+        animation: "phase-intro-fade 0.35s ease-out",
+      }}
+    >
+      <div style={{
+        width: "min(560px, 100%)",
+        display: "flex", flexDirection: "column", alignItems: "center", gap: 18,
+        textAlign: "center",
+      }}>
+        <div style={{ position: "relative" }}>
+          {data.childPhotoUrl ? (
+            <img
+              src={data.childPhotoUrl}
+              alt=""
+              style={{ width: 132, height: 132, borderRadius: "50%", objectFit: "cover", border: `4px solid ${AMBER}`, boxShadow: "0 10px 40px rgba(201,146,42,0.35)" }}
+            />
+          ) : (
+            <div aria-hidden style={{
+              width: 132, height: 132, borderRadius: "50%",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              background: "linear-gradient(135deg, #f7c95d, #C9922A)",
+              color: NAVY, fontFamily: "Playfair Display, serif", fontSize: 60, fontWeight: 700,
+              border: "4px solid rgba(255,255,255,0.85)",
+              boxShadow: "0 10px 40px rgba(201,146,42,0.35)",
+            }}>{initial}</div>
+          )}
+          <span aria-hidden style={{ position: "absolute", right: -6, bottom: 2, fontSize: 34 }}>💛</span>
+        </div>
+
+        <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: "clamp(30px, 4.4vw, 40px)", fontWeight: 700, lineHeight: 1.15 }}>
+          Great visit with {data.childName}!
+        </div>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
+          {data.bookTitle && (
+            <div style={endCardRowStyle}>
+              <span aria-hidden style={{ fontSize: 26 }}>{data.bookEmoji || "📖"}</span>
+              <div style={{ minWidth: 0, textAlign: "left" }}>
+                <div style={{ color: CREAM, fontSize: 18, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{data.bookTitle}</div>
+                <div style={{ color: "rgba(247,240,227,0.72)", fontSize: 15, fontWeight: 600 }}>
+                  {data.pagesRead > 0
+                    ? `Read ${data.pagesRead} page${data.pagesRead === 1 ? "" : "s"} together`
+                    : "Opened together today"}
+                  {data.chapterLabel ? ` · ${data.chapterLabel}` : ""}
+                </div>
+              </div>
+            </div>
+          )}
+          <div style={endCardRowStyle}>
+            <span aria-hidden style={{ fontSize: 26 }}>📅</span>
+            <div style={{ textAlign: "left" }}>
+              <div style={{ color: "rgba(247,240,227,0.72)", fontSize: 13, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase" }}>Next visit</div>
+              <div style={{ color: next ? CREAM : "rgba(247,240,227,0.6)", fontSize: 18, fontWeight: 800 }}>
+                {next || "Not scheduled yet"}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <button
+          onClick={onHome}
+          autoFocus
+          style={{
+            marginTop: 6,
+            width: "min(340px, 100%)", minHeight: 68,
+            borderRadius: 999, border: "none",
+            background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 60%, #d97706 100%)",
+            color: NAVY, fontFamily: "DM Sans, sans-serif", fontSize: 22, fontWeight: 800,
+            boxShadow: "0 10px 30px rgba(201,146,42,0.45)",
+            display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 10,
+            cursor: "pointer", touchAction: "manipulation",
+          }}
+        >
+          <span aria-hidden>🏠</span> Home
+        </button>
+        <div style={{ color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: 14, fontWeight: 600 }}>
+          Going Home in {left}s
+        </div>
+      </div>
+    </div>
+  );
+}
+const endCardRowStyle: React.CSSProperties = {
+  display: "flex", alignItems: "center", gap: 14,
+  padding: "14px 18px", borderRadius: 18,
+  background: "rgba(255,255,255,0.06)",
+  border: "1px solid rgba(255,255,255,0.12)",
+  fontFamily: "DM Sans, sans-serif",
+};
+
 function GoodbyeView({
   isNana,
   goodbyePhase,
@@ -9665,6 +8807,7 @@ function GoodbyeView({
   sessionSummary,
   onGoHome,
   onBackToSillyFaces,
+  onChildHangUp,
 }: {
   isNana: boolean;
   goodbyePhase: number;
@@ -9692,10 +8835,19 @@ function GoodbyeView({
   } | null;
   /** NEED 1 — Nana-side prominent Home escape. */
   onGoHome?: () => void;
+  /** Child only (Master Plan §11): runs after the hang-up celebration.
+   *  Tells Nana's iPad and leaves the call. */
+  onChildHangUp?: () => void;
 }) {
-  const bigName = isNana ? (childName || getRoleLabel("child")) : (nanaName || getRoleLabel("nana"));
-  const selfName = isNana ? (nanaName || getRoleLabel("nana")) : (childName || getRoleLabel("child"));
-
+  // Child's "Bye Nana! Tap to Hang Up!" → short celebration → hang up.
+  const [celebrating, setCelebrating] = useState(false);
+  const hangUpRef = useRef(onChildHangUp);
+  hangUpRef.current = onChildHangUp;
+  useEffect(() => {
+    if (!celebrating) return;
+    const t = window.setTimeout(() => hangUpRef.current?.(), 2600);
+    return () => window.clearTimeout(t);
+  }, [celebrating]);
   // "Ready?" pre-countdown stage: we're in goodbye mode but Nana hasn't
   // tapped Start yet. Both devices show the same shared explanation;
   // only Nana's screen has the Start button. Rick: "give Nana a Start
@@ -9713,109 +8865,130 @@ function GoodbyeView({
     { emoji: "👋",  label: "Goodbye!",    phases: [7] },
   ];
 
+  const nanaLabel = nanaName || getRoleLabel("nana");
+  const childLabel = childName || getRoleLabel("child");
+  const hint = isCountdown
+    ? `${GOODBYE_NUMS[goodbyePhase]} … put up your fingers!`
+    : isKisses ? "Blow kisses back and forth!"
+    : isLove ? "Say I love you! ❤️"
+    : null;
+
+  // Rick's Build 33: the old summary card took a third of the screen and
+  // the video was small. Now: one slim header row, two big faces side by
+  // side (the Silly Faces layout), ceremony overlays centred on the seam.
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#000", overflow: "hidden" }}>
-      <div style={{
-        backgroundColor: "rgba(255,255,255,0.04)",
-        border: "1px solid rgba(201,146,42,0.25)",
-        borderRadius: "14px", padding: "18px 16px",
-        marginBottom: "16px", textAlign: "center",
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#000", overflow: "hidden", minHeight: 0 }}>
+      <style>{`
+        .nm-goodbye-head { min-height: 52px; }
+        @media (max-height: 760px) { .nm-goodbye-head { min-height: 42px; padding-top: 4px !important; padding-bottom: 4px !important; } }
+        @media (orientation: portrait) and (max-width: 700px) {
+          .nm-goodbye-stage { flex-direction: column !important; }
+          .nm-goodbye-stage > .nm-goodbye-tile { max-width: 100% !important; }
+        }
+        @media (max-width: 900px) { .nm-goodbye-steps { display: none !important; } }
+        @keyframes nm-hangup-pulse { 0%,100% { transform: translateX(-50%) scale(1); } 50% { transform: translateX(-50%) scale(1.04); } }
+        @keyframes nm-burst {
+          0%   { transform: translate(-50%, -50%) scale(0.3); opacity: 0; }
+          15%  { opacity: 1; }
+          100% { transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) scale(1.1) rotate(25deg); opacity: 0; }
+        }
+      `}</style>
+      <div className="nm-goodbye-head" style={{
+        display: "flex", alignItems: "center", gap: 12,
+        padding: "6px 14px",
+        background: "linear-gradient(180deg, rgba(27,43,75,0.95), rgba(11,23,46,0.95))",
+        borderBottom: "1px solid rgba(201,146,42,0.25)",
+        flexShrink: 0,
       }}>
-        <div style={{ fontSize: "28px", marginBottom: "10px", letterSpacing: "-1px" }}>📖 ✨ 💕</div>
-        <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "15px", fontWeight: 700, marginBottom: "6px" }}>
-          What a wonderful reading session!
-        </div>
-        {/* Per-session stats: pages read + chapter completion (chapter
-            books). Shown only when we have something meaningful to say
-            (pagesRead > 0). For picture books just shows pages. For
-            chapter books, also surfaces "Chapter 3 · Title complete!". */}
-        {sessionSummary && sessionSummary.pagesRead > 0 && (
-          <div style={{
-            color: "rgba(247,240,227,0.85)",
-            fontFamily: "DM Sans, sans-serif", fontSize: "11.5px", fontWeight: 600,
-            lineHeight: 1.5, marginTop: "6px", marginBottom: "8px",
-            padding: "8px 10px",
-            backgroundColor: "rgba(201,146,42,0.08)",
-            borderRadius: "8px",
-            display: "inline-block",
-          }}>
-            Today you read <span style={{ color: AMBER, fontWeight: 800 }}>{sessionSummary.pagesRead}</span>
-            {" "}page{sessionSummary.pagesRead === 1 ? "" : "s"} of
-            {" "}<span style={{ color: AMBER, fontWeight: 800 }}>{sessionSummary.bookTitle}</span>.
-            {sessionSummary.chapterCompleted && (
-              <>
-                <br/>
-                <span style={{ color: "#86efac", fontWeight: 700 }}>
-                  ✓ {sessionSummary.chapterCompleted} complete
-                </span>
-                {sessionSummary.chapterProgress && (
-                  <span style={{ color: "rgba(247,240,227,0.55)" }}>
-                    {" "}· {sessionSummary.chapterProgress}
-                  </span>
-                )}
-              </>
-            )}
+        <span aria-hidden style={{ fontSize: 22, flexShrink: 0 }}>📖💕</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 17, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            What a wonderful reading session!
           </div>
-        )}
-        <div style={{ color: "rgba(247,240,227,0.65)", fontFamily: "Merriweather, serif", fontSize: "10px", fontStyle: "italic", lineHeight: 1.7 }}>
-          Reading is the vehicle.<br/>The relationship is the destination.
+          {sessionSummary && sessionSummary.pagesRead > 0 && (
+            <div style={{ color: "rgba(247,240,227,0.85)", fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              Read <span style={{ color: AMBER, fontWeight: 800 }}>{sessionSummary.pagesRead}</span> page{sessionSummary.pagesRead === 1 ? "" : "s"} of <span style={{ color: AMBER, fontWeight: 800 }}>{sessionSummary.bookTitle}</span>
+              {sessionSummary.chapterCompleted && (
+                <span style={{ color: "#86efac", fontWeight: 700 }}> · ✓ {sessionSummary.chapterCompleted}</span>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="nm-goodbye-steps" style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+          {steps.map(step => {
+            const active = !isReadyStage && step.phases.includes(goodbyePhase);
+            return (
+              <span key={step.label} style={{
+                display: "inline-flex", alignItems: "center", gap: 5,
+                padding: "5px 10px", borderRadius: 999,
+                background: active ? "rgba(201,146,42,0.22)" : "rgba(255,255,255,0.05)",
+                border: `1px solid ${active ? "rgba(201,146,42,0.7)" : "rgba(255,255,255,0.10)"}`,
+                color: active ? CREAM : "rgba(247,240,227,0.45)",
+                fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: active ? 800 : 600,
+                transition: "all 0.4s ease",
+                whiteSpace: "nowrap",
+              }}>
+                <span aria-hidden>{step.emoji}</span>{step.label}
+              </span>
+            );
+          })}
         </div>
       </div>
-      {/* Goodbye stage with the main video tile restored. Rick: "on
-          goodbye screen, no video showing — main tile video should be."
-          Ceremony overlays (Ready / Countdown / Kisses / Love / Goodbye)
-          paint over the video as absolutely-positioned siblings. The
-          video uses contain so the face shows at natural framing. */}
-      <div style={{
-        flex: "0 0 50%",
-        display: "flex", alignItems: "center", justifyContent: "center",
-        padding: 12, position: "relative", overflow: "hidden",
+
+      <div className="nm-goodbye-stage" style={{
+        flex: 1, minHeight: 0,
+        display: "flex", gap: 12, padding: 12,
+        alignItems: "stretch", justifyContent: "center",
+        position: "relative", overflow: "hidden",
         backgroundColor: "#0b172e",
         backgroundImage: "radial-gradient(720px 460px at 80% -10%, rgba(247,201,93,0.16), transparent 70%), radial-gradient(580px 420px at -10% 110%, rgba(248,113,113,0.18), transparent 70%)",
       }}>
-        <div style={{ width: "100%", maxWidth: 700, height: "100%", position: "relative" }}>
-          <FaceVideoStage
-            bigPerson={isNana ? "child" : "nana"}
-            pipPerson={isNana ? "nana" : "child"}
-            bigName={bigName}
-            pipName={selfName}
-            bigObjectFit="contain"
+        <div className="nm-goodbye-tile" style={{ flex: "1 1 0", maxWidth: "calc(50% - 6px)", minWidth: 0, display: "flex" }}>
+          <FaceVideo
+            person="nana"
+            width="100%"
+            height="100%"
+            label={nanaLabel}
+            showLabel
+            borderRadius={16}
+            objectFit="cover"
+            objectPosition="center 35%"
+            hideQualityDot={false}
+            autoMirror={isNana}
+            compact={false}
           />
         </div>
-        {/* === Ready? — pre-countdown shared explanation === */}
+        <div className="nm-goodbye-tile" style={{ flex: "1 1 0", maxWidth: "calc(50% - 6px)", minWidth: 0, display: "flex" }}>
+          <FaceVideo
+            person="child"
+            width="100%"
+            height="100%"
+            label={childLabel}
+            showLabel
+            borderRadius={16}
+            objectFit="cover"
+            objectPosition="center 35%"
+            hideQualityDot={false}
+            autoMirror={!isNana}
+            compact={false}
+          />
+        </div>
+
+        {/* === Ready? — shared explanation as a band so both faces stay visible === */}
         {isReadyStage && (
           <div style={{
-            position: "absolute", inset: 0, zIndex: 22,
-            display: "flex", flexDirection: "column",
-            alignItems: "center", justifyContent: "center",
-            backgroundColor: "rgba(11,23,46,0.78)",
-            backdropFilter: "blur(6px)",
-            padding: "20px",
+            position: "absolute", left: 0, right: 0, bottom: 0, zIndex: 22,
+            display: "flex", flexDirection: "column", alignItems: "center",
+            padding: "48px 20px 18px",
+            background: "linear-gradient(to top, rgba(11,23,46,0.95) 0%, rgba(11,23,46,0.85) 55%, rgba(11,23,46,0) 100%)",
             textAlign: "center",
             animation: "phase-intro-fade 0.3s ease-out",
           }}>
-            <div style={{ fontSize: "44px", marginBottom: "12px", letterSpacing: "-1px" }}>🖐️ → 💋</div>
-            <div style={{
-              color: AMBER,
-              fontFamily: "Playfair Display, serif",
-              fontSize: "22px", fontWeight: 700,
-              lineHeight: 1.3, marginBottom: "12px",
-              maxWidth: "420px",
-            }}>
-              OK! Out loud together, count down from 5 …
-            </div>
-            <div style={{
-              color: CREAM,
-              fontFamily: "Merriweather, serif",
-              fontSize: "15px", lineHeight: 1.6,
-              maxWidth: "380px", marginBottom: "20px",
-              opacity: 0.85,
-              fontStyle: "italic",
-            }}>
-              … then blow kisses goodbye! Ready?
+            <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "clamp(20px, 2.6vw, 26px)", fontWeight: 700, lineHeight: 1.25 }}>
+              🖐️ Out loud together, count down from 5 … then blow kisses! 💋
             </div>
             {isNana ? (
-              <div style={{ display: "inline-flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
+              <div style={{ display: "inline-flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "center", marginTop: 14 }}>
                 <ProminentHomePill onClick={onGoHome} />
                 {onBackToSillyFaces && (
                   <button
@@ -9827,69 +9000,61 @@ function GoodbyeView({
                       borderRadius: 999,
                       padding: "11px 20px",
                       fontFamily: "DM Sans, sans-serif",
-                      fontSize: "clamp(13px, 1.55vw, 15px)",
-                      fontWeight: 800, letterSpacing: "0.04em",
+                      fontSize: "clamp(14px, 1.6vw, 16px)",
+                      fontWeight: 800, letterSpacing: "0.03em",
                       cursor: "pointer",
                       display: "inline-flex", alignItems: "center", gap: 8,
-                      minHeight: 44, touchAction: "manipulation",
+                      minHeight: 52, touchAction: "manipulation",
                     }}
                   >
-                    <span aria-hidden style={{ fontSize: 16 }}>🎭</span>
+                    <span aria-hidden style={{ fontSize: 18 }}>🎭</span>
                     <span>Back to Silly Faces</span>
                   </button>
                 )}
                 <button
                   onClick={onBeginCountdown}
                   style={{
-                    backgroundColor: AMBER,
-                    color: NAVY,
-                    border: "none",
-                    borderRadius: "999px",
-                    padding: "14px 28px",
-                    fontSize: "16px",
-                    fontFamily: "DM Sans, sans-serif",
-                    fontWeight: 800,
-                    letterSpacing: "0.04em",
+                    backgroundColor: AMBER, color: NAVY, border: "none",
+                    borderRadius: 999, padding: "14px 30px",
+                    fontSize: "clamp(16px, 1.9vw, 19px)",
+                    fontFamily: "DM Sans, sans-serif", fontWeight: 800, letterSpacing: "0.03em",
                     cursor: "pointer",
                     boxShadow: "0 6px 22px rgba(201,146,42,0.45)",
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: "8px",
+                    display: "inline-flex", alignItems: "center", gap: 8,
+                    minHeight: 56, touchAction: "manipulation",
                   }}
                 >
-                  Start Countdown →
+                  <span aria-hidden>👋</span> Ready to Say Goodbye
                 </button>
               </div>
             ) : (
               <div style={{
-                color: "rgba(247,240,227,0.55)",
-                fontFamily: "DM Sans, sans-serif",
-                fontSize: "13px",
-                letterSpacing: "0.06em",
-                display: "inline-flex", alignItems: "center", gap: "8px",
+                marginTop: 14,
+                color: "rgba(247,240,227,0.8)",
+                fontFamily: "DM Sans, sans-serif", fontSize: 17, fontWeight: 600,
+                display: "inline-flex", alignItems: "center", gap: 8,
                 padding: "10px 18px",
-                border: "1px dashed rgba(255,255,255,0.18)",
-                borderRadius: "999px",
+                border: "1px dashed rgba(255,255,255,0.25)",
+                borderRadius: 999,
               }}>
-                <span style={{ fontSize: "16px", animation: "pulse-sm 1.4s ease-in-out infinite" }}>⏳</span>
-                Waiting for {nanaName || "Nana"} to start…
+                <span style={{ fontSize: 18, animation: "pulse-sm 1.4s ease-in-out infinite" }}>⏳</span>
+                Waiting for {nanaLabel} to start…
               </div>
             )}
           </div>
         )}
 
-        {/* === Countdown === Rick: "Make the font larger and use white
-            so the countdown text is much more visible and pronounced." */}
+        {/* === Countdown === centred on the seam between the two faces */}
         {isCountdown && (
           <div
             key={`countdown-${goodbyePhase}`}
             className="nm-num-pop"
             style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", textAlign: "center", zIndex: 20, pointerEvents: "none" }}
           >
-            <div style={{ fontSize: "180px", lineHeight: 0.9, fontWeight: 900, fontFamily: "DM Sans, sans-serif", color: "#ffffff", textShadow: "0 6px 36px rgba(0,0,0,1.0), 0 0 80px rgba(255,255,255,0.45), 0 0 140px rgba(255,255,255,0.30)" }}>
+            <div style={{ fontSize: "clamp(120px, 24vh, 200px)", lineHeight: 0.9, fontWeight: 900, fontFamily: "DM Sans, sans-serif", color: "#ffffff", textShadow: "0 6px 36px rgba(0,0,0,1.0), 0 0 80px rgba(255,255,255,0.45), 0 0 140px rgba(255,255,255,0.30)" }}>
               {GOODBYE_NUMS[goodbyePhase]}
             </div>
-            <div style={{ fontSize: "56px", marginTop: "10px" }}>{GOODBYE_HANDS[goodbyePhase]}</div>
+            <div style={{ fontSize: "clamp(44px, 7vh, 64px)", marginTop: "10px" }}>{GOODBYE_HANDS[goodbyePhase]}</div>
           </div>
         )}
 
@@ -9897,19 +9062,16 @@ function GoodbyeView({
         {isKisses && (
           <div style={{ position: "absolute", inset: 0, zIndex: 20, overflow: "hidden", pointerEvents: "none" }}>
             {[0,1,2,3,4].map(i => (
-              <span key={i} style={{ position: "absolute", top: `${14 + i * 13}%`, left: "50%", fontSize: i % 2 === 0 ? "38px" : "30px", display: "inline-block", animation: `${i % 2 === 0 ? "kiss-lr" : "kiss-rl"} 1.5s ease-in-out ${i * 0.38}s infinite`, pointerEvents: "none" }}>💋</span>
+              <span key={i} style={{ position: "absolute", top: `${14 + i * 13}%`, left: "50%", fontSize: i % 2 === 0 ? "44px" : "34px", display: "inline-block", animation: `${i % 2 === 0 ? "kiss-lr" : "kiss-rl"} 1.5s ease-in-out ${i * 0.38}s infinite`, pointerEvents: "none" }}>💋</span>
             ))}
-            <div style={{ position: "absolute", bottom: "14%", left: "50%", transform: "translateX(-50%)", color: "white", fontFamily: "DM Sans, sans-serif", fontSize: "17px", fontWeight: 700, textShadow: "0 2px 10px rgba(0,0,0,0.9)", whiteSpace: "nowrap", animation: "fade-in 0.4s ease-out forwards" }}>
-              Blow kisses! 😘
-            </div>
           </div>
         )}
 
         {/* === I Love You === */}
         {isLove && (
           <div style={{ position: "absolute", top: "45%", left: "50%", transform: "translateX(-50%) translateY(-50%)", textAlign: "center", zIndex: 20, animation: "fade-in 0.5s ease-out forwards", pointerEvents: "none" }}>
-            <span style={{ fontSize: "76px", display: "inline-block", animation: "heart-beat 0.9s ease-in-out infinite" }}>❤️</span>
-            <div style={{ color: "white", fontFamily: "Playfair Display, serif", fontSize: "24px", fontWeight: 700, textShadow: "0 2px 14px rgba(0,0,0,0.95)", marginTop: "10px", whiteSpace: "nowrap" }}>
+            <span style={{ fontSize: "clamp(76px, 13vh, 110px)", display: "inline-block", animation: "heart-beat 0.9s ease-in-out infinite" }}>❤️</span>
+            <div style={{ color: "white", fontFamily: "Playfair Display, serif", fontSize: "clamp(26px, 4vh, 36px)", fontWeight: 700, textShadow: "0 2px 14px rgba(0,0,0,0.95)", marginTop: "10px", whiteSpace: "nowrap" }}>
               I Love You!
             </div>
           </div>
@@ -9918,117 +9080,148 @@ function GoodbyeView({
         {/* === Goodbye === */}
         {isGoodbye && (
           <div style={{ position: "absolute", top: "42%", left: "50%", transform: "translateX(-50%) translateY(-50%)", textAlign: "center", zIndex: 20, animation: "fade-in 0.5s ease-out forwards", pointerEvents: "none" }}>
-            <span style={{ fontSize: "76px", display: "inline-block", animation: "wave-hand 1.2s ease-in-out infinite", transformOrigin: "bottom center" }}>👋</span>
-            <div style={{ color: "white", fontFamily: "Playfair Display, serif", fontSize: "26px", fontWeight: 700, textShadow: "0 2px 14px rgba(0,0,0,0.95)", marginTop: "10px" }}>
+            <span style={{ fontSize: "clamp(76px, 13vh, 110px)", display: "inline-block", animation: "wave-hand 1.2s ease-in-out infinite", transformOrigin: "bottom center" }}>👋</span>
+            <div style={{ color: "white", fontFamily: "Playfair Display, serif", fontSize: "clamp(28px, 4.4vh, 38px)", fontWeight: 700, textShadow: "0 2px 14px rgba(0,0,0,0.95)", marginTop: "10px" }}>
               Goodbye! 💕
             </div>
-            <div style={{ color: "rgba(255,255,255,0.68)", fontFamily: "Playfair Display, serif", fontSize: "12px", fontStyle: "italic", textShadow: "0 1px 8px rgba(0,0,0,0.95)", marginTop: "10px", whiteSpace: "nowrap" }}>
-              Turn the page, strengthen the bond.
+            <div style={{ color: "rgba(255,255,255,0.75)", fontFamily: "Playfair Display, serif", fontSize: 15, fontStyle: "italic", textShadow: "0 1px 8px rgba(0,0,0,0.95)", marginTop: "10px", lineHeight: 1.5 }}>
+              Reading is the vehicle.<br/>The relationship is the destination.
+            </div>
+            {isNana && (
+              <div style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 17, fontWeight: 700, textShadow: "0 1px 8px rgba(0,0,0,0.95)", marginTop: 14 }}>
+                {childLabel} can tap to hang up 👋
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* === Child's hang-up target (Master Plan §11) === */}
+        {isGoodbye && !isNana && onChildHangUp && !celebrating && (
+          <button
+            data-testid="child-hangup"
+            onClick={() => setCelebrating(true)}
+            style={{
+              position: "absolute", left: "50%", bottom: 22, transform: "translateX(-50%)", zIndex: 24,
+              width: "min(520px, calc(100% - 32px))", minHeight: 96,
+              borderRadius: 999, border: "4px solid rgba(255,255,255,0.9)",
+              background: "linear-gradient(135deg, #fb7185 0%, #f43f5e 50%, #e11d48 100%)",
+              color: "#fff", fontFamily: "DM Sans, sans-serif",
+              fontSize: "clamp(24px, 3.2vw, 32px)", fontWeight: 900, letterSpacing: "0.01em",
+              boxShadow: "0 12px 40px rgba(244,63,94,0.55), 0 0 0 10px rgba(251,113,133,0.18)",
+              display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 14,
+              cursor: "pointer", touchAction: "manipulation",
+              animation: "nm-hangup-pulse 1.6s ease-in-out infinite",
+            }}
+          >
+            <span aria-hidden style={{ fontSize: 40 }}>👋</span>
+            Bye {nanaLabel}! Tap to Hang Up!
+          </button>
+        )}
+
+        {/* === Hang-up celebration: hearts, confetti, stars, kisses === */}
+        {celebrating && (
+          <div data-testid="hangup-celebration" style={{ position: "absolute", inset: 0, zIndex: 30, overflow: "hidden", pointerEvents: "none", background: "radial-gradient(circle at 50% 55%, rgba(251,113,133,0.25), rgba(11,23,46,0.55) 70%)" }}>
+            {Array.from({ length: 28 }, (_, i) => {
+              const glyphs = ["💖", "🎉", "⭐", "💋", "🎊", "✨", "💕", "🌟"];
+              const angle = (i / 28) * Math.PI * 2;
+              const dist = 30 + (i % 4) * 9;
+              return (
+                <span key={i} style={{
+                  position: "absolute", left: "50%", top: "55%",
+                  fontSize: 28 + (i % 3) * 10,
+                  ["--dx" as string]: `${Math.cos(angle) * dist}vw`,
+                  ["--dy" as string]: `${Math.sin(angle) * dist * 0.8}vh`,
+                  animation: `nm-burst 1.9s cubic-bezier(0.16,1,0.3,1) ${(i % 7) * 0.06}s both`,
+                } as React.CSSProperties}>{glyphs[i % glyphs.length]}</span>
+              );
+            })}
+            <div style={{ position: "absolute", left: 0, right: 0, top: "38%", textAlign: "center", color: "#fff", fontFamily: "Playfair Display, serif", fontSize: "clamp(34px, 5vw, 52px)", fontWeight: 700, textShadow: "0 3px 18px rgba(0,0,0,0.85)", animation: "fade-in 0.4s ease-out both" }}>
+              Bye-bye! See you soon! 💕
             </div>
           </div>
         )}
 
-        {/* Corner instruction card — bottom-left */}
-        <div style={{ position: "absolute", bottom: "12px", left: "12px", zIndex: 10, backgroundColor: "rgba(0,0,0,0.72)", backdropFilter: "blur(8px)", borderRadius: "10px", padding: "8px 10px 6px", border: "1px solid rgba(255,255,255,0.11)" }}>
-          {steps.map(step => {
-            const active = step.phases.includes(goodbyePhase);
-            return (
-              <div key={step.label} style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "3px", opacity: active ? 1 : 0.28, transition: "opacity 0.5s" }}>
-                <span style={{ fontSize: "13px" }}>{step.emoji}</span>
-                <span style={{ color: "white", fontFamily: "DM Sans, sans-serif", fontSize: "10px", fontWeight: active ? 700 : 400 }}>{step.label}</span>
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Name dot — bottom-right */}
-        <div style={{ position: "absolute", bottom: "12px", right: "14px", display: "flex", alignItems: "center", gap: "6px", zIndex: 10 }}>
-          <div style={{ width: "7px", height: "7px", borderRadius: "50%", backgroundColor: "#22c55e", boxShadow: "0 0 6px #22c55e" }} />
-          <span style={{ color: "white", fontFamily: "DM Sans, sans-serif", fontSize: "12px", fontWeight: 700, textShadow: "0 1px 6px rgba(0,0,0,0.9)" }}>{bigName}</span>
-        </div>
-      </div>
-
-      {/* Bottom strip */}
-      <div style={{
-        backgroundColor: "#0b172e",
-        padding: "12px 16px",
-        borderTop: "1px solid rgba(255,255,255,0.08)",
-        display: "flex", gap: "10px",
-        alignItems: "center",
-        justifyContent: isGoodbye ? "center" : "space-between",
-      }}>
-        {!isGoodbye ? (
-          <>
-            <span style={{ flex: 1, color: "rgba(255,255,255,0.42)", fontFamily: "DM Sans, sans-serif", fontSize: "11px" }}>
-              {isCountdown ? `${GOODBYE_NUMS[goodbyePhase]} — put up your fingers!` : isKisses ? "Blow kisses back and forth!" : "Say I love you! ❤️"}
-            </span>
-            {/* Skip button — Nana-only. Rick: "remove [Skip] from
-                the child's UI." */}
-            {isNana && (
-              <TileButton
-                icon="⏭"
-                label="Skip"
-                tone="ghost"
-                size="sm"
-                onClick={onSkipToGoodbye}
-              />
-            )}
-          </>
-        ) : (
-          /* Rick's Aug 14 feedback #8: "bring back the hang up / sign
-             off button alongside Save a Memory rather than instead of
-             it." Two side-by-side CTAs: primary amber for Save (still
-             the recommended path), secondary outline for a quick end-
-             without-saving. Both eventually end the call — Save routes
-             through the memory-write screen first, Hang Up ends
-             immediately. */
-          <div style={{ display: "inline-flex", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
-            <button
-              onClick={onEndSession}
-              style={{
-                background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
-                color: NAVY,
-                border: "none",
-                borderRadius: 999,
-                padding: "14px 24px",
-                fontFamily: "DM Sans, sans-serif",
-                fontSize: "clamp(14px, 1.7vw, 16px)",
-                fontWeight: 800,
-                letterSpacing: "0.04em",
-                cursor: "pointer",
-                boxShadow: "0 6px 22px rgba(201,146,42,0.45)",
-                display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 10,
-                minHeight: 56, minWidth: 200,
-                touchAction: "manipulation",
-              }}
-            >
-              <span style={{ fontSize: 20 }}>💛</span>
-              Save a Memory →
-            </button>
-            <button
-              onClick={() => (onHangUp ?? onEndSession)()}
-              style={{
-                background: "rgba(255,255,255,0.06)",
-                color: CREAM,
-                border: `1px solid rgba(255,255,255,0.28)`,
-                borderRadius: 999,
-                padding: "14px 22px",
-                fontFamily: "DM Sans, sans-serif",
-                fontSize: "clamp(13px, 1.55vw, 15px)",
-                fontWeight: 700,
-                letterSpacing: "0.02em",
-                cursor: "pointer",
-                display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
-                minHeight: 56, minWidth: 180,
-                touchAction: "manipulation",
-              }}
-            >
-              <span style={{ fontSize: 18 }}>👋</span>
-              Hang Up
-            </button>
+        {/* Hint pill — both iPads, bottom centre of the stage. */}
+        {hint && (
+          <div style={{
+            position: "absolute", left: "50%", bottom: 16, transform: "translateX(-50%)", zIndex: 21,
+            padding: "8px 16px", borderRadius: 999,
+            background: "rgba(0,0,0,0.65)", backdropFilter: "blur(6px)",
+            border: "1px solid rgba(255,255,255,0.14)",
+            color: "white", fontFamily: "DM Sans, sans-serif", fontSize: 16, fontWeight: 700,
+            whiteSpace: "nowrap", pointerEvents: "none",
+          }}>
+            {hint}
           </div>
         )}
       </div>
+
+      {/* Footer — Nana only. A child alone on the iPad can't skip or end
+          the call; Nana finishes up for both. */}
+      {isNana && !isReadyStage && (
+        <div style={{
+          backgroundColor: "#0b172e",
+          padding: "10px 16px",
+          borderTop: "1px solid rgba(255,255,255,0.08)",
+          display: "flex", gap: 10, alignItems: "center",
+          justifyContent: isGoodbye ? "center" : "flex-end",
+          flexShrink: 0, minHeight: 64,
+        }}>
+          {!isGoodbye ? (
+            <button
+              onClick={onSkipToGoodbye}
+              style={{
+                background: "rgba(255,255,255,0.06)", color: CREAM,
+                border: "1px solid rgba(255,255,255,0.28)", borderRadius: 999,
+                padding: "10px 22px", minHeight: 48,
+                fontFamily: "DM Sans, sans-serif", fontSize: 16, fontWeight: 700,
+                cursor: "pointer", touchAction: "manipulation",
+                display: "inline-flex", alignItems: "center", gap: 8,
+              }}
+            >
+              <span aria-hidden>⏭</span> Skip to goodbye
+            </button>
+          ) : (
+            <div style={{ display: "inline-flex", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
+              {FEATURES.familyJournal && (
+              <button
+                onClick={onEndSession}
+                style={{
+                  background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+                  color: NAVY, border: "none", borderRadius: 999,
+                  padding: "14px 24px",
+                  fontFamily: "DM Sans, sans-serif", fontSize: "clamp(15px, 1.8vw, 17px)", fontWeight: 800, letterSpacing: "0.03em",
+                  cursor: "pointer",
+                  boxShadow: "0 6px 22px rgba(201,146,42,0.45)",
+                  display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 10,
+                  minHeight: 56, minWidth: 210,
+                  touchAction: "manipulation",
+                }}
+              >
+                <span style={{ fontSize: 20 }}>💛</span>
+                Save a Memory →
+              </button>
+              )}
+              <button
+                onClick={() => (onHangUp ?? onEndSession)()}
+                style={{
+                  background: "rgba(255,255,255,0.06)", color: CREAM,
+                  border: "1px solid rgba(255,255,255,0.28)", borderRadius: 999,
+                  padding: "14px 22px",
+                  fontFamily: "DM Sans, sans-serif", fontSize: "clamp(14px, 1.7vw, 16px)", fontWeight: 700, letterSpacing: "0.02em",
+                  cursor: "pointer",
+                  display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
+                  minHeight: 56, minWidth: 180,
+                  touchAction: "manipulation",
+                }}
+              >
+                <span style={{ fontSize: 18 }}>👋</span>
+                Hang Up
+              </button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -10583,7 +9776,12 @@ function SillyFacesView({
             to scheduling without going home first. Save Session
             short-circuits the ceremony entirely; Goodbye is the
             normal "complete the session" path. */}
+        {/* Nana drives the wrap-up. The child's copy of these buttons
+            only changed the child's own screen, which split the two
+            iPads (Build 38 research), so the child no longer sees them. */}
+        {isNana && (
         <div style={{ display: "flex", gap: 6 }}>
+          {FEATURES.familyJournal && (
           <button
             onClick={onEndSession}
             style={{
@@ -10604,6 +9802,7 @@ function SillyFacesView({
             <span style={{ fontSize: 14 }}>💾</span>
             Save
           </button>
+          )}
           <button
             onClick={onStartParentCheck}
             style={{
@@ -10647,6 +9846,7 @@ function SillyFacesView({
             Goodbye →
           </button>
         </div>
+        )}
         {/* NEED 1 — explicit Home pill so the small NavStrip icon at the
             top of the chrome isn't the only Home affordance. */}
         {isNana && (
@@ -10768,11 +9968,14 @@ function ParentCheckView({
   onAccept,
   onResetProposal,
   onGoHome,
+  onBack,
   childName,
   nanaName,
   partnerRequestedReschedule,
 }: {
   isNana: boolean;
+  /** Nana only: leave scheduling (Master Plan §9: never trapped). */
+  onBack?: () => void;
   onStartSillyFaces: () => void;
   /** Rick's Feature 5: lets Nana skip Silly Faces and go straight to
    *  the Goodbye countdown after scheduling. Useful when she already
@@ -10807,6 +10010,16 @@ function ParentCheckView({
   const [selMin, setSelMin] = useState<string>("00");
   const [selAmPm, setSelAmPm] = useState<string>("PM");
   const pickedTime = `${selHour}:${selMin} ${selAmPm}`;
+  // One-line confirmation under the calendar buttons so a tap never
+  // looks like it did nothing.
+  const [calStatus, setCalStatus] = useState<string | null>(null);
+  const calStatusTimerRef = useRef<number | null>(null);
+  const flashCalStatus = (msg: string) => {
+    if (calStatusTimerRef.current) window.clearTimeout(calStatusTimerRef.current);
+    setCalStatus(msg);
+    calStatusTimerRef.current = window.setTimeout(() => setCalStatus(null), 4000);
+  };
+  useEffect(() => () => { if (calStatusTimerRef.current) window.clearTimeout(calStatusTimerRef.current); }, []);
 
   const childLabel = childName || getRoleLabel("child");
   const nanaLabel = nanaName || getRoleLabel("nana");
@@ -10962,16 +10175,32 @@ function ParentCheckView({
         borderBottom: "1px solid rgba(255,255,255,0.08)",
         backgroundColor: "rgba(11,23,46,0.55)",
       }}>
+        {isNana && onBack && (
+          <button
+            type="button"
+            onClick={onBack}
+            data-testid="schedule-back"
+            style={{
+              minHeight: 46, padding: "0 18px", borderRadius: 999,
+              background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.25)",
+              color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 16, fontWeight: 800,
+              display: "inline-flex", alignItems: "center", gap: 8,
+              cursor: "pointer", touchAction: "manipulation",
+            }}
+          >
+            <span aria-hidden style={{ fontSize: 18 }}>←</span> Back
+          </button>
+        )}
         <div style={{
           display: "inline-flex", alignItems: "center", gap: 6,
-          padding: "5px 10px", borderRadius: 999,
+          padding: "6px 12px", borderRadius: 999,
           backgroundColor: "rgba(34,197,94,0.10)",
           border: "1px solid rgba(34,197,94,0.55)",
           color: "#86efac",
-          fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800,
-          letterSpacing: "0.16em",
+          fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 800,
+          letterSpacing: "0.14em",
         }}>
-          💬 QUICK CHECK-IN
+          📅 NEXT READING TIME
         </div>
       </div>
 
@@ -11014,10 +10243,10 @@ function ParentCheckView({
               old. Something warmer and more direct would work better."
               Also fixed the hardcoded names so it uses the actual nana /
               child display names instead of literal "Perry" / "Nana". */}
-          <span style={{ color: "#dcfce7", fontFamily: "DM Sans, sans-serif", fontSize: "clamp(13px, 1.7vw, 15px)", fontWeight: 700, lineHeight: 1.4, flex: 1, position: "relative", zIndex: 1 }}>
+          <span style={{ color: "#dcfce7", fontFamily: "DM Sans, sans-serif", fontSize: "clamp(16px, 2vw, 19px)", fontWeight: 800, lineHeight: 1.4, flex: 1, position: "relative", zIndex: 1 }}>
             {isNana
-              ? `Want to catch up with ${childLabel}'s family for a minute?`
-              : `Go grab Mom or Dad — ${nanaLabel} wants to catch up with them!`}
+              ? `Ask ${childLabel} to get Mom, Dad, or a grown-up so you can pick your next reading time together.`
+              : `Go get Mom, Dad, or a grown-up! ${nanaLabel} wants to pick our next reading time.`}
           </span>
         </div>
 
@@ -11112,7 +10341,10 @@ function ParentCheckView({
                       tone="secondary"
                       size="md"
                       style={{ width: "100%" }}
-                      onClick={() => openCalendarUrl(formatForGoogle(scheduledDate), scheduledDate)}
+                      onClick={() => {
+                        openCalendarUrl(formatForGoogle(scheduledDate));
+                        flashCalStatus("Opening Google Calendar in Safari…");
+                      }}
                     />
                     <TileButton
                       icon="📅"
@@ -11120,7 +10352,16 @@ function ParentCheckView({
                       tone="secondary"
                       size="md"
                       style={{ width: "100%" }}
-                      onClick={() => downloadICS(scheduledDate)}
+                      onClick={() => {
+                        flashCalStatus("Opening your calendar…");
+                        void addToAppleCalendar(scheduledDate).then(r => {
+                          if (r === "added") flashCalStatus("Added to your calendar ✓");
+                          else if (r === "canceled") setCalStatus(null);
+                          else if (r === "safari") flashCalStatus("Tap “Add to Calendar” in Safari, then come back.");
+                          else if (r === "downloaded") flashCalStatus("Calendar file downloaded ✓");
+                          else flashCalStatus("Couldn't open the calendar. Tap Copy and paste it instead.");
+                        });
+                      }}
                     />
                     <TileButton
                       icon="📅"
@@ -11128,7 +10369,10 @@ function ParentCheckView({
                       tone="secondary"
                       size="md"
                       style={{ width: "100%" }}
-                      onClick={() => openCalendarUrl(formatForOutlook(scheduledDate), scheduledDate)}
+                      onClick={() => {
+                        openCalendarUrl(formatForOutlook(scheduledDate));
+                        flashCalStatus("Opening Outlook in Safari…");
+                      }}
                     />
                     <TileButton
                       icon="📋"
@@ -11139,10 +10383,21 @@ function ParentCheckView({
                       onClick={() => {
                         const tz = scheduledDate.toLocaleTimeString('en-US', { timeZoneName: 'short' }).split(' ').pop() ?? '';
                         const msg = `NeverMiss Reading Session: ${scheduledDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })} at ${scheduledDate.toLocaleTimeString([], {hour: "2-digit", minute:"2-digit"})} ${tz}. Open NeverMiss to join! nevermiss.family`;
-                        navigator.clipboard.writeText(msg);
+                        navigator.clipboard.writeText(msg)
+                          .then(() => flashCalStatus("Copied ✓ Paste it into a text or email."))
+                          .catch(() => flashCalStatus("Couldn't copy on this iPad."));
                       }}
                     />
                   </TileGrid>
+                  {calStatus && (
+                    <div role="status" style={{
+                      marginTop: 10, textAlign: "center",
+                      color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 700,
+                      animation: "fade-in 0.2s ease-out",
+                    }}>
+                      {calStatus}
+                    </div>
+                  )}
                 </div>
               );
             })()}
@@ -11391,7 +10646,7 @@ function ParentCheckView({
           }}
         >
           <span style={{ fontSize: 20 }}>🎭</span>
-          Silly Faces →
+          {isNana ? (showPicker ? "Skip to Silly Faces" : "Silly Faces →") : `Ask for Silly Faces`}
         </button>
         {/* Goodbye Countdown — Rick's Feature 5: skip Silly Faces and
             go straight to Goodbye if Nana already did the laughing
@@ -11406,7 +10661,7 @@ function ParentCheckView({
           }}
         >
           <span style={{ fontSize: 20 }}>👋</span>
-          Goodbye →
+          {isNana ? (showPicker ? "Skip to Goodbye" : "Goodbye →") : "Ready to say goodbye"}
         </button>
       </div>
     </div>
@@ -11547,6 +10802,7 @@ function DeviceFrame({
   onSkipToGoodbye,
   onEndSession,
   onHangUp,
+  onChildHangUp,
   showConsentOverlay,
   recordingOn,
   onToggleRecording,
@@ -11576,6 +10832,7 @@ function DeviceFrame({
   activeChildId,
   onSelectChild,
   onOpenAddChild,
+  onReadWithChild,
   pinScreenExpectedChild,
   familyStoriesSubMode,
   familyStoryEntries,
@@ -11629,20 +10886,11 @@ function DeviceFrame({
   onGoHome,
   pointerHighlight = null,
   onPointer,
-  wordHighlight = null,
-  onWord,
-  onWordSay,
-  onWordSoundOut,
-  onWordDefine,
-  onWordSave,
-  wordDefinition = null,
-  wordSaveState = null,
-  onWordActionsClose,
+  wordSelection = null,
+  onSelectWord,
   onSelectionPronounce,
   onSelectionPhonics,
   onSelectionSave,
-  onShareSelection,
-  remoteSelection = null,
   onPerryPickBook,
   onPerryAskNana,
   onOpenBookRequest,
@@ -11659,7 +10907,8 @@ function DeviceFrame({
   pageMode = "double",
   pageSide = "L",
   onPageModeChange,
-  chunkSize = 1,
+  pagePlan = null,
+  onPageProfile,
   currentReaction = null,
   onReact,
   readingStartedAt = Date.now(),
@@ -11669,6 +10918,21 @@ function DeviceFrame({
   onLibraryScroll,
   libraryScrollTop,
   onSignOut,
+  readingPos = null,
+  phonicsCardOpen = false,
+  perryHereChildId = null,
+  nextVisitIso = null,
+  homeContinueBook = null,
+  onHomePrimary,
+  onSetChildPhoto,
+  onRemoveChildPhoto,
+  onUpdateChild,
+  onCloseLearnedWords,
+  onJumpToPage,
+  pointerMode = "finger",
+  onPointerModeChange,
+  onNavBack,
+  visitActive = false,
 }: {
   label: string;
   isNana: boolean;
@@ -11725,6 +10989,8 @@ function DeviceFrame({
   onEndSession: () => void;
   /** Rick's Aug 14 #8 — hang up without memory-save detour. */
   onHangUp?: () => void;
+  /** Child's iPad: "Bye Nana! Tap to Hang Up!" at the end of Goodbye. */
+  onChildHangUp?: () => void;
   showConsentOverlay: boolean;
   recordingOn: boolean;
   onToggleRecording: () => void;
@@ -11764,6 +11030,8 @@ function DeviceFrame({
   activeChildId: string | null;
   onSelectChild: (childId: string) => void;
   onOpenAddChild: () => void;
+  /** Switch to this child and start their reading session. */
+  onReadWithChild?: (childId: string) => void;
   pinScreenExpectedChild?: Child | null;
   currentBookTitle: string;
   currentBookEmoji: string;
@@ -11825,30 +11093,19 @@ function DeviceFrame({
   onGoHome?: () => void;
   pointerHighlight?: { x: number; y: number; page: number; ts: number } | null;
   onPointer?: (x: number, y: number, page: number) => void;
-  wordHighlight?: WordHighlightState | null;
-  onWord?: (side: "L" | "R", index: number, page: number) => void;
-  /** Word action bar wiring — Rick's Aug 8 phonics + review feature. */
-  onWordSay?: (word: string) => void;
-  onWordSoundOut?: (word: string) => void;
-  onWordDefine?: (word: string) => void;
-  onWordSave?: (word: string, sentence: string) => void;
-  wordDefinition?: { word: string; text: string } | null;
-  wordSaveState?: { word: string; status: "saving" | "saved" | "already" } | null;
-  onWordActionsClose?: () => void;
-  /** Rick's Aug 14 rewrite (#7-11): iOS native selection wiring. */
+  /** Word highlighted on both iPads (tap to pick). */
+  wordSelection?: WordSelection | null;
+  onSelectWord?: (sel: { wid: string; word: string; sentence: string } | null) => void;
+  /** Nana-only word actions. */
   onSelectionPronounce?: (word: string) => void;
   onSelectionPhonics?: (word: string) => void;
   onSelectionSave?: (word: string, sentence: string) => void;
-  /** Perry-only: broadcast selection to Nana. */
-  onShareSelection?: (word: string, sentence: string) => void;
-  /** Nana-only: the word Perry most recently highlighted. */
-  remoteSelection?: { word: string; sentence: string; ts: number } | null;
   /** Perry-only: pill handlers that publish perry_request SSE events. */
   onPerryPickBook?: () => void;
   onPerryAskNana?: () => void;
   /** Nana-only (for now): opens the "Request a book we don't have"
    *  modal. Rick's Sep 2026 library-search family flow. */
-  onOpenBookRequest?: () => void;
+  onOpenBookRequest?: (query?: string) => void;
   /** Rick's Sep 25 (C-3): opens the Send Feedback modal. Available
    *  to both Nana and Perry from the Menu drawer. */
   onOpenFeedback?: () => void;
@@ -11867,8 +11124,9 @@ function DeviceFrame({
   pageMode?: "single" | "double";
   pageSide?: "L" | "R";
   onPageModeChange?: (m: "single" | "double") => void;
-  /** Wish 2 chunking — passed to BookSpread → BookContent. */
-  chunkSize?: number;
+  /** Shared page plan + this iPad's measured reading box. */
+  pagePlan?: PagePlan | null;
+  onPageProfile?: (p: PageProfile) => void;
   currentReaction?: ReactionEvent | null;
   onReact?: (emoji: ReactionEmoji) => void;
   readingStartedAt?: number;
@@ -11891,6 +11149,32 @@ function DeviceFrame({
   /** Nana-side sign out — publishes session_reset to Perry, logs out
    *  server-side, and returns the device to the splash screen. */
   onSignOut?: () => void;
+  /** Where this iPad is in the book (the nav pill and Chapters & Pages). */
+  readingPos?: { pageNum: number; pageTotal: number; atStart: boolean; atEnd: boolean; chapterLabel: string | null } | null;
+  /** Nana's phonics card is up: the reading pointer steps aside. */
+  phonicsCardOpen?: boolean;
+  /** Home (Build 38): who is on the child's iPad, the next saved visit,
+   *  the selected child's book in progress and the one big button. */
+  perryHereChildId?: string | null;
+  nextVisitIso?: string | null;
+  homeContinueBook?: { title: string; emoji: string } | null;
+  onHomePrimary?: () => void;
+  /** Grandchild profile edits (Home "Add photo", Settings card). */
+  onSetChildPhoto?: (childId: string, dataUrl: string) => Promise<void>;
+  onRemoveChildPhoto?: (childId: string) => Promise<void>;
+  onUpdateChild?: (childId: string, body: { name?: string; pin?: string }) => Promise<void>;
+  /** Back out of Words We're Learning to the screen it was opened from. */
+  onCloseLearnedWords?: () => void;
+  /** Nana: jump to a source page (Menu → Chapters & Pages). */
+  onJumpToPage?: (page: number) => void;
+  /** Nana's reading pointer style (Menu → Reading Setup). */
+  pointerMode?: PointerMode;
+  onPointerModeChange?: (m: PointerMode) => void;
+  /** One meaningful screen back (Menu header "← Back"); omitted when
+   *  there's nowhere to go. */
+  onNavBack?: () => void;
+  /** True from session start until the visit ends (End Call shows). */
+  visitActive?: boolean;
 }) {
   const isOnboarding      = mode === "onboarding";
   const isHome            = mode === "home";
@@ -11934,7 +11218,9 @@ function DeviceFrame({
     !isOnboarding &&
     partnerConnected &&
     !saidHello &&
-    (isHome || (!isNana && (isGreeting || isIcebreaker)));
+    // Build 38: Nana's Home is the grandchildren screen (Master Plan §3);
+    // her "say hello" moment is the greeting stage after Start Reading.
+    (!isNana && (isGreeting || isIcebreaker));
 
   // Rick's Jun 22 spec: replace the row of tiny top-bar icons with a
   // single Menu button that opens a right-side drawer containing all
@@ -11942,72 +11228,142 @@ function DeviceFrame({
   // (Nana gets the full set; Perry sees only in-session moves she can
   // trigger).
   const [menuOpen, setMenuOpen] = useState(false);
-  const menuEntries: MenuEntry[] = useMemo(() => {
-    const es: MenuEntry[] = [];
-    if (isNana && onGoHome) {
-      es.push({ key: "home", label: "Home", icon: <HomeIcon size={16} strokeWidth={2} aria-hidden />, onClick: onGoHome, active: isHome });
-    }
-    // "Continue Reading" — Rick's Build 28 #10: persistent access from
-    // anywhere in the app. Two flavors: from an in-session sub-mode
-    // (chat / show-and-tell / parent-check) it's a fast "back to
-    // book"; from a non-session screen (home / library / vault /
-    // family journal / silly faces / goodbye) it starts (or resumes)
-    // Nana's session with the last book.
-    if (!isReadingMode) {
-      const inSessionSub = isChatMode || isShowAndTell || isParentCheck;
-      if (inSessionSub) {
-        es.push({ key: "continue", label: "Continue Reading", sublabel: "Back to the book", icon: <BookOpen size={16} strokeWidth={2} aria-hidden />, onClick: onBackToReading });
-      } else if (isNana && onStartReadingSession && (isHome || isLibrary || isVault || isFamilyStories || isSillyFaces || isGoodbyeMode || isBookRequests || isSettings)) {
-        es.push({ key: "continue", label: "Continue Reading", sublabel: "Pick up where you left off", icon: <BookOpen size={16} strokeWidth={2} aria-hidden />, onClick: onStartReadingSession });
+  // Chapter headings in the open book (imported books label only each
+  // chapter's first page), for Menu → Chapters & Pages.
+  const chapterEntries = useMemo(() => {
+    const out: Array<{ title: string; page: number }> = [];
+    // Chapter books carry their real chapter list; use it.
+    const book = booksLibrary[selectedBookId];
+    if (book?.chapters && book.chapters.length > 0 && book.pages.length === bookPages.length) {
+      let n = 1 + chapterPageOffset(book);
+      for (const c of book.chapters) {
+        if (c.pages.length > 0) out.push({ title: c.title, page: n });
+        n += c.pages.length;
       }
+      return out;
     }
-    // Rick's Build 32 review #B-4: Library entry in the menu so Nana
-    // can jump back to book selection from anywhere in Reading Mode
-    // (previously she had to hunt for Change Book in the top bar).
-    if (isNana && onOpenLibrary) {
-      es.push({ key: "library", label: "Change Book", sublabel: "Pick a different story", icon: <LibraryIcon size={16} strokeWidth={2} aria-hidden />, onClick: onOpenLibrary, active: isLibrary });
+    // Imported books label only each chapter's first page; skip repeats
+    // of the same heading on consecutive pages.
+    let last = "";
+    bookPages.forEach((p, i) => {
+      const t = (p.leftChapter ?? "").trim();
+      if (t && t !== last && !p.rightIsTitle) out.push({ title: t, page: i + 1 });
+      if (t) last = t;
+    });
+    return out;
+  }, [bookPages, selectedBookId]);
+  const currentChapterIdx = (() => {
+    let idx = -1;
+    for (let i = 0; i < chapterEntries.length; i++) if (chapterEntries[i].page <= displayPage) idx = i;
+    return idx;
+  })();
+
+  // Menu (Master Plan §4, Build 38). Nana: THIS BOOK / TOGETHER / MORE,
+  // with sub-panels inside the drawer and End Call pinned at the bottom.
+  // Child: four simple rows; Show & Tell and Silly Faces are requests
+  // Nana approves.
+  const inVisit = visitActive || isReadingMode || isGreeting || isIcebreaker || isChatMode || isShowAndTell || isParentCheck || isSillyFaces || isGoodbyeMode;
+  const menuEntries: MenuEntry[] = (() => {
+    const es: MenuEntry[] = [];
+    if (!isNana) {
+      if (onStartShowAndTell) es.push({ key: "showandtell", label: "Ask for Show & Tell", sublabel: `${nanaName || "Nana"} will say yes or not now`, icon: <SparklesIcon size={18} strokeWidth={2} aria-hidden />, onClick: onStartShowAndTell });
+      if (onStartSillyFaces) es.push({ key: "silly", label: "Ask for Silly Faces", sublabel: "Funny faces together", icon: <Smile size={18} strokeWidth={2} aria-hidden />, onClick: onStartSillyFaces });
+      if (onOpenLearnedWords) es.push({ key: "learnedwords", label: "Words We're Learning", sublabel: "Words we saved", icon: <StarIcon size={18} strokeWidth={2} aria-hidden />, onClick: onOpenLearnedWords, active: isLearnedWords });
+      if (inVisit && !isGoodbyeMode) es.push({ key: "goodbye", label: "Ready to say goodbye", sublabel: `Tell ${nanaName || "Nana"} you're ready`, icon: <Hand size={18} strokeWidth={2} aria-hidden />, onClick: onStartGoodbye });
+      if (onOpenFeedback) es.push({ key: "feedback", label: "Send Feedback", sublabel: "Tell us what you think", icon: <Mail size={18} strokeWidth={2} aria-hidden />, onClick: onOpenFeedback });
+      return es;
     }
-    if (isNana && onStartParentCheck) {
-      es.push({ key: "schedule", label: "Schedule", sublabel: "Book next reading", icon: <CalendarDays size={16} strokeWidth={2} aria-hidden />, onClick: onStartParentCheck, active: isParentCheck });
+    const hasBook = !!selectedBookId && bookPages.length > 0;
+    const bookTitleNow = booksLibrary[selectedBookId]?.title ?? "";
+
+    // THIS BOOK
+    es.push({ divider: true, key: "d-book", label: "This Book" });
+    // On Home the big button already starts or continues reading.
+    if (!isReadingMode && !isHome && onStartReadingSession) {
+      const midVisitScreen = isChatMode || isShowAndTell || isParentCheck || isSillyFaces || isGoodbyeMode || isLearnedWords || isSettings || isLibrary;
+      void midVisitScreen; void bookTitleNow;
+      es.push({
+        key: "continue", label: "Continue Reading",
+        sublabel: homeContinueBook?.title || "Pick up where you left off",
+        icon: <BookOpen size={18} strokeWidth={2} aria-hidden />,
+        onClick: inVisit ? onBackToReading : (onHomePrimary ?? onStartReadingSession),
+      });
     }
-    if (onStartShowAndTell) {
-      es.push({ key: "showandtell", label: "Show & Tell", sublabel: "Take turns sharing", icon: <SparklesIcon size={16} strokeWidth={2} aria-hidden />, onClick: onStartShowAndTell, active: isShowAndTell });
+    if (onOpenLibrary) es.push({ key: "library", label: "Change Book", sublabel: "Pick a different story", icon: <LibraryIcon size={18} strokeWidth={2} aria-hidden />, onClick: onOpenLibrary, active: isLibrary });
+    if (isReadingMode && hasBook && onJumpToPage) {
+      const pageNum = readingPos?.pageNum ?? displayPage;
+      const pageTotal = readingPos?.pageTotal ?? bookPages.length;
+      const sub = chapterEntries.length > 1 && currentChapterIdx >= 0
+        ? `Ch ${currentChapterIdx + 1} · p ${pageNum}`
+        : `Page ${pageNum} of ${pageTotal}`;
+      es.push({
+        key: "chapters", label: "Chapters & Pages", sublabel: sub,
+        icon: <ListOrdered size={18} strokeWidth={2} aria-hidden />,
+        panel: {
+          title: "Chapters & Pages",
+          render: (close) => (
+            <ChaptersPanel
+              chapters={chapterEntries}
+              currentIndex={currentChapterIdx}
+              pageNum={pageNum}
+              pageTotal={pageTotal}
+              onJump={onJumpToPage}
+              close={close}
+            />
+          ),
+        },
+      });
     }
-    // Silly Faces — both roles. Rick's Build 30 review flagged Perry's
-    // menu as too sparse (just "Show & Tell"). Perry can initiate silly
-    // faces same as Nana; the phase_change SSE syncs both iPads.
-    if (onStartSillyFaces) {
-      es.push({ key: "silly", label: "Silly Faces", sublabel: "Faces + reactions", icon: <Smile size={16} strokeWidth={2} aria-hidden />, onClick: onStartSillyFaces, active: isSillyFaces });
+
+    // TOGETHER
+    if (inVisit) {
+      es.push({ divider: true, key: "d-together", label: "Together" });
+      if (hasBook) es.push({ key: "talk", label: "Let's Talk", sublabel: "A question about the story", icon: <MessageCircle size={18} strokeWidth={2} aria-hidden />, onClick: onStartChat, active: isChatMode });
+      es.push({ key: "showandtell", label: "Show & Tell", sublabel: "Take turns sharing", icon: <SparklesIcon size={18} strokeWidth={2} aria-hidden />, onClick: onStartShowAndTell, active: isShowAndTell });
+      es.push({ key: "silly", label: "Silly Faces & Reactions", sublabel: "Funny faces and hearts", icon: <Smile size={18} strokeWidth={2} aria-hidden />, onClick: onStartSillyFaces, active: isSillyFaces });
+      es.push({ key: "goodbye", label: "Goodbye", sublabel: "Count down, blow kisses", icon: <Hand size={18} strokeWidth={2} aria-hidden />, onClick: onStartGoodbye, active: isGoodbyeMode });
     }
-    if (isNana && onStartGoodbye) {
-      es.push({ key: "goodbye", label: "Goodbye", sublabel: "Wrap up together", icon: <Hand size={16} strokeWidth={2} aria-hidden />, onClick: onStartGoodbye, active: isGoodbyeMode });
+
+    // MORE
+    es.push({ divider: true, key: "d-more", label: "More" });
+    es.push({
+      key: "setup", label: "Reading Setup", sublabel: "Pages, text size, light, pointer",
+      icon: <SlidersHorizontal size={18} strokeWidth={2} aria-hidden />,
+      panel: {
+        title: "Reading Setup",
+        render: () => (
+          <ReadingSetupPanel
+            pageMode={pageMode}
+            onPageModeChange={onPageModeChange}
+            fontScale={fontScale}
+            onFontScaleChange={onFontScaleChange}
+            theme={readingTheme}
+            onThemeChange={onThemeChange}
+            pointerMode={pointerMode}
+            onPointerModeChange={onPointerModeChange}
+          />
+        ),
+      },
+    });
+    if (inVisit) {
+      es.push({
+        key: "cammic", label: "Camera & Microphone", sublabel: "Mute, camera off, flip camera",
+        icon: <VideoIcon size={18} strokeWidth={2} aria-hidden />,
+        panel: { title: "Camera & Microphone", render: () => <CameraMicPanel /> },
+      });
     }
-    if (isNana) {
-      es.push({ divider: true, key: "d1", label: "Memories" });
-      if (onOpenVault) es.push({ key: "vault", label: "Memory Vault", sublabel: "Saved reading moments", icon: <Disc size={16} strokeWidth={2} aria-hidden />, onClick: onOpenVault, active: isVault });
-      if (onOpenFamilyStories) es.push({ key: "journal", label: "Family Journal", sublabel: "Notes about today", icon: <BookHeart size={16} strokeWidth={2} aria-hidden />, onClick: onOpenFamilyStories, active: isFamilyStories });
-      if (onOpenLearnedWords) es.push({ key: "learnedwords", label: "Words We're Learning", sublabel: `${childName || "Perry"}'s saved words`, icon: <StarIcon size={16} strokeWidth={2} aria-hidden />, onClick: onOpenLearnedWords, active: isLearnedWords });
-      if (onOpenBookRequest) es.push({ key: "requestbook", label: "Request a Book", sublabel: "Ask us to add a story", icon: <Mail size={16} strokeWidth={2} aria-hidden />, onClick: onOpenBookRequest });
-    } else if (onOpenLearnedWords) {
-      // Perry-side: her own saved-words list. Read-only view of the
-      // same LearnedWordsView Nana sees. Rick's Build 30 review:
-      // Perry's menu should have more than just Show & Tell.
-      es.push({ divider: true, key: "d1", label: "My Learning" });
-      es.push({ key: "learnedwords", label: "Words I'm Learning", sublabel: "See my saved words", icon: <StarIcon size={16} strokeWidth={2} aria-hidden />, onClick: onOpenLearnedWords, active: isLearnedWords });
-    }
-    // Rick's Sep 25 (C-3): Send Feedback entry — visible to everyone,
-    // Nana and Perry both. Reachable from every screen.
-    if (onOpenFeedback) {
-      if (isNana) es.push({ divider: true, key: "dfb" });
-      es.push({ key: "feedback", label: "Send Feedback", sublabel: "Tell Rick what you think", icon: <Mail size={16} strokeWidth={2} aria-hidden />, onClick: onOpenFeedback });
-    }
-    if (isNana) {
-      es.push({ divider: true, key: "d2" });
-      es.push({ key: "end", label: "End Call", sublabel: "Say goodbye and hang up", icon: <PhoneOff size={16} strokeWidth={2} aria-hidden />, onClick: () => setEndCallConfirmOpen(true), destructive: true });
-    }
+    if (onOpenLearnedWords) es.push({ key: "learnedwords", label: "Words We're Learning", sublabel: `${childName || "Your grandchild"}'s saved words`, icon: <StarIcon size={18} strokeWidth={2} aria-hidden />, onClick: onOpenLearnedWords, active: isLearnedWords });
+    es.push({ key: "schedule", label: "Schedule", sublabel: "Pick our next reading time", icon: <CalendarDays size={18} strokeWidth={2} aria-hidden />, onClick: onStartParentCheck, active: isParentCheck });
+    es.push({
+      key: "help", label: "Help & Feedback", sublabel: "Send feedback, help tips",
+      icon: <HelpCircle size={18} strokeWidth={2} aria-hidden />,
+      panel: { title: "Help & Feedback", render: (close) => <HelpFeedbackPanel onSendFeedback={onOpenFeedback} close={close} /> },
+    });
+    if (onGoHome) es.push({ key: "home", label: "Home", sublabel: inVisit ? "The call stays on" : undefined, icon: <HomeIcon size={18} strokeWidth={2} aria-hidden />, onClick: onGoHome, active: isHome });
+    if (onOpenSettings) es.push({ key: "settings", label: "Settings", sublabel: "Grandchildren, account", icon: <SettingsIcon size={18} strokeWidth={2} aria-hidden />, onClick: onOpenSettings, active: isSettings });
     return es;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isNana, isHome, isLibrary, isChatMode, isShowAndTell, isParentCheck, isSillyFaces, isGoodbyeMode, isVault, isFamilyStories, isReadingMode, isBookRequests, isSettings, isLearnedWords]);
+  })();
+  const menuShowsEndCall = isNana && inVisit;
 
   const modeLabel = isOnboarding ? "Setting Up" : isHome ? "Home 🏠" : isGreeting ? "Chat Mode 💬" : isIcebreaker ? "Conversation Starters 💬" : isLibrary ? "Book Library 📚" : isChatMode ? "Chat Mode" : isShowAndTell ? "Show & Tell" : isParentCheck ? "Quick Check-In 💬" : isSillyFaces ? "Silly Faces 🎭" : isGoodbyeMode ? "Goodbye 💕" : isVault ? "Memory Vault 📼" : isFamilyStories ? "Our Family Journal 📖" : isBookRequests ? "Book Requests 📬" : isSettings ? "Settings ⚙️" : isLearnedWords ? "Words We're Learning ⭐" : "Reading Mode";
   // Include reading mode so the header consistently shows nav buttons (Home,
@@ -12017,12 +11373,14 @@ function DeviceFrame({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: 1, minWidth: 0 }}>
-      <p style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: "10px", fontWeight: 700, letterSpacing: "0.12em", marginBottom: "1px", opacity: 0.6 }}>
-        {label}
-      </p>
+      {label && (
+        <p style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: "10px", fontWeight: 700, letterSpacing: "0.12em", marginBottom: "1px", opacity: 0.6 }}>
+          {label}
+        </p>
+      )}
       <div
         className="nm-device-frame"
-        data-layout={isReadingMode ? readingLayout : undefined}
+        data-layout={isReadingMode ? "fullpage" : undefined}
         style={{
           border: "2px solid rgba(255,255,255,0.10)",
           borderRadius: "14px",
@@ -12041,6 +11399,12 @@ function DeviceFrame({
           .nm-device-frame { transition: background 320ms ease, border-color 320ms ease, box-shadow 320ms ease; }
           .nm-device-frame > div:first-of-type { transition: background 320ms ease, padding 240ms ease, opacity 240ms ease; }
 
+          /* iPad mini and other narrower screens: while reading, the
+             tagline and "READING MODE" label give their room to the book. */
+          @media (max-width: 1180px) {
+            .nm-device-frame[data-layout] .nm-tagline,
+            .nm-device-frame[data-layout] .nm-mode-label { display: none; }
+          }
           /* Tagline hides on layouts that prefer minimal chrome */
           .nm-device-frame[data-layout="immersive"] .nm-tagline,
           .nm-device-frame[data-layout="kids"] .nm-tagline { display: none; }
@@ -12084,24 +11448,6 @@ function DeviceFrame({
         {/* Top bar — slim chrome so the book gets more vertical real estate
             (Rick: "utilize some more real estate" for the reading area).
             Rick's Build 32 review #B-5: fully hidden in fullscreen mode. */}
-        {isReadingMode && readingFullscreen && onToggleReadingFullscreen && (
-          <button
-            onClick={onToggleReadingFullscreen}
-            aria-label="Exit fullscreen"
-            style={{
-              position: "absolute", top: 6, right: 8, zIndex: 50,
-              width: 30, height: 30, borderRadius: "50%",
-              background: "rgba(11,23,46,0.7)", border: "1px solid rgba(201,146,42,0.45)",
-              color: AMBER, cursor: "pointer",
-              display: "inline-flex", alignItems: "center", justifyContent: "center",
-              padding: 0, backdropFilter: "blur(6px)",
-              boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
-              touchAction: "manipulation",
-            }}
-          >
-            <XIcon size={14} strokeWidth={2.4} />
-          </button>
-        )}
         {!(isReadingMode && readingFullscreen) && (
         <div style={{
           background: "linear-gradient(180deg, #1B2B4B 0%, #14223e 100%)",
@@ -12113,12 +11459,6 @@ function DeviceFrame({
         }}>
           {/* Left — layout picker (Nana only) + wordmark + recording indicator */}
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-            {isReadingMode && isNana && readingLayout !== undefined && onLayoutChange && (
-              <LayoutSwitcher current={readingLayout} onChange={onLayoutChange} />
-            )}
-            {isReadingMode && isNana && onPageModeChange && (
-              <PageModeSwitcher current={pageMode} onChange={onPageModeChange} />
-            )}
             {isRecording && (
               <div style={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: "#ef4444", animation: "rec-pulse 1.4s ease-in-out infinite", flexShrink: 0 }} />
             )}
@@ -12132,7 +11472,7 @@ function DeviceFrame({
 
           {/* Center — current mode label, fills remaining space */}
           <div style={{ flex: 1, display: "flex", justifyContent: "center", alignItems: "center", minWidth: 0 }}>
-            <span style={{
+            <span className="nm-mode-label" style={{
               color: modeHighlight ? AMBER : "rgba(247,240,227,0.5)",
               fontFamily: "DM Sans, sans-serif",
               fontSize: 13,
@@ -12142,7 +11482,9 @@ function DeviceFrame({
               transition: "all 0.3s",
               whiteSpace: "nowrap",
             }}>
-              {modeLabel.replace(/\s*[📚💬🎭💕📼📖]\s*/g, "").trim()}
+              {isReadingMode && booksLibrary[selectedBookId]?.title
+                ? <span style={{ letterSpacing: "0.02em", textTransform: "none", fontFamily: "Playfair Display, serif", fontSize: 16, fontWeight: 700, color: CREAM, opacity: 0.85 }}>{booksLibrary[selectedBookId].title}</span>
+                : modeLabel.replace(/[\p{Extended_Pictographic}️]/gu, "").trim()}
             </span>
           </div>
 
@@ -12158,55 +11500,44 @@ function DeviceFrame({
             {isReadingMode && isNana && (
               <button
                 onClick={onOpenLibrary}
+                data-testid="topbar-change-book"
                 style={{
                   background: "rgba(201,146,42,0.14)",
                   color: AMBER,
-                  border: "1px solid rgba(201,146,42,0.45)",
+                  border: "1px solid rgba(201,146,42,0.5)",
                   borderRadius: 999,
-                  padding: "5px 12px",
+                  padding: "0 16px",
+                  minHeight: 42,
                   fontFamily: "DM Sans, sans-serif",
-                  fontSize: 11,
-                  fontWeight: 700,
+                  fontSize: 15,
+                  fontWeight: 800,
                   cursor: "pointer",
-                  letterSpacing: "0.02em",
-                  display: "inline-flex", alignItems: "center", gap: 5,
+                  letterSpacing: "0.01em",
+                  display: "inline-flex", alignItems: "center", gap: 7,
                   flexShrink: 0,
+                  touchAction: "manipulation",
                 }}
               >
-                <LibraryIcon size={12} strokeWidth={2.4} />
+                <LibraryIcon size={17} strokeWidth={2.4} />
                 Change Book
               </button>
             )}
             {modeHighlight && !isOnboarding && menuEntries.length > 0 && (
               <MenuButton onClick={() => setMenuOpen(true)} />
             )}
-            {/* Rick's Build 32 review #B-5: fullscreen toggle button.
-                Only shown in Reading Mode + on Nana's iPad. Icon
-                looks like the standard fullscreen four-corner
-                symbol. */}
-            {isReadingMode && isNana && onToggleReadingFullscreen && (
-              <button
-                onClick={onToggleReadingFullscreen}
-                aria-label="Enter fullscreen reading"
-                title="Fullscreen"
-                style={{
-                  background: "rgba(201,146,42,0.14)",
-                  color: AMBER,
-                  border: "1px solid rgba(201,146,42,0.45)",
-                  borderRadius: 999,
-                  width: 30, height: 30,
-                  display: "inline-flex", alignItems: "center", justifyContent: "center",
-                  padding: 0, cursor: "pointer",
-                  touchAction: "manipulation", flexShrink: 0,
-                }}
-              >⤢</button>
-            )}
           </div>
         </div>
         )}
 
         {/* Slide-in menu drawer — see menuEntries above. */}
-        <MenuDrawer open={menuOpen} onClose={() => setMenuOpen(false)} entries={menuEntries} />
+        <MenuDrawer
+          open={menuOpen}
+          onClose={() => setMenuOpen(false)}
+          entries={menuEntries}
+          autoCloseMs={isNana ? undefined : 7000}
+          onBack={onNavBack}
+          onEndCall={menuShowsEndCall ? () => setEndCallConfirmOpen(true) : undefined}
+        />
 
         {/* Phase intro card — shown to both Nana and Perry. Coaching-specific
             prompt language stays in Nana's reading-mode UI; this card is just
@@ -12263,38 +11594,33 @@ function DeviceFrame({
             pinScreenExpectedChild={pinScreenExpectedChild ?? null}
           />
         ) : isHome && isNana ? (
-          <NanaHomeView
+          <HomeView
             nanaName={nanaName}
-            childName={childName}
-            scheduleProposal={scheduleProposal}
-            onStartReading={onStartReadingSession ?? (() => {})}
-            onOpenLibrary={onOpenLibraryFromHome ?? (() => {})}
-            onOpenVault={onOpenVault}
-            onOpenSchedule={onOpenScheduleFromHome ?? (() => {})}
-            onOpenBookRequests={onOpenBookRequests ?? (() => {})}
-            onOpenSettings={onOpenSettings ?? (() => {})}
-            onSwitchDevice={onSwitchDevice ?? (() => {})}
-            onSignOut={onSignOut}
-            perryConnected={perryConnected}
-            onOpenFamilyStories={onOpenFamilyStories}
-            familyStoryEntries={familyStoryEntries}
-            childrenList={childrenList}
+            children={childrenList}
             activeChildId={activeChildId}
             onSelectChild={onSelectChild}
-            onOpenAddChild={onOpenAddChild}
+            perryOnline={perryConnected}
+            perryHereChildId={perryHereChildId}
+            nextVisitIso={nextVisitIso}
+            continueBook={homeContinueBook}
+            visitActive={visitActive}
+            onPrimary={onHomePrimary ?? onStartReadingSession ?? (() => {})}
+            onAddChild={onOpenAddChild}
+            onSetPhoto={onSetChildPhoto ?? (async () => {})}
+            loading={dashboardLoading}
           />
         ) : isHome && !isNana ? (
           // Perry on home: she's not supposed to navigate Nana's dashboard.
           // This branch hits when polling syncs Perry's mode to "home" while
           // Nana is on her homepage — surface a contextual waiting screen
           // instead of leaving Perry blank.
-          <PerryAwaitingView nanaName={nanaName} forMode="home" onExit={onSwitchDevice} />
+          <PerryAwaitingView nanaName={nanaName} forMode="home" />
         ) : isBookRequests && !isNana ? (
-          <PerryAwaitingView nanaName={nanaName} forMode="bookrequests" onExit={onSwitchDevice} />
+          <PerryAwaitingView nanaName={nanaName} forMode="bookrequests" />
         ) : isSettings && !isNana ? (
-          <PerryAwaitingView nanaName={nanaName} forMode="settings" onExit={onSwitchDevice} />
+          <PerryAwaitingView nanaName={nanaName} forMode="settings" />
         ) : isVault && !isNana ? (
-          <PerryAwaitingView nanaName={nanaName} forMode="vault" onExit={onSwitchDevice} />
+          <PerryAwaitingView nanaName={nanaName} forMode="vault" />
         ) : isBookRequests ? (
           <BookRequestsView
             onBack={() => onGoHome?.()}
@@ -12305,6 +11631,15 @@ function DeviceFrame({
           />
         ) : isSettings ? (
           <SettingsView
+            grandchildren={onSetChildPhoto && onRemoveChildPhoto && onUpdateChild ? (
+              <GrandchildrenCard
+                children={childrenList}
+                onSetPhoto={onSetChildPhoto}
+                onRemovePhoto={onRemoveChildPhoto}
+                onUpdate={onUpdateChild}
+                onAddChild={onOpenAddChild}
+              />
+            ) : null}
             onBack={() => onGoHome?.()}
             onSwitchDevice={onSwitchDevice ?? (() => {})}
             onSignOut={onSignOut}
@@ -12339,6 +11674,7 @@ function DeviceFrame({
             activeChildId={activeChildId}
             onSelectChild={onSelectChild}
             onOpenAddChild={onOpenAddChild}
+            onReadWithChild={isNana ? onReadWithChild : undefined}
             onGoHome={isNana ? onGoHome : undefined}
             onReadAnotherBook={isNana ? onReadAnotherBook : undefined}
             onDisconnectSession={isNana ? onDisconnectSession : undefined}
@@ -12347,10 +11683,11 @@ function DeviceFrame({
           <VaultView onGoHome={onCloseVault} connectionId={vaultConnectionId} activeChildId={activeChildId} />
         ) : isLearnedWords ? (
           <LearnedWordsView
-            onGoHome={onGoHome ?? (() => {})}
+            onGoHome={onCloseLearnedWords ?? onGoHome ?? (() => {})}
             connectionId={vaultConnectionId}
             activeChildId={activeChildId}
             childName={childName}
+            canRemove={isNana}
           />
         ) : isGreeting ? (
           <GreetingView
@@ -12401,6 +11738,7 @@ function DeviceFrame({
             // simultaneously.
             onScroll={onLibraryScroll}
             scrollTop={libraryScrollTop}
+            onFindMoreBooks={FEATURES.requestBook && isNana && onOpenBookRequest ? (q) => onOpenBookRequest(q) : undefined}
           />
         ) : isShowAndTell ? (
           <ShowAndTellView
@@ -12417,6 +11755,7 @@ function DeviceFrame({
         ) : isParentCheck ? (
           <ParentCheckView
             isNana={isNana}
+            onBack={isNana ? (onNavBack ?? onBackToReading) : undefined}
             onStartSillyFaces={onStartSillyFaces}
             onStartGoodbye={onStartGoodbye}
             proposal={scheduleProposal}
@@ -12468,11 +11807,13 @@ function DeviceFrame({
             sessionSummary={sessionSummary}
             onGoHome={isNana ? onGoHome : undefined}
             onBackToSillyFaces={isNana ? onStartSillyFaces : undefined}
+            onChildHangUp={!isNana ? onChildHangUp : undefined}
           />
         ) : isChatMode ? (
           <ChatModeView
             isNana={isNana}
-            nanaPromptText={bookPages[Math.max(0, Math.min(displayPage - 1, bookPages.length - 1))]?.nanaPrompt ?? ""}
+            nanaPromptText={spreadPrompt(bookPages, pagePlan ?? identityPlan("", bookPages.length, pageMode), Math.max(1, Math.min(displayPage, bookPages.length)))}
+            questions={bookPages.length > 0 ? talkQuestions(bookPages, pagePlan ?? identityPlan("", bookPages.length, pageMode), Math.max(1, Math.min(displayPage, bookPages.length))) : undefined}
             onStartReading={onBackToReading}
             childName={childName}
             nanaName={nanaName}
@@ -12482,10 +11823,8 @@ function DeviceFrame({
           />
         ) : (
           (() => {
-            // Reading mode layout — Nana's choice of arrangement.
-            // Each layout gives a different emphasis between the book
-            // and the "presence" sidebar (video tiles + reactions).
-            const layout: ReadingLayout = readingLayout ?? "classic";
+            // Build 38: one "full page" reading layout for both iPads
+            // (Rick's mockup); the four older layouts are retired.
             const bookEl = (
               <BookSpread
                 displayPage={displayPage}
@@ -12503,399 +11842,51 @@ function DeviceFrame({
                 isRecording={isRecording}
                 pointerHighlight={pointerHighlight}
                 onPointer={onPointer}
-                wordHighlight={wordHighlight}
-                onWord={onWord}
-                onWordSay={onWordSay}
-                onWordSoundOut={onWordSoundOut}
-                onWordDefine={onWordDefine}
-                onWordSave={onWordSave}
-                wordDefinition={wordDefinition}
-                wordSaveState={wordSaveState}
-                onWordActionsClose={onWordActionsClose}
+                wordSelection={wordSelection}
+                onSelectWord={onSelectWord}
+                childName={childName}
                 onSelectionPronounce={onSelectionPronounce}
                 onSelectionPhonics={onSelectionPhonics}
                 onSelectionSave={onSelectionSave}
-                onShareSelection={onShareSelection}
-                remoteSelection={remoteSelection}
                 selectionPronunciationState={selectionPronunciationState}
                 selectionPhonicsState={selectionPhonicsState}
                 selectionSaveState={selectionSaveState}
+                isFullscreen={readingFullscreen}
+                onToggleFullscreen={isNana ? onToggleReadingFullscreen : undefined}
                 readingTheme={readingTheme}
                 readingStartedAt={readingStartedAt}
                 pageMode={pageMode}
                 pageSide={pageSide}
-                chunkSize={chunkSize}
+                pagePlan={pagePlan}
+                onPageProfile={onPageProfile}
+                pointerMode={pointerMode}
+                pointerSuppressed={phonicsCardOpen}
               />
             );
-            const sidebar = (
-              <ReadingPiPSidebar
+            const plan = pagePlan ?? identityPlan("", bookPages.length, pageMode);
+            const safePage = Math.max(1, Math.min(displayPage, bookPages.length));
+            return (
+              <FullPageReading
                 isNana={isNana}
-                isRecording={isRecording}
+                bookEl={bookEl}
                 nanaName={nanaName}
                 childName={childName}
-                onReact={onReact}
                 readingTheme={readingTheme}
-                onThemeChange={onThemeChange}
+                onThemeChange={isNana ? onThemeChange : undefined}
+                onReact={onReact}
+                cue={isNana && bookPages.length > 0 ? (spreadCue(bookPages, plan, safePage) || spreadPrompt(bookPages, plan, safePage).replace(/^Ask:\s*/, "")) : null}
+                onLetsTalk={isNana ? onStartChat : undefined}
+                onShowAndTell={onStartShowAndTell}
+                readingPos={readingPos}
+                onPrev={onSwipePrev}
+                onNext={onSwipeNext}
               />
-            );
-
-            // ============================================================
-            // IMMERSIVE — Book takes the entire frame. Video tiles move
-            // into a draggable floating PiP in the corner; Nana's
-            // reactions / theme / video controls live in a slim
-            // translucent strip pinned to the bottom edge so they don't
-            // overlap text but stay one tap away. The big visible
-            // contrast with Classic ("[book | fixed sidebar]") is the
-            // absence of the inline sidebar — book gets ~120px more
-            // horizontal real estate. Previously this layout only
-            // differed by 14px of sidebar width + a slightly bigger
-            // body font, which Rick correctly called out as looking
-            // "exactly the same" as Classic.
-            // ============================================================
-            if (layout === "immersive") {
-              return (
-                <div data-bk-layout="immersive" style={{
-                  position: "relative",
-                  display: "flex", flex: 1, minHeight: 0, overflow: "hidden",
-                  background: "#0b172e",
-                }}>
-                  <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-                    {bookEl}
-                  </div>
-
-                  {/* Floating videos — draggable, snap-to-corner. Uses
-                      the same persisted-corner pattern as the roaming
-                      PiP elsewhere in the app, with a distinct storage
-                      key so Immersive remembers its own position. */}
-                  <DraggablePiP
-                    storageKey={`nm_immersive_pip_${isNana ? "nana" : "perry"}`}
-                    defaultCorner="tr"
-                    margin={10}
-                    zIndex={45}
-                  >
-                    <div style={{
-                      display: "flex", flexDirection: "column", gap: 6,
-                      padding: 6,
-                      background: "rgba(11,23,46,0.78)",
-                      border: "1px solid rgba(255,255,255,0.08)",
-                      borderRadius: 14,
-                      boxShadow: "0 8px 24px rgba(0,0,0,0.45)",
-                      width: 108,
-                    }}>
-                      <FaceVideo
-                        person="nana"
-                        width="100%"
-                        height={80}
-                        showLabel={false}
-                        label={nanaName || getRoleLabel("nana")}
-                        borderRadius={10}
-                        compact
-                        objectPosition="center 35%"
-                        isRecording={isRecording}
-                      />
-                      <FaceVideo
-                        person="child"
-                        width="100%"
-                        height={80}
-                        showLabel={false}
-                        label={childName || getRoleLabel("child")}
-                        borderRadius={10}
-                        compact
-                        objectPosition="center 35%"
-                        isRecording={isRecording}
-                      />
-                    </div>
-                  </DraggablePiP>
-
-                  {/* Slim bottom action strip — reactions for both sides;
-                      theme + recording controls only for Nana. Stays out
-                      of the text body (sits below the book frame). */}
-                  <div style={{
-                    position: "absolute", left: 12, right: 12, bottom: 8,
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    gap: 10,
-                    padding: "4px 10px",
-                    background: "rgba(11,23,46,0.55)",
-                    border: "1px solid rgba(255,255,255,0.06)",
-                    borderRadius: 999,
-                    backdropFilter: "blur(6px)",
-                    WebkitBackdropFilter: "blur(6px)",
-                    pointerEvents: "auto",
-                    zIndex: 30,
-                  }}>
-                    {onReact && <ReactionsDropdown onReact={onReact} />}
-                    {isNana && <VideoControls compact showRecording />}
-                    {isNana && onThemeChange && (
-                      <ThemeSwitcher theme={readingTheme} onChange={onThemeChange} />
-                    )}
-                  </div>
-                </div>
-              );
-            }
-
-            // ============================================================
-            // STORYTIME — Book full-bleed, floating PiP corner, slim
-            // bottom toolbar. Mirrors Immersive's content-forward
-            // structure (Rick: "if we could apply a similar layout
-            // approach — content forward, controls at the bottom — it
-            // would look more polished") while keeping the green LIVE
-            // READING identity via PiP accent border + a top-left chip.
-            // ============================================================
-            if (layout === "storytime") {
-              return (
-                <div data-bk-layout="storytime" style={{
-                  position: "relative",
-                  display: "flex", flex: 1, minHeight: 0, overflow: "hidden",
-                  background: "linear-gradient(180deg, #0d1d3c 0%, #0b172e 60%, #0b172e 100%)",
-                }}>
-                  <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-                    {bookEl}
-                  </div>
-
-                  {/* "🟢 LIVE READING TOGETHER" chip — keeps Storytime's
-                      original signature. Pinned top-left, doesn't compete
-                      with the floating PiP in the top-right. */}
-                  <div style={{
-                    position: "absolute", top: 8, left: 12, zIndex: 40,
-                    display: "inline-flex", alignItems: "center", gap: 6,
-                    padding: "5px 10px",
-                    background: "rgba(34,197,94,0.16)",
-                    border: "1px solid rgba(34,197,94,0.45)",
-                    borderRadius: 999,
-                    color: "#86efac",
-                    fontFamily: "DM Sans, sans-serif",
-                    fontSize: 9, fontWeight: 800, letterSpacing: "0.18em",
-                    boxShadow: "0 6px 16px rgba(34,197,94,0.22)",
-                    pointerEvents: "none",
-                  }}>
-                    🟢 LIVE READING TOGETHER
-                  </div>
-
-                  <DraggablePiP
-                    storageKey={`nm_storytime_pip_${isNana ? "nana" : "perry"}`}
-                    defaultCorner="tr"
-                    margin={10}
-                    zIndex={45}
-                  >
-                    <div style={{
-                      display: "flex", flexDirection: "column", gap: 6,
-                      padding: 6,
-                      background: "rgba(11,23,46,0.78)",
-                      border: "1.5px solid rgba(34,197,94,0.55)",
-                      borderRadius: 14,
-                      boxShadow: "0 8px 24px rgba(34,197,94,0.25), 0 8px 24px rgba(0,0,0,0.45)",
-                      width: 108,
-                    }}>
-                      <FaceVideo
-                        person="nana"
-                        width="100%"
-                        height={80}
-                        showLabel={false}
-                        label={nanaName || getRoleLabel("nana")}
-                        borderRadius={10}
-                        compact
-                        objectPosition="center 35%"
-                        isRecording={isRecording}
-                      />
-                      <FaceVideo
-                        person="child"
-                        width="100%"
-                        height={80}
-                        showLabel={false}
-                        label={childName || getRoleLabel("child")}
-                        borderRadius={10}
-                        compact
-                        objectPosition="center 35%"
-                        isRecording={isRecording}
-                      />
-                    </div>
-                  </DraggablePiP>
-
-                  <div style={{
-                    position: "absolute", left: 12, right: 12, bottom: 8,
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    gap: 10,
-                    padding: "4px 10px",
-                    background: "rgba(11,23,46,0.55)",
-                    border: "1px solid rgba(34,197,94,0.30)",
-                    borderRadius: 999,
-                    backdropFilter: "blur(6px)",
-                    WebkitBackdropFilter: "blur(6px)",
-                    pointerEvents: "auto",
-                    zIndex: 30,
-                  }}>
-                    {onReact && <ReactionsDropdown onReact={onReact} />}
-                    {isNana && <VideoControls compact showRecording />}
-                    {isNana && onThemeChange && (
-                      <ThemeSwitcher theme={readingTheme} onChange={onThemeChange} />
-                    )}
-                  </div>
-                </div>
-              );
-            }
-
-            // ============================================================
-            // COZY — Single warm walnut wrapper, book in a soft leather
-            // frame, narrow gold-trim sidebar on the right. No noisy
-            // wood-grain stripes (those looked like a barcode).
-            // ============================================================
-            if (layout === "cozy") {
-              return (
-                <div data-bk-layout="cozy" style={{
-                  display: "flex", flex: 1, minHeight: 0, overflow: "hidden",
-                  padding: 8, gap: 8,
-                  background: "linear-gradient(135deg, #2a1810 0%, #1f110a 100%)",
-                }}>
-                  <div style={{
-                    flex: 1, minWidth: 0,
-                    display: "flex", flexDirection: "column",
-                    borderRadius: 10,
-                    border: "2px solid #5C3A1E",
-                    overflow: "hidden",
-                    boxShadow: "0 8px 22px rgba(0,0,0,0.55), inset 0 0 0 2px rgba(247,201,93,0.18)",
-                  }}>
-                    {bookEl}
-                  </div>
-                  <div style={{
-                    width: 130, flexShrink: 0,
-                    display: "flex", flexDirection: "column",
-                    background: "rgba(255,255,255,0.02)",
-                    border: "2px solid #5C3A1E",
-                    borderRadius: 10,
-                    boxShadow: "inset 0 0 0 2px rgba(247,201,93,0.18)",
-                    overflow: "hidden",
-                  }}>
-                    {sidebar}
-                  </div>
-                </div>
-              );
-            }
-
-            // ============================================================
-            // KIDS — Book full-bleed on the pastel background, floating
-            // PiP corner, slim bottom toolbar. Mirrors Immersive's
-            // content-forward structure while preserving the playful
-            // pastel identity (drifting bunny mascot + sparkles +
-            // pink/blue/mint background). Rick: "Kids and Storytime
-            // wastes a lot of space, especially around where the video
-            // sits at the top — apply a similar layout approach."
-            // ============================================================
-            if (layout === "kids") {
-              return (
-                <div data-bk-layout="kids" style={{
-                  position: "relative",
-                  display: "flex", flex: 1, minHeight: 0, overflow: "hidden",
-                  background: "linear-gradient(135deg, #fde9f1 0%, #e9f5ff 50%, #e9f9ec 100%)",
-                }}>
-                  {/* Background mascot + sparkles — unchanged from prior
-                      version, just now drifting across the full-bleed
-                      book area instead of inside a tiny top banner. */}
-                  <div aria-hidden style={{
-                    position: "absolute", top: 6, left: "30%",
-                    fontSize: 22, animation: "kids-drift 9s ease-in-out infinite",
-                    filter: "drop-shadow(0 4px 8px rgba(0,0,0,0.15))",
-                    pointerEvents: "none", zIndex: 3,
-                  }}>🐰</div>
-                  <div aria-hidden style={{
-                    position: "absolute", top: 8, left: 14,
-                    fontSize: 14, animation: "kids-twinkle 2.4s ease-in-out infinite",
-                    pointerEvents: "none", zIndex: 3,
-                  }}>✨</div>
-                  <div aria-hidden style={{
-                    position: "absolute", bottom: 60, left: 14,
-                    fontSize: 14, animation: "kids-twinkle 2.4s 0.8s ease-in-out infinite",
-                    pointerEvents: "none", zIndex: 3,
-                  }}>⭐</div>
-
-                  <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-                    {bookEl}
-                  </div>
-
-                  <DraggablePiP
-                    storageKey={`nm_kids_pip_${isNana ? "nana" : "perry"}`}
-                    defaultCorner="tr"
-                    margin={10}
-                    zIndex={45}
-                  >
-                    <div style={{
-                      display: "flex", flexDirection: "column", gap: 6,
-                      padding: 6,
-                      background: "rgba(255,255,255,0.78)",
-                      border: "1.5px solid rgba(247,201,93,0.55)",
-                      borderRadius: 16,
-                      boxShadow: "0 8px 24px rgba(247,201,93,0.30), 0 8px 24px rgba(0,0,0,0.18)",
-                      width: 108,
-                    }}>
-                      <FaceVideo
-                        person="nana"
-                        width="100%"
-                        height={80}
-                        showLabel={false}
-                        label={nanaName || getRoleLabel("nana")}
-                        borderRadius={12}
-                        compact
-                        objectPosition="center 35%"
-                        isRecording={isRecording}
-                      />
-                      <FaceVideo
-                        person="child"
-                        width="100%"
-                        height={80}
-                        showLabel={false}
-                        label={childName || getRoleLabel("child")}
-                        borderRadius={12}
-                        compact
-                        objectPosition="center 35%"
-                        isRecording={isRecording}
-                      />
-                    </div>
-                  </DraggablePiP>
-
-                  <div style={{
-                    position: "absolute", left: 12, right: 12, bottom: 8,
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    gap: 10,
-                    padding: "4px 10px",
-                    background: "rgba(255,255,255,0.70)",
-                    border: "1px dashed rgba(201,146,42,0.45)",
-                    borderRadius: 999,
-                    backdropFilter: "blur(6px)",
-                    WebkitBackdropFilter: "blur(6px)",
-                    pointerEvents: "auto",
-                    zIndex: 30,
-                    boxShadow: "0 4px 14px rgba(0,0,0,0.10)",
-                  }}>
-                    {onReact && <ReactionsDropdown onReact={onReact} />}
-                    {isNana && <VideoControls compact showRecording />}
-                    {isNana && onThemeChange && (
-                      <ThemeSwitcher theme={readingTheme} onChange={onThemeChange} />
-                    )}
-                  </div>
-
-                  <style>{`
-                    @keyframes kids-drift { 0%,100% { transform: translateX(0) translateY(0); } 25% { transform: translateX(40px) translateY(-3px); } 50% { transform: translateX(80px) translateY(2px); } 75% { transform: translateX(40px) translateY(-2px); } }
-                    @keyframes kids-twinkle { 0%,100% { opacity: 0.4; transform: scale(0.85); } 50% { opacity: 1; transform: scale(1.15); } }
-                  `}</style>
-                </div>
-              );
-            }
-
-            // ============================================================
-            // CLASSIC — original [book ··· sidebar] split
-            // ============================================================
-            return (
-              <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden" }}>
-                <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
-                  {bookEl}
-                </div>
-                {sidebar}
-              </div>
             );
           })()
         )}
 
         {/* Recording consent overlay — sits above all iPad content */}
-        {showConsentOverlay && !isOnboarding && (
+        {FEATURES.recording && showConsentOverlay && !isOnboarding && (
           <RecordingConsentOverlay
             isNana={isNana}
             recordingOn={recordingOn}
@@ -12904,27 +11895,8 @@ function DeviceFrame({
           />
         )}
 
-        {/* Help toggle — bottom corner. Hidden in modes whose own UI
-            occupies the corner (countdown numbers, scheduler accept
-            buttons, parent-check hello card) so it never covers them.
-            Rick: "the Parent Check-In box was covered by the Help box." */}
-        {/* Help toggle — Nana-only. Rick: "The Help button on the
-            child's iPad is currently disconnected. Please remove it
-            from the child's UI entirely." */}
-        {isNana && !isGoodbyeMode && !isSillyFaces && !isParentCheck && (
-          <div style={{
-            position: "absolute",
-            bottom: "12px",
-            right: "12px",
-            zIndex: 20,
-            backgroundColor: "rgba(201,146,42,0.15)",
-            border: "1.5px solid rgba(201,146,42,0.5)",
-            borderRadius: "10px",
-            padding: "4px 8px",
-          }}>
-            <HelpToggle size="compact" />
-          </div>
-        )}
+        {/* The corner "Need help?" pill moved into Menu → Help & Feedback
+            (Build 38). */}
 
         {/* Reactions overlay — full-bleed inside the device frame, animates
             up from below when either side sends a reaction. */}
@@ -12991,8 +11963,9 @@ function DeviceFrame({
           const otherLabel = isNana ? (childName || getRoleLabel("child")) : (nanaName || getRoleLabel("nana"));
           return (
             <DraggablePiP
-              storageKey={`nm_session_pip_${isNana ? "nana" : "perry"}`}
-              defaultCorner="tr"
+              storageKey={`nm_session_pip2_${isNana ? "nana" : "perry"}`}
+              // Bottom-right: the top-right corner holds the Menu button.
+              defaultCorner="br"
               margin={12}
               zIndex={40}
             >
@@ -13033,12 +12006,275 @@ function DeviceFrame({
             onCancel={() => setEndCallConfirmOpen(false)}
             onConfirm={() => {
               setEndCallConfirmOpen(false);
-              onEndSession();
+              // Build 38: End Call hangs up (end-of-visit card), never the
+              // journal detour.
+              (onHangUp ?? onEndSession)();
             }}
           />
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Reading screen, Build 38 (Rick's "full page" mockup, Master Plan §5).
+ * One layout for both iPads: the book as large as the screen allows, a
+ * single page pill under it ("← 2 / 80 →", the only page counter), and
+ * for Nana the page's conversation cue as a tappable Let's Talk pill.
+ * The right column holds two big faces, Show & Tell, and labeled round
+ * buttons (mic, camera, reactions, light).
+ */
+function FullPageReading({
+  isNana,
+  bookEl,
+  nanaName,
+  childName,
+  readingTheme,
+  onThemeChange,
+  onReact,
+  cue,
+  onLetsTalk,
+  onShowAndTell,
+  readingPos,
+  onPrev,
+  onNext,
+}: {
+  isNana: boolean;
+  bookEl: ReactNode;
+  nanaName: string;
+  childName: string;
+  readingTheme: ReadingTheme;
+  onThemeChange?: (t: ReadingTheme) => void;
+  onReact?: (e: ReactionEmoji) => void;
+  /** Nana only: this spread's conversation cue. */
+  cue: string | null;
+  onLetsTalk?: () => void;
+  /** Nana starts Show & Tell; the child sends a request. */
+  onShowAndTell?: () => void;
+  readingPos: { pageNum: number; pageTotal: number; atStart: boolean; atEnd: boolean } | null;
+  onPrev?: () => void;
+  onNext?: () => void;
+}) {
+  const [asked, setAsked] = useState(false);
+  useEffect(() => {
+    if (!asked) return;
+    const t = window.setTimeout(() => setAsked(false), 4000);
+    return () => window.clearTimeout(t);
+  }, [asked]);
+  const nanaLabel = nanaName || getRoleLabel("nana");
+  const childLabel = childName || getRoleLabel("child");
+  const pos = readingPos;
+  return (
+    <div data-bk-layout="fullpage" className="nm-fp" style={{
+      display: "flex", flex: 1, minHeight: 0, overflow: "hidden",
+      gap: 12, padding: "10px 12px 12px",
+      background: "radial-gradient(900px 520px at 30% -10%, rgba(201,146,42,0.10), transparent 70%), #0b172e",
+    }}>
+      <style>{`
+        .nm-fp-side { width: clamp(210px, 23vw, 290px); }
+        @media (max-width: 1150px) { .nm-fp-side { width: clamp(200px, 22vw, 250px); } }
+        .nm-fp-round:active, .nm-fp-nav:active:not(:disabled), .nm-fp-cta:active { transform: scale(0.96); }
+      `}</style>
+
+      {/* Book column */}
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 10 }}>
+        <div className="nm-fp-book" style={{
+          flex: 1, minHeight: 0, display: "flex", flexDirection: "column",
+          borderRadius: 14, overflow: "hidden",
+          boxShadow: READING_THEMES[readingTheme].bookShadow,
+        }}>
+          {bookEl}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0, justifyContent: isNana ? "space-between" : "center" }}>
+          {isNana && (
+            <button
+              type="button"
+              data-testid="lets-talk-pill"
+              className="nm-fp-cta"
+              onClick={onLetsTalk}
+              style={{
+                flex: 1, minWidth: 0, minHeight: 58,
+                display: "flex", alignItems: "center", gap: 12,
+                padding: "8px 18px 8px 10px", borderRadius: 999,
+                background: "rgba(201,146,42,0.12)",
+                border: "1.5px solid rgba(201,146,42,0.55)",
+                color: CREAM, cursor: "pointer", textAlign: "left",
+                touchAction: "manipulation",
+              }}
+            >
+              <span aria-hidden style={{
+                width: 40, height: 40, borderRadius: "50%", flexShrink: 0,
+                background: AMBER, color: NAVY,
+                display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 20,
+              }}>💬</span>
+              <span style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+                <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase" }}>Let's Talk</span>
+                <span style={{ fontFamily: "Merriweather, serif", fontSize: 15, fontStyle: "italic", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  {cue || `Ask ${childLabel} about the story`}
+                </span>
+              </span>
+            </button>
+          )}
+          {pos && (
+            <div role="group" aria-label="Turn pages" data-testid="page-pill" style={{
+              display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0,
+              padding: 5, borderRadius: 999,
+              background: "rgba(11,23,46,0.9)", border: "1px solid rgba(201,146,42,0.4)",
+              boxShadow: "0 6px 20px rgba(0,0,0,0.4)",
+            }}>
+              <button type="button" className="nm-fp-nav" onClick={onPrev} disabled={pos.atStart} aria-label="Previous page" style={navBtnStyle(pos.atStart)}>←</button>
+              <span data-testid="page-pill-label" style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 19, fontWeight: 800, padding: "0 10px", minWidth: 84, textAlign: "center", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+                {pos.pageNum} <span style={{ opacity: 0.55, fontWeight: 700 }}>/ {pos.pageTotal}</span>
+              </span>
+              <button type="button" className="nm-fp-nav" onClick={onNext} disabled={pos.atEnd} aria-label="Next page" style={navBtnStyle(pos.atEnd)}>→</button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Presence column */}
+      <aside className="nm-fp-side" style={{ display: "flex", flexDirection: "column", gap: 10, flexShrink: 0, minHeight: 0 }}>
+        <div style={{ flex: "1 1 0", minHeight: 110, display: "flex" }}>
+          <FaceVideo
+            person={isNana ? "child" : "nana"}
+            width="100%"
+            height="100%"
+            label={isNana ? childLabel : nanaLabel}
+            showLabel
+            borderRadius={16}
+            autoMirror={false}
+          />
+        </div>
+        <div style={{ flex: "1 1 0", minHeight: 110, display: "flex" }}>
+          <FaceVideo
+            person={isNana ? "nana" : "child"}
+            width="100%"
+            height="100%"
+            label={isNana ? `${nanaLabel} (you)` : `${childLabel} (you)`}
+            showLabel
+            borderRadius={16}
+          />
+        </div>
+        {onShowAndTell && (
+          <button
+            type="button"
+            data-testid="show-and-tell-btn"
+            className="nm-fp-cta"
+            onClick={() => { onShowAndTell(); if (!isNana) setAsked(true); }}
+            disabled={!isNana && asked}
+            style={{
+              minHeight: 58, borderRadius: 16, border: "none", flexShrink: 0,
+              background: !isNana && asked ? "rgba(20,184,166,0.25)" : "linear-gradient(135deg, #2dd4bf 0%, #14b8a6 55%, #0d9488 100%)",
+              color: !isNana && asked ? "#99f6e4" : "#042f2e",
+              fontFamily: "DM Sans, sans-serif", fontSize: 18, fontWeight: 800,
+              display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
+              boxShadow: "0 6px 18px rgba(20,184,166,0.35)",
+              cursor: "pointer", touchAction: "manipulation",
+            }}
+          >
+            <span aria-hidden style={{ fontSize: 20 }}>🎁</span>
+            {isNana ? "Show & Tell" : asked ? `Asked ${nanaLabel}!` : "Ask for Show & Tell"}
+          </button>
+        )}
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 6, flexShrink: 0 }}>
+          <RoundMicCam />
+          {onReact && <ReactionsDropdown onReact={onReact} autoCloseMs={isNana ? undefined : 7000} variant="round" />}
+          {isNana && onThemeChange && (
+            <RoundButton
+              label="Light"
+              ariaLabel={`Page light: ${READING_THEME_LABEL[readingTheme]}. Tap to change.`}
+              onClick={() => onThemeChange(NEXT_THEME[readingTheme])}
+              testId="round-theme"
+            >
+              <span aria-hidden style={{
+                width: 22, height: 22, borderRadius: "50%",
+                background: READING_THEMES[readingTheme].page,
+                border: `2px solid ${READING_THEMES[readingTheme].text}`,
+              }} />
+            </RoundButton>
+          )}
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function navBtnStyle(disabled: boolean): React.CSSProperties {
+  return {
+    width: 52, height: 52, borderRadius: "50%", border: "none",
+    background: disabled ? "rgba(255,255,255,0.07)" : "linear-gradient(135deg, #f7c95d 0%, #C9922A 100%)",
+    color: disabled ? "rgba(247,240,227,0.3)" : NAVY,
+    fontSize: 24, fontWeight: 900, lineHeight: 1,
+    display: "inline-flex", alignItems: "center", justifyContent: "center",
+    cursor: disabled ? "not-allowed" : "pointer", padding: 0, touchAction: "manipulation",
+    transition: "transform 100ms ease",
+  };
+}
+
+/** Round, labeled control for the reading column (grandparent test: a
+ *  word under every icon). */
+function RoundButton({ label, ariaLabel, onClick, on, children, testId, disabled }: {
+  label: string; ariaLabel: string; onClick: () => void; on?: boolean; children: ReactNode; testId?: string; disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      className="nm-fp-round"
+      aria-label={ariaLabel}
+      aria-pressed={on}
+      data-testid={testId}
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        flex: "1 1 0", minWidth: 0,
+        display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
+        background: "transparent", border: "none", padding: 0,
+        cursor: disabled ? "not-allowed" : "pointer", touchAction: "manipulation",
+        opacity: disabled ? 0.45 : 1,
+      }}
+    >
+      <span style={{
+        width: 52, height: 52, borderRadius: "50%",
+        display: "inline-flex", alignItems: "center", justifyContent: "center",
+        background: on === false ? "rgba(239,68,68,0.18)" : "rgba(255,255,255,0.08)",
+        border: `1.5px solid ${on === false ? "rgba(248,113,113,0.7)" : "rgba(255,255,255,0.2)"}`,
+        color: on === false ? "#fca5a5" : CREAM,
+      }}>
+        {children}
+      </span>
+      <span style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700 }}>{label}</span>
+    </button>
+  );
+}
+
+/** Mic and camera as two round buttons (red when off). */
+function RoundMicCam() {
+  const { isMicEnabled, isCameraEnabled, setMicEnabled, setCameraEnabled, status } = useVideoSession();
+  const live = status !== "idle" && status !== "error";
+  return (
+    <>
+      <RoundButton
+        label={isMicEnabled ? "Mic" : "Muted"}
+        ariaLabel={isMicEnabled ? "Mute microphone" : "Unmute microphone"}
+        onClick={() => setMicEnabled(!isMicEnabled)}
+        on={isMicEnabled}
+        disabled={!live}
+        testId="round-mic"
+      >
+        {isMicEnabled ? <Mic size={22} strokeWidth={2.2} aria-hidden /> : <MicOff size={22} strokeWidth={2.2} aria-hidden />}
+      </RoundButton>
+      <RoundButton
+        label={isCameraEnabled ? "Camera" : "Cam off"}
+        ariaLabel={isCameraEnabled ? "Turn camera off" : "Turn camera on"}
+        onClick={() => setCameraEnabled(!isCameraEnabled)}
+        on={isCameraEnabled}
+        disabled={!live}
+        testId="round-cam"
+      >
+        {isCameraEnabled ? <VideoIcon size={22} strokeWidth={2.2} aria-hidden /> : <VideoOff size={22} strokeWidth={2.2} aria-hidden />}
+      </RoundButton>
+    </>
   );
 }
 
@@ -13127,7 +12363,7 @@ function ReadingPiPSidebar({
           Chrome where Blur shows, it's Mic/Cam top, Blur/Rec bottom. */}
       {isNana && (
         <div style={{ flexShrink: 0, display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 4 }}>
-          <VideoControls compact showRecording />
+          <VideoControls compact showRecording={FEATURES.recording} />
         </div>
       )}
       {/* Rick's Build 30 review #8: reactions grid tucked into a compact
@@ -13135,7 +12371,7 @@ function ReadingPiPSidebar({
           Frees up ~60px of sidebar vertical real estate on picture books. */}
       {onReact && (
         <div style={{ flexShrink: 0, display: "flex", justifyContent: "center" }}>
-          <ReactionsDropdown onReact={onReact} />
+          <ReactionsDropdown onReact={onReact} autoCloseMs={isNana ? undefined : 7000} />
         </div>
       )}
       {isNana && onThemeChange && (
@@ -13144,73 +12380,6 @@ function ReadingPiPSidebar({
         </div>
       )}
     </aside>
-  );
-}
-
-function EndCallConfirm({ onCancel, onConfirm }: { onCancel: () => void; onConfirm: () => void }) {
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="end-call-title"
-      style={{
-        position: "absolute",
-        inset: 0,
-        zIndex: 80,
-        backgroundColor: "rgba(8,15,30,0.78)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 20,
-        animation: "phase-intro-fade 0.2s ease-out",
-      }}
-    >
-      <div
-        style={{
-          backgroundColor: "#162240",
-          border: "1px solid rgba(201,146,42,0.35)",
-          borderRadius: 18,
-          padding: "22px 22px 18px",
-          width: "100%",
-          maxWidth: 360,
-          textAlign: "center",
-          boxShadow: "0 18px 60px rgba(0,0,0,0.55)",
-          animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
-        }}
-      >
-        <div id="end-call-title" style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 20, fontWeight: 700 }}>
-          End this session?
-        </div>
-        <div style={{ color: "rgba(247,240,227,0.78)", fontFamily: "DM Sans, sans-serif", fontSize: 13, lineHeight: 1.55, marginTop: 8, marginBottom: 18 }}>
-          The call ends for both screens and you'll be taken to the memory journal to save a note about today.
-        </div>
-        <div style={{ display: "flex", gap: 10 }}>
-          <button
-            type="button"
-            onClick={onCancel}
-            style={{
-              flex: 1, backgroundColor: "rgba(255,255,255,0.06)", color: CREAM,
-              border: "1px solid rgba(255,255,255,0.14)", borderRadius: 24, padding: "12px",
-              fontFamily: "DM Sans, sans-serif", fontWeight: 700, fontSize: 14, cursor: "pointer",
-            }}
-          >
-            Keep reading
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            style={{
-              flex: 1, backgroundColor: "#ef4444", color: "white",
-              border: "none", borderRadius: 24, padding: "12px",
-              fontFamily: "DM Sans, sans-serif", fontWeight: 800, fontSize: 14, cursor: "pointer",
-              boxShadow: "0 6px 22px rgba(239,68,68,0.35)",
-            }}
-          >
-            End call
-          </button>
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -13225,145 +12394,6 @@ function EndCallConfirm({ onCancel, onConfirm }: { onCancel: () => void; onConfi
  * ────────────────────────────────────────────────────────── */
 
 type NavDestination = "home" | "schedule" | "sillyfaces" | "goodbye";
-
-/**
- * MenuDrawer — a right-side sheet that consolidates all cross-screen
- * navigation into one grandparent-friendly list. Rick's Jun 22 spec:
- * "The top toolbar icons aren't very useful as-is — consider a
- * dropdown or side menu that includes Home / Schedule / Show & Tell /
- * Continue Reading / Silly Faces / Goodbye / Memory Vault."
- *
- * Tap outside or tap any item closes the drawer. Big 56px+ rows with
- * text labels (not just icons) to pass the grandparent-first
- * one-tap-first-read heuristic.
- */
-interface MenuItem {
-  key: string;
-  label: string;
-  sublabel?: string;
-  icon: ReactNode;
-  onClick: () => void;
-  active?: boolean;
-  destructive?: boolean;
-  divider?: never;
-}
-interface MenuDivider { divider: true; key: string; label?: string }
-type MenuEntry = MenuItem | MenuDivider;
-
-function MenuDrawer({ open, onClose, entries }: { open: boolean; onClose: () => void; entries: MenuEntry[] }) {
-  if (!open) return null;
-  return (
-    <>
-      <style>{`
-        @keyframes nm-drawer-slide { from { transform: translateX(100%); opacity: 0.4; } to { transform: translateX(0); opacity: 1; } }
-      `}</style>
-      <div
-        onClick={onClose}
-        aria-hidden
-        style={{
-          position: "absolute",
-          inset: 0,
-          zIndex: 60,
-          backgroundColor: "rgba(8,15,30,0.55)",
-          backdropFilter: "blur(2px)",
-          animation: "phase-intro-fade 0.2s ease-out",
-        }}
-      />
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="Menu"
-        style={{
-          position: "absolute",
-          top: 0, right: 0, bottom: 0,
-          width: "min(320px, 84%)",
-          zIndex: 70,
-          background: "linear-gradient(180deg, #14223e 0%, #0b172e 100%)",
-          borderLeft: "1px solid rgba(201,146,42,0.35)",
-          boxShadow: "-8px 0 32px rgba(0,0,0,0.65)",
-          display: "flex", flexDirection: "column",
-          padding: "12px 12px 16px",
-          animation: "nm-drawer-slide 0.24s cubic-bezier(0.22,1,0.36,1)",
-          overflowY: "auto",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 6px 10px", flexShrink: 0 }}>
-          <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase" }}>Menu</span>
-          <button
-            onClick={onClose}
-            aria-label="Close menu"
-            style={{
-              width: 36, height: 36, borderRadius: 999,
-              background: "rgba(255,255,255,0.06)",
-              border: "1px solid rgba(255,255,255,0.14)",
-              color: CREAM,
-              display: "inline-flex", alignItems: "center", justifyContent: "center",
-              cursor: "pointer", padding: 0,
-              touchAction: "manipulation",
-            }}
-          >
-            <XIcon size={18} strokeWidth={2.2} aria-hidden />
-          </button>
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          {entries.map((entry) => {
-            if ("divider" in entry) {
-              return (
-                <div key={entry.key} style={{ margin: "8px 4px 4px", borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: 8 }}>
-                  {entry.label && (
-                    <span style={{ color: "rgba(247,240,227,0.4)", fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", paddingLeft: 8 }}>
-                      {entry.label}
-                    </span>
-                  )}
-                </div>
-              );
-            }
-            return (
-              <button
-                key={entry.key}
-                onClick={() => { entry.onClick(); onClose(); }}
-                style={{
-                  display: "flex", alignItems: "center", gap: 14,
-                  padding: "14px 12px",
-                  borderRadius: 12,
-                  backgroundColor: entry.active ? "rgba(201,146,42,0.14)" : "transparent",
-                  border: `1px solid ${entry.active ? "rgba(201,146,42,0.45)" : "transparent"}`,
-                  color: entry.destructive ? "#f87171" : (entry.active ? AMBER : CREAM),
-                  fontFamily: "DM Sans, sans-serif",
-                  fontSize: 15, fontWeight: 700,
-                  cursor: "pointer",
-                  textAlign: "left",
-                  minHeight: 52,
-                  touchAction: "manipulation",
-                  transition: "background-color 140ms ease",
-                }}
-              >
-                <span aria-hidden style={{
-                  width: 30, height: 30, borderRadius: 8,
-                  backgroundColor: entry.destructive
-                    ? "rgba(248,113,113,0.15)"
-                    : entry.active
-                      ? "rgba(201,146,42,0.18)"
-                      : "rgba(255,255,255,0.06)",
-                  display: "inline-flex", alignItems: "center", justifyContent: "center",
-                  flexShrink: 0,
-                }}>
-                  {entry.icon}
-                </span>
-                <span style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
-                  <span>{entry.label}</span>
-                  {entry.sublabel && (
-                    <span style={{ fontSize: 11, fontWeight: 500, opacity: 0.6 }}>{entry.sublabel}</span>
-                  )}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    </>
-  );
-}
 
 function MenuButton({ onClick }: { onClick: () => void }) {
   // Rick's Aug 14 feedback: "Menu button — hard to see (light orange
@@ -13383,13 +12413,13 @@ function MenuButton({ onClick }: { onClick: () => void }) {
         color: NAVY,
         border: "1px solid rgba(11,23,46,0.20)",
         borderRadius: 999,
-        padding: "8px 16px 8px 14px",
+        padding: "8px 18px 8px 16px",
         fontFamily: "DM Sans, sans-serif",
-        fontSize: 13, fontWeight: 800,
+        fontSize: 15, fontWeight: 800,
         letterSpacing: "0.04em",
         cursor: "pointer",
         touchAction: "manipulation",
-        minHeight: 40,
+        minHeight: 44,
         flexShrink: 0,
         boxShadow: "0 4px 12px rgba(201,146,42,0.42), inset 0 1px 0 rgba(255,255,255,0.35)",
       }}
@@ -13553,206 +12583,6 @@ function ChildPicker({
   );
 }
 
-function AddChildModal({
-  onClose,
-  onConfirm,
-}: {
-  onClose: () => void;
-  /** Returns a promise so the modal can display submitting/error state. */
-  onConfirm: (body: { name: string; birthday: string | null; pin: string }) => Promise<Child>;
-}) {
-  const [name, setName] = useState("");
-  const [age, setAge] = useState<number | "">("");
-  const [pin, setPin] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
-
-  const valid = name.trim().length > 0 && /^\d{4}$/.test(pin) && (age === "" || (typeof age === "number" && age >= 1 && age <= 14));
-
-  const handleSubmit = async () => {
-    if (!valid || submitting) return;
-    setSubmitting(true);
-    setError("");
-    try {
-      // Birthday is the year/month/day that would put the child at the
-      // entered age today — gives the backend a normalized date even if
-      // the user only knows their age. Future age-appropriate book
-      // filtering can read off birthday without forcing parents to
-      // remember the exact date here.
-      let birthday: string | null = null;
-      if (typeof age === "number") {
-        const d = new Date();
-        d.setFullYear(d.getFullYear() - age);
-        birthday = d.toISOString().slice(0, 10);
-      }
-      await onConfirm({ name: name.trim(), birthday, pin });
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't add child. Try again.");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="add-child-title"
-      style={{
-        position: "absolute", inset: 0, zIndex: 90,
-        backgroundColor: "rgba(8,15,30,0.78)",
-        display: "flex", alignItems: "center", justifyContent: "center",
-        padding: 20,
-        animation: "phase-intro-fade 0.2s ease-out",
-      }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <div style={{
-        backgroundColor: "#162240",
-        border: "1px solid rgba(201,146,42,0.35)",
-        borderRadius: 18,
-        padding: "22px 22px 18px",
-        width: "100%", maxWidth: 380,
-        boxShadow: "0 18px 60px rgba(0,0,0,0.55)",
-        animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
-      }}>
-        <div id="add-child-title" style={{
-          color: AMBER, fontFamily: "Playfair Display, serif",
-          fontSize: 22, fontWeight: 700, textAlign: "center",
-          marginBottom: 4,
-        }}>
-          Add a sibling
-        </div>
-        <div style={{
-          color: "rgba(247,240,227,0.65)", fontFamily: "DM Sans, sans-serif",
-          fontSize: 12, lineHeight: 1.5, textAlign: "center",
-          marginBottom: 18,
-        }}>
-          They'll log in on the kids' iPad with a 4-digit PIN.<br />
-          Pick something simple they'll remember.
-        </div>
-
-        {/* Name */}
-        <label style={{
-          display: "block", color: "rgba(247,240,227,0.78)",
-          fontFamily: "DM Sans, sans-serif", fontSize: 11,
-          fontWeight: 700, letterSpacing: "0.08em",
-          marginBottom: 5,
-        }}>NAME</label>
-        <input
-          type="text"
-          value={name}
-          autoFocus
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Cooper"
-          maxLength={30}
-          style={{
-            width: "100%", boxSizing: "border-box",
-            padding: "12px 14px", marginBottom: 14,
-            borderRadius: 12, border: "1px solid rgba(255,255,255,0.14)",
-            backgroundColor: "rgba(255,255,255,0.05)",
-            color: CREAM, fontFamily: "DM Sans, sans-serif",
-            fontSize: 15, outline: "none",
-          }}
-        />
-
-        {/* Age */}
-        <label style={{
-          display: "block", color: "rgba(247,240,227,0.78)",
-          fontFamily: "DM Sans, sans-serif", fontSize: 11,
-          fontWeight: 700, letterSpacing: "0.08em",
-          marginBottom: 5,
-        }}>AGE</label>
-        <select
-          value={age}
-          onChange={(e) => setAge(e.target.value ? Number(e.target.value) : "")}
-          style={{
-            width: "100%", boxSizing: "border-box",
-            padding: "12px 14px", marginBottom: 14,
-            borderRadius: 12, border: "1px solid rgba(255,255,255,0.14)",
-            backgroundColor: "rgba(255,255,255,0.05)",
-            color: CREAM, fontFamily: "DM Sans, sans-serif",
-            fontSize: 15, outline: "none",
-            appearance: "none" as const,
-          }}
-        >
-          <option value="" style={{ background: "#0b172e" }}>Pick an age…</option>
-          {Array.from({ length: 14 }, (_, i) => i + 1).map((n) => (
-            <option key={n} value={n} style={{ background: "#0b172e" }}>{n} years old</option>
-          ))}
-        </select>
-
-        {/* PIN */}
-        <label style={{
-          display: "block", color: "rgba(247,240,227,0.78)",
-          fontFamily: "DM Sans, sans-serif", fontSize: 11,
-          fontWeight: 700, letterSpacing: "0.08em",
-          marginBottom: 5,
-        }}>4-DIGIT PIN</label>
-        <input
-          type="text"
-          inputMode="numeric"
-          pattern="\d{4}"
-          value={pin}
-          onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
-          placeholder="1234"
-          style={{
-            width: "100%", boxSizing: "border-box",
-            padding: "12px 14px", marginBottom: 6,
-            borderRadius: 12, border: "1px solid rgba(255,255,255,0.14)",
-            backgroundColor: "rgba(255,255,255,0.05)",
-            color: CREAM, fontFamily: "DM Sans, sans-serif",
-            fontSize: 18, letterSpacing: "0.4em", textAlign: "center",
-            outline: "none",
-          }}
-        />
-
-        {error && (
-          <div style={{
-            color: "#fca5a5", fontFamily: "DM Sans, sans-serif",
-            fontSize: 12, marginTop: 6, textAlign: "center",
-          }}>{error}</div>
-        )}
-
-        <div style={{ display: "flex", gap: 10, marginTop: 18 }}>
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={submitting}
-            style={{
-              flex: 1, backgroundColor: "rgba(255,255,255,0.06)",
-              color: CREAM, border: "1px solid rgba(255,255,255,0.14)",
-              borderRadius: 24, padding: "12px",
-              fontFamily: "DM Sans, sans-serif", fontWeight: 700,
-              fontSize: 14, cursor: submitting ? "not-allowed" : "pointer",
-              opacity: submitting ? 0.5 : 1,
-              minHeight: 44,
-            }}
-          >Cancel</button>
-          <button
-            type="button"
-            onClick={handleSubmit}
-            disabled={!valid || submitting}
-            style={{
-              flex: 1,
-              background: valid && !submitting
-                ? "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)"
-                : "rgba(255,255,255,0.08)",
-              color: valid && !submitting ? NAVY : "rgba(247,240,227,0.4)",
-              border: "none", borderRadius: 24, padding: "12px",
-              fontFamily: "DM Sans, sans-serif", fontWeight: 800,
-              fontSize: 14, cursor: valid && !submitting ? "pointer" : "not-allowed",
-              boxShadow: valid && !submitting ? "0 6px 22px rgba(201,146,42,0.45)" : "none",
-              minHeight: 44,
-            }}
-          >{submitting ? "Adding…" : "Add child"}</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 /* ─── Phase Intro Card ───────────────────────────────────── */
 
 const PHASE_INTROS: Partial<Record<Mode, { emoji: string; title: string; description: string }>> = {
@@ -13909,20 +12739,23 @@ function PhaseIntroCard({
  * portal-mounted popover for the emoji picker so it floats above the
  * book frame regardless of z-index nesting.
  */
-function ReactionsDropdown({ onReact }: { onReact?: (e: ReactionEmoji) => void }) {
+function ReactionsDropdown({ onReact, autoCloseMs, variant = "pill" }: { onReact?: (e: ReactionEmoji) => void; autoCloseMs?: number; variant?: "pill" | "round" }) {
   const [open, setOpen] = useState(false);
   const [anchor, setAnchor] = useState<{ top: number; left: number } | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
+  useIdleAutoClose(open, () => setOpen(false), autoCloseMs, popRef);
 
   useEffect(() => {
     if (!open) return;
     const recompute = () => {
       if (!btnRef.current) return;
       const r = btnRef.current.getBoundingClientRect();
-      // Popover width ~180px; anchor so it doesn't clip the right edge.
-      const left = Math.min(r.left, window.innerWidth - 190);
-      setAnchor({ top: r.bottom + 6, left });
+      // Popover ~200 x 60; keep it on screen (it opens upward when the
+      // button sits near the bottom, as in the reading column).
+      const left = Math.max(8, Math.min(r.left + r.width / 2 - 100, window.innerWidth - 208));
+      const below = r.bottom + 6;
+      setAnchor({ top: below + 64 > window.innerHeight ? r.top - 70 : below, left });
     };
     recompute();
     window.addEventListener("resize", recompute);
@@ -13935,14 +12768,16 @@ function ReactionsDropdown({ onReact }: { onReact?: (e: ReactionEmoji) => void }
 
   useEffect(() => {
     if (!open) return;
-    const onDoc = (e: MouseEvent) => {
+    // pointerdown, not mousedown: iPad often sends no mouse event for a
+    // tap on plain text, which left the menu stuck open.
+    const onDoc = (e: PointerEvent) => {
       const t = e.target as Node;
       if (btnRef.current?.contains(t)) return;
       if (popRef.current?.contains(t)) return;
       setOpen(false);
     };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
+    document.addEventListener("pointerdown", onDoc);
+    return () => document.removeEventListener("pointerdown", onDoc);
   }, [open]);
 
   if (!onReact) return null;
@@ -13956,6 +12791,33 @@ function ReactionsDropdown({ onReact }: { onReact?: (e: ReactionEmoji) => void }
 
   return (
     <>
+      {variant === "round" ? (
+        <button
+          ref={btnRef}
+          type="button"
+          className="nm-fp-round"
+          data-testid="round-react"
+          onClick={() => setOpen(o => !o)}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-label="Send a reaction"
+          style={{
+            flex: "1 1 0", minWidth: 0,
+            display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
+            background: "transparent", border: "none", padding: 0,
+            cursor: "pointer", touchAction: "manipulation",
+          }}
+        >
+          <span style={{
+            width: 52, height: 52, borderRadius: "50%",
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+            background: open ? "rgba(251,191,36,0.28)" : "rgba(251,191,36,0.14)",
+            border: "1.5px solid rgba(251,191,36,0.6)",
+            fontSize: 24,
+          }}>💛</span>
+          <span style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700 }}>React</span>
+        </button>
+      ) : (
       <button
         ref={btnRef}
         onClick={() => setOpen(o => !o)}
@@ -13980,6 +12842,7 @@ function ReactionsDropdown({ onReact }: { onReact?: (e: ReactionEmoji) => void }
         <span>React</span>
         <span style={{ fontSize: 9, opacity: 0.7 }}>▾</span>
       </button>
+      )}
       {open && anchor && createPortal(
         <div
           ref={popRef}
@@ -14003,7 +12866,7 @@ function ReactionsDropdown({ onReact }: { onReact?: (e: ReactionEmoji) => void }
               onClick={() => { onReact(key); setOpen(false); }}
               aria-label={`Send ${getReactionLabel(key)}`}
               style={{
-                width: 42, height: 42, borderRadius: 12,
+                width: 44, height: 44, borderRadius: 12,
                 border: `1px solid color-mix(in srgb, ${accent} 32%, rgba(255,255,255,0.10))`,
                 backgroundImage: `linear-gradient(155deg, color-mix(in srgb, ${accent} 18%, rgba(255,255,255,0.04)) 0%, rgba(255,255,255,0.04) 70%)`,
                 backgroundColor: "rgba(255,255,255,0.04)",
@@ -14033,54 +12896,128 @@ function ReactionsDropdown({ onReact }: { onReact?: (e: ReactionEmoji) => void }
  * he approves + publishes the resulting book, both iPads receive a
  * toast via the book_request_approved SSE event.
  */
-function BookRequestModal({ connectionId, onClose }: { connectionId: string; onClose: () => void }) {
+function BookRequestModal({
+  connectionId,
+  onClose,
+  initialQuery = "",
+}: {
+  connectionId: string;
+  onClose: () => void;
+  /** Pre-filled search (e.g. what Nana typed in the library). */
+  initialQuery?: string;
+}) {
+  // Rick's Build 33: Request a Book searches free classics (Standard
+  // Ebooks, then Project Gutenberg) so Nana can pick the exact book. The
+  // request carries the EPUB link and cover, so admin imports it in one
+  // click. Typing a title by hand stays available as a fallback.
+  type Result = Awaited<ReturnType<typeof api.library.search>>[number];
+  const [query, setQuery] = useState(initialQuery);
+  const [results, setResults] = useState<Result[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchErr, setSearchErr] = useState("");
+  const [manual, setManual] = useState(false);
   const [title, setTitle] = useState("");
   const [author, setAuthor] = useState("");
   const [sourceUrl, setSourceUrl] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  const [submittingKey, setSubmittingKey] = useState<string | null>(null);
   const [err, setErr] = useState("");
-  const [done, setDone] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
+  const searchSeqRef = useRef(0);
 
-  const submit = async () => {
+  useEffect(() => {
+    const q = query.trim();
+    if (manual || q.length < 2) { setResults(null); setSearchErr(""); setSearching(false); return; }
+    const seq = ++searchSeqRef.current;
+    setSearching(true);
+    const t = window.setTimeout(async () => {
+      try {
+        const r = await api.library.search(q, connectionId);
+        if (seq !== searchSeqRef.current) return;
+        setResults(r);
+        setSearchErr("");
+      } catch (e) {
+        if (seq !== searchSeqRef.current) return;
+        setResults(null);
+        setSearchErr(e instanceof Error ? e.message : "Search isn't working right now. Try again.");
+      } finally {
+        if (seq === searchSeqRef.current) setSearching(false);
+      }
+    }, 450);
+    return () => window.clearTimeout(t);
+  }, [query, manual, connectionId]);
+
+  const requestResult = async (r: Result) => {
+    setErr(""); setSubmittingKey(r.epubUrl);
+    try {
+      await api.bookRequests.submit(connectionId, {
+        title: r.title,
+        author: r.author || undefined,
+        sourceUrl: r.epubUrl,
+        source: r.source,
+        coverUrl: r.coverUrl ?? undefined,
+      });
+      setDone(r.title);
+      window.setTimeout(onClose, 2400);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Something went wrong. Try again.");
+    } finally {
+      setSubmittingKey(null);
+    }
+  };
+
+  const submitManual = async () => {
     const t = title.trim();
     if (!t) { setErr("Please enter a title."); return; }
-    setErr(""); setSubmitting(true);
+    setErr(""); setSubmittingKey("manual");
     try {
       await api.bookRequests.submit(connectionId, {
         title: t,
         author: author.trim() || undefined,
         sourceUrl: sourceUrl.trim() || undefined,
       });
-      setDone(true);
-      window.setTimeout(onClose, 2200);
+      setDone(t);
+      window.setTimeout(onClose, 2400);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Something went wrong. Try again.");
     } finally {
-      setSubmitting(false);
+      setSubmittingKey(null);
     }
   };
 
+  const busy = submittingKey !== null;
   const inputStyle: React.CSSProperties = {
     width: "100%",
     background: "rgba(255,255,255,0.06)",
     border: "1px solid rgba(255,255,255,0.18)",
     borderRadius: 12,
-    padding: "11px 14px",
+    padding: "12px 14px",
     color: CREAM,
-    fontFamily: "DM Sans, sans-serif", fontSize: 14,
+    fontFamily: "DM Sans, sans-serif", fontSize: 16,
     outline: "none",
   };
   const labelStyle: React.CSSProperties = {
     color: "rgba(247,240,227,0.7)", fontFamily: "DM Sans, sans-serif",
-    fontSize: 11, fontWeight: 800, letterSpacing: "0.10em", textTransform: "uppercase",
+    fontSize: 12, fontWeight: 800, letterSpacing: "0.10em", textTransform: "uppercase",
     display: "block", marginBottom: 6,
   };
+  const pillBtn = (primary: boolean): React.CSSProperties => ({
+    background: primary ? "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)" : "transparent",
+    color: primary ? NAVY : "rgba(247,240,227,0.8)",
+    border: primary ? "none" : "1px solid rgba(255,255,255,0.22)",
+    borderRadius: 999,
+    padding: "10px 20px",
+    fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 800, letterSpacing: "0.02em",
+    cursor: "pointer",
+    minHeight: 48, touchAction: "manipulation",
+    boxShadow: primary ? "0 6px 16px rgba(201,146,42,0.42)" : "none",
+    whiteSpace: "nowrap",
+  });
 
   return (
     <div
       role="dialog"
       aria-modal="true"
-      onClick={submitting ? undefined : onClose}
+      onClick={busy ? undefined : onClose}
       style={{
         position: "fixed", inset: 0, zIndex: 220,
         background: "rgba(8,15,30,0.82)",
@@ -14092,11 +13029,13 @@ function BookRequestModal({ connectionId, onClose }: { connectionId: string; onC
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: "min(520px, 100%)",
+          width: "min(620px, 100%)",
+          maxHeight: "calc(100% - 16px)",
+          display: "flex", flexDirection: "column",
           background: "linear-gradient(180deg, #14223e 0%, #0b172e 100%)",
           border: "1px solid rgba(201,146,42,0.45)",
           borderRadius: 18,
-          padding: "24px 24px 20px",
+          padding: "22px 22px 18px",
           boxShadow: "0 24px 60px rgba(0,0,0,0.6)",
           animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
         }}
@@ -14104,76 +13043,133 @@ function BookRequestModal({ connectionId, onClose }: { connectionId: string; onC
         {done ? (
           <div style={{ textAlign: "center", padding: "10px 0 6px" }}>
             <div style={{ fontSize: 44, marginBottom: 8 }}>📮</div>
-            <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 20, fontWeight: 700, marginBottom: 6 }}>
+            <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 21, fontWeight: 700, marginBottom: 6 }}>
               Request sent!
             </div>
-            <div style={{ color: "rgba(247,240,227,0.7)", fontSize: 13, lineHeight: 1.55 }}>
-              We'll let you know as soon as the book is added to your library.
+            <div style={{ color: "rgba(247,240,227,0.75)", fontSize: 15, lineHeight: 1.55 }}>
+              We'll let you know as soon as <em>{done}</em> is in your library.
             </div>
           </div>
         ) : (
           <>
-            <div style={{ marginBottom: 14 }}>
-              <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 21, fontWeight: 700, marginBottom: 4 }}>
+            <div style={{ marginBottom: 12, flexShrink: 0 }}>
+              <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>
                 Request a book
               </div>
-              <div style={{ color: "rgba(247,240,227,0.6)", fontSize: 12.5, lineHeight: 1.55 }}>
-                Can't find a story you love? Tell us the title and we'll try to add it. You'll get a notice when it's ready.
+              <div style={{ color: "rgba(247,240,227,0.65)", fontSize: 14, lineHeight: 1.5 }}>
+                {manual
+                  ? "Tell us the title and we'll try to add it. You'll get a notice when it's ready."
+                  : "Search thousands of free classic books. Pick one and we'll add it to your library."}
               </div>
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              <div>
-                <label style={labelStyle}>Book title *</label>
-                <input style={inputStyle} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Charlotte's Web" autoFocus />
+
+            {!manual ? (
+              <>
+                <input
+                  style={{ ...inputStyle, flexShrink: 0 }}
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search by title or author, e.g. Peter Pan"
+                  autoFocus
+                  inputMode="search"
+                  aria-label="Search free classic books"
+                />
+                <div style={{ flex: 1, minHeight: 0, overflowY: "auto", marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+                  {searching && (
+                    <div style={{ color: "rgba(247,240,227,0.6)", fontSize: 14, padding: "8px 2px" }}>Searching…</div>
+                  )}
+                  {!searching && searchErr && (
+                    <div style={{ color: "#fca5a5", fontSize: 14, fontWeight: 600, padding: "8px 2px" }}>{searchErr}</div>
+                  )}
+                  {!searching && !searchErr && results && results.length === 0 && (
+                    <div style={{ color: "rgba(247,240,227,0.65)", fontSize: 14, padding: "8px 2px" }}>
+                      No free classics match "{query.trim()}". You can type it in below and we'll look for it.
+                    </div>
+                  )}
+                  {!searching && results && results.map(r => {
+                    const inLibrary = !!r.inCatalogBookId;
+                    return (
+                      <div key={r.epubUrl} style={{
+                        display: "flex", alignItems: "center", gap: 12,
+                        padding: 10,
+                        background: "rgba(255,255,255,0.04)",
+                        border: "1px solid rgba(255,255,255,0.08)",
+                        borderRadius: 12,
+                      }}>
+                        <div style={{
+                          width: 48, height: 72, flexShrink: 0, borderRadius: 6, overflow: "hidden",
+                          background: "rgba(201,146,42,0.18)",
+                          display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22,
+                        }}>
+                          {r.coverUrl
+                            ? <img src={r.coverUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                            : <span aria-hidden>📖</span>}
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ color: CREAM, fontFamily: "Merriweather, serif", fontSize: 15, fontWeight: 700, lineHeight: 1.3, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{r.title}</div>
+                          {r.author && <div style={{ color: "rgba(247,240,227,0.7)", fontSize: 13, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.author}</div>}
+                          <div style={{ color: "rgba(247,240,227,0.45)", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", marginTop: 3 }}>
+                            {r.source === "gutenberg" ? "Project Gutenberg" : "Standard Ebooks"}
+                          </div>
+                        </div>
+                        {inLibrary ? (
+                          <span style={{ flexShrink: 0, color: "#86efac", fontSize: 13, fontWeight: 800, padding: "0 6px" }}>✓ In your library</span>
+                        ) : (
+                          <button
+                            onClick={() => requestResult(r)}
+                            disabled={busy}
+                            style={{ ...pillBtn(true), flexShrink: 0, opacity: busy && submittingKey !== r.epubUrl ? 0.5 : 1, cursor: busy ? "not-allowed" : "pointer" }}
+                          >
+                            {submittingKey === r.epubUrl ? "Sending…" : "Request"}
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <div>
+                  <label style={labelStyle}>Book title *</label>
+                  <input style={inputStyle} value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Charlotte's Web" autoFocus />
+                </div>
+                <div>
+                  <label style={labelStyle}>Author (optional)</label>
+                  <input style={inputStyle} value={author} onChange={(e) => setAuthor(e.target.value)} placeholder="e.g. E.B. White" />
+                </div>
+                <div>
+                  <label style={labelStyle}>Link (optional)</label>
+                  <input style={inputStyle} value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} placeholder="Paste a Standard Ebooks or Gutenberg URL" />
+                </div>
               </div>
-              <div>
-                <label style={labelStyle}>Author (optional)</label>
-                <input style={inputStyle} value={author} onChange={(e) => setAuthor(e.target.value)} placeholder="e.g. E.B. White" />
-              </div>
-              <div>
-                <label style={labelStyle}>Link (optional)</label>
-                <input style={inputStyle} value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} placeholder="Paste a Standard Ebooks or Gutenberg URL" />
-              </div>
-            </div>
-            {err && (
-              <div style={{ marginTop: 10, color: "#fca5a5", fontSize: 12, fontWeight: 600 }}>{err}</div>
             )}
-            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 18 }}>
+
+            {err && (
+              <div style={{ marginTop: 10, color: "#fca5a5", fontSize: 14, fontWeight: 600, flexShrink: 0 }}>{err}</div>
+            )}
+            <div style={{ display: "flex", gap: 10, justifyContent: "space-between", alignItems: "center", marginTop: 16, flexWrap: "wrap", flexShrink: 0 }}>
               <button
-                onClick={onClose}
-                disabled={submitting}
-                style={{
-                  background: "transparent",
-                  color: "rgba(247,240,227,0.7)",
-                  border: "1px solid rgba(255,255,255,0.20)",
-                  borderRadius: 999,
-                  padding: "10px 20px",
-                  fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700,
-                  cursor: submitting ? "not-allowed" : "pointer",
-                  minHeight: 44, touchAction: "manipulation",
-                  opacity: submitting ? 0.5 : 1,
-                }}
+                onClick={() => { setErr(""); setManual(m => !m); if (!manual && query.trim()) setTitle(query.trim()); }}
+                disabled={busy}
+                style={{ background: "transparent", border: "none", color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 14, fontWeight: 700, cursor: "pointer", padding: "8px 2px", minHeight: 44, touchAction: "manipulation", textDecoration: "underline" }}
               >
-                Cancel
+                {manual ? "← Search free classics instead" : "Can't find it? Type it in"}
               </button>
-              <button
-                onClick={submit}
-                disabled={submitting || !title.trim()}
-                style={{
-                  background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
-                  color: NAVY,
-                  border: "none",
-                  borderRadius: 999,
-                  padding: "10px 22px",
-                  fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 800, letterSpacing: "0.02em",
-                  cursor: submitting || !title.trim() ? "not-allowed" : "pointer",
-                  minHeight: 44, touchAction: "manipulation",
-                  boxShadow: "0 6px 16px rgba(201,146,42,0.42)",
-                  opacity: submitting || !title.trim() ? 0.6 : 1,
-                }}
-              >
-                {submitting ? "Sending…" : "Send request"}
-              </button>
+              <div style={{ display: "flex", gap: 10 }}>
+                <button onClick={onClose} disabled={busy} style={{ ...pillBtn(false), opacity: busy ? 0.5 : 1 }}>
+                  Cancel
+                </button>
+                {manual && (
+                  <button
+                    onClick={submitManual}
+                    disabled={busy || !title.trim()}
+                    style={{ ...pillBtn(true), opacity: busy || !title.trim() ? 0.6 : 1, cursor: busy || !title.trim() ? "not-allowed" : "pointer" }}
+                  >
+                    {submittingKey === "manual" ? "Sending…" : "Send request"}
+                  </button>
+                )}
+              </div>
             </div>
           </>
         )}
@@ -14196,16 +13192,32 @@ function FeedbackModal({
   senderName,
   pageContext,
   appVersion,
+  childName,
+  bookTitle,
+  pageLabel,
   onClose,
+  autoCloseIfEmptyMs,
 }: {
   connectionId: string | null;
   senderRole?: "nana" | "child" | "parent";
   senderName?: string;
   pageContext?: string;
   appVersion?: string;
+  childName?: string;
+  bookTitle?: string;
+  pageLabel?: string;
   onClose: () => void;
+  /** Child's iPad: close if nothing has been typed for this long. */
+  autoCloseIfEmptyMs?: number;
 }) {
   const [message, setMessage] = useState("");
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    if (!autoCloseIfEmptyMs || message.trim()) return;
+    const t = window.setTimeout(() => onCloseRef.current(), autoCloseIfEmptyMs);
+    return () => window.clearTimeout(t);
+  }, [autoCloseIfEmptyMs, message]);
   const [category, setCategory] = useState<"bug" | "idea" | "praise" | "confusion" | "general">("general");
   const [email, setEmail] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -14225,6 +13237,9 @@ function FeedbackModal({
         connectionId: connectionId ?? undefined,
         pageContext,
         appVersion,
+        childName,
+        bookTitle,
+        pageLabel,
       });
       setDone(true);
       window.setTimeout(onClose, 2200);
@@ -14707,14 +13722,16 @@ function LayoutSwitcher({ current, onChange }: { current: ReadingLayout; onChang
   // portal-rendered popover.
   useEffect(() => {
     if (!open) return;
-    const onDoc = (e: MouseEvent) => {
+    // pointerdown, not mousedown: iPad often sends no mouse event for a
+    // tap on plain text, which left the menu stuck open.
+    const onDoc = (e: PointerEvent) => {
       const t = e.target as Node;
       if (btnRef.current?.contains(t)) return;
       if (popRef.current?.contains(t)) return;
       setOpen(false);
     };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
+    document.addEventListener("pointerdown", onDoc);
+    return () => document.removeEventListener("pointerdown", onDoc);
   }, [open]);
 
   const meta = READING_LAYOUT_META[current];
@@ -14761,7 +13778,7 @@ function LayoutSwitcher({ current, onChange }: { current: ReadingLayout; onChang
           <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800, letterSpacing: "0.18em", padding: "6px 10px 4px" }}>
             READING LAYOUT
           </div>
-          {READING_LAYOUTS.map(k => {
+          {VISIBLE_READING_LAYOUTS.map(k => {
             const m = READING_LAYOUT_META[k];
             const active = k === current;
             return (
@@ -14837,14 +13854,16 @@ function PageModeSwitcher({ current, onChange }: { current: "single" | "double";
 
   useEffect(() => {
     if (!open) return;
-    const onDoc = (e: MouseEvent) => {
+    // pointerdown, not mousedown: iPad often sends no mouse event for a
+    // tap on plain text, which left the menu stuck open.
+    const onDoc = (e: PointerEvent) => {
       const t = e.target as Node;
       if (btnRef.current?.contains(t)) return;
       if (popRef.current?.contains(t)) return;
       setOpen(false);
     };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
+    document.addEventListener("pointerdown", onDoc);
+    return () => document.removeEventListener("pointerdown", onDoc);
   }, [open]);
 
   const meta = current === "double"
@@ -15032,15 +14051,15 @@ function ReadingToolbarBtn({
       disabled={disabled}
       aria-label={ariaLabel}
       style={{
-        height: 40, minWidth: 40,
-        padding: "0 16px", borderRadius: 12,
+        height: 46, minWidth: 46,
+        padding: "0 18px", borderRadius: 12,
         background: disabled ? "rgba(255,255,255,0.04)" : palette.background,
         color: disabled ? "rgba(247,240,227,0.25)" : palette.color,
         border: palette.border,
         cursor: disabled ? "not-allowed" : "pointer",
         display: "inline-flex", alignItems: "center", justifyContent: "center",
         fontFamily: "DM Sans, sans-serif",
-        fontSize: 12, fontWeight: 800, letterSpacing: "0.02em",
+        fontSize: 14, fontWeight: 800, letterSpacing: "0.02em",
         boxShadow: disabled ? "none" : palette.shadow,
         whiteSpace: "nowrap", flexShrink: 0,
         transition: "transform 160ms cubic-bezier(0.22,1,0.36,1), box-shadow 160ms ease, opacity 160ms",
@@ -15193,6 +14212,11 @@ export default function App() {
     setDeviceViewRaw(view);
   };
   const deviceView = deviceViewRaw;
+  const deviceViewRef = useRef(deviceView);
+  deviceViewRef.current = deviceView;
+  const currentUserRef = useRef<SafeUser | null>(null);
+  currentUserRef.current = currentUser;
+  const signOutRef = useRef<(() => Promise<void>) | null>(null);
   const handleSelectDevice = (view: "nana" | "perry" | "both") => {
     try {
       if (view === "both") localStorage.removeItem("nm_device_view");
@@ -15201,6 +14225,10 @@ export default function App() {
     setDeviceView(view);
   };
   const handleSwitchDevice = () => {
+    // A signed-in grandparent handing the iPad over: sign out properly.
+    // Clearing only the connection left her signed in but disconnected
+    // (the auto-route below put her straight back with no connection).
+    if (currentUserRef.current) { void signOutRef.current?.(); return; }
     // Rick's Aug 14 blocker: Perry's iPad kept auto-logging into
     // Papa's connection even after Nana (Diane) sent a fresh invite,
     // because the stale nm_perry_conn cache still pointed at Papa's
@@ -15237,9 +14265,33 @@ export default function App() {
   // a fresh login screen). Then logout server-side and return to splash.
   const handleSignOut = async () => {
     if (connectionId) {
+      // A live visit ends for the child too (their iPad goes back to the
+      // PIN keypad, which also turns their camera and mic off).
+      if (sessionStartedFiredRef.current) {
+        try { await api.sessions.publishEvent(connectionId, "session_complete", {}); } catch {}
+      }
       try { await api.sessions.publishEvent(connectionId, "session_reset", {}); } catch {}
     }
     try { await api.auth.logout(); } catch {}
+    // Build 38: start the next person from the sign-in screen with no
+    // trace of this family (the old version left the last screen, e.g.
+    // Settings, and the family's data on show after signing out).
+    if (nanaSseRef.current) { nanaSseRef.current.close(); nanaSseRef.current = null; }
+    if (sseRef.current) { sseRef.current.close(); sseRef.current = null; }
+    try {
+      localStorage.removeItem("nm_active_child_id");
+      localStorage.removeItem("nm_session_token");
+    } catch {}
+    setMode("onboarding");
+    setNanaOnboardingStep(0);
+    setChildren([]);
+    setActiveChildIdRaw(null);
+    setDashboardProgress([]);
+    setPerryConnected(false);
+    setPerryHereChildId(null);
+    setVisitEndCard(null);
+    setNextVisitIso(null);
+    setPostEndCall(false);
     setCurrentUser(null);
     setConnectionId(null);
     setInviteToken("");
@@ -15247,6 +14299,7 @@ export default function App() {
     try { localStorage.removeItem("nm_device_view"); } catch {}
     setDeviceView(null);
   };
+  signOutRef.current = handleSignOut;
 
   // Auto-route a signed-in Nana past the splash. Rick reported a
   // collision: after a session ends, handleSwitchDevice clears her
@@ -15309,8 +14362,24 @@ export default function App() {
   // from individual packet delays.
   const serverOffsetMsRef = useRef<number>(0);
   const serverOffsetSeededRef = useRef<boolean>(false);
+  // Round-trip-timed samples from the /state poll (NTP style): offset =
+  // serverTs - midpoint of the request. The lowest-RTT sample of the
+  // last 8 is the most accurate. Once we have one, SSE timestamps
+  // (one-way, sometimes buffered) no longer move the estimate.
+  const offsetSamplesRef = useRef<Array<{ offset: number; rtt: number }>>([]);
+  const updateServerOffsetFromPoll = useCallback((serverTs: number, t0: number, t1: number) => {
+    const rtt = t1 - t0;
+    if (!Number.isFinite(serverTs) || rtt < 0 || rtt > 5000) return;
+    const arr = offsetSamplesRef.current;
+    arr.push({ offset: serverTs - (t0 + t1) / 2, rtt });
+    if (arr.length > 8) arr.shift();
+    const best = arr.reduce((a, b) => (b.rtt < a.rtt ? b : a));
+    serverOffsetMsRef.current = best.offset;
+    serverOffsetSeededRef.current = true;
+  }, []);
   const updateServerOffset = useCallback((serverTs: number) => {
     if (typeof serverTs !== "number" || !Number.isFinite(serverTs)) return;
+    if (offsetSamplesRef.current.length > 0) return;
     const observed = serverTs - Date.now();
     if (!serverOffsetSeededRef.current) {
       serverOffsetMsRef.current = observed;
@@ -15372,6 +14441,8 @@ export default function App() {
   // Derived: the active child object + display name. All existing
   // callsites that referenced `dashboardPerryName` continue to read
   // this — semantics unchanged for single-child families.
+  const activeChildIdLatestRef = useRef(activeChildId);
+  activeChildIdLatestRef.current = activeChildId;
   const activeChild = children.find((c) => c.id === activeChildId) ?? children[0] ?? null;
   const dashboardPerryName = activeChild?.name ?? "";
   const [dashboardProgress, setDashboardProgress] = useState<Array<{ bookId: string; currentPage: number; lastReadAt: string; childId?: string | null }>>([]);
@@ -15411,13 +14482,19 @@ export default function App() {
   // path (or a previous poll) already applied.
   const lastAppliedReactionTsRef = useRef<number>(0);
   const lastAppliedPointerTsRef = useRef<number>(0);
-  const lastAppliedWordTsRef = useRef<number>(0);
   const lastAppliedChallengeTsRef = useRef<number>(0);
   const lastAppliedLaughTsRef = useRef<number>(0);
   const lastAppliedSillyNanaRef = useRef<string | null>(null);
   const lastAppliedSillyPerryRef = useRef<string | null>(null);
   const lastAppliedSessionEndTsRef = useRef<number>(0);
   const lastAppliedSessionCompleteTsRef = useRef<number>(0);
+  // Build 38: the child's "Tap to Hang Up" at the end of Goodbye. Server
+  // stamps lastChildHangup so a buffered SSE still reaches Nana by poll.
+  const lastAppliedChildHangupTsRef = useRef<number>(0);
+  // Set by the App body each render; SSE closures call through it so they
+  // always see the current book / page / child.
+  const endVisitRef = useRef<((reason: "endcall" | "goodbye" | "childhangup") => void) | null>(null);
+  const sendChildToPinRef = useRef<(() => void) | null>(null);
   // Last time ANY SSE message arrived — used by the health check to
   // detect "open but silent" sockets (Cloudflare buffering). Initialized
   // generously so the first 30s after mount don't accidentally trigger a
@@ -15511,8 +14588,12 @@ export default function App() {
     const s = localStorage.getItem("nm_font_scale");
     return s ? Number(s) : 1;
   });
-  const [perryFontOverride, setPerryFontOverride] = useState<boolean>(() => {
-    try { return localStorage.getItem("nm_perry_font_override") === "1"; } catch { return false; }
+  // Master Plan §5 (Build 38): Nana controls text size; the child has no
+  // size control and always follows Nana. The old per-iPad override is
+  // retired, so clear any flag an earlier build left behind.
+  const [perryFontOverride] = useState<boolean>(() => {
+    try { localStorage.removeItem("nm_perry_font_override"); } catch {}
+    return false;
   });
   // Ref mirror so SSE/polling closures can read the current value
   // without being recreated on every flip.
@@ -15526,18 +14607,11 @@ export default function App() {
   // effects as cycleFontScale — localStorage persistence + (Nana-side
   // only) font_change publish so Perry mirrors immediately.
   const applyFontScale = (next: number) => {
+    // The child's iPad never sets its own size (Master Plan §5).
+    if (deviceView === "perry") return;
     lastAppliedFontTsRef.current = Date.now();
     setFontScale(next);
     try { localStorage.setItem("nm_font_scale", String(next)); } catch {}
-    // Perry override path: mark + persist, don't publish. Nana keeps
-    // her own font choice unaffected.
-    if (deviceView === "perry") {
-      if (!perryFontOverrideRef.current) {
-        setPerryFontOverride(true);
-        try { localStorage.setItem("nm_perry_font_override", "1"); } catch {}
-      }
-      return;
-    }
     // Nana side (or "both" dev mode) — this tap IS the authoritative
     // Nana fontScale. Mirror to nanaFontScale + persist + publish.
     setNanaFontScale(next);
@@ -15657,6 +14731,9 @@ export default function App() {
         if (closed || stale) {
           // eslint-disable-next-line no-console
           console.log(`[sse-health] perry SSE ${closed ? "closed" : "stale"}, reconnecting`);
+          // Close the old stream first: nulling the ref without closing
+          // left it open (duplicate handlers, stale presence).
+          try { sseRef.current.close(); } catch {}
           sseRef.current = null;
           startPerrySSE(connectionId);
           lastSseMessageTsRef.current = Date.now();
@@ -15667,6 +14744,9 @@ export default function App() {
         if (closed || stale) {
           // eslint-disable-next-line no-console
           console.log(`[sse-health] nana SSE ${closed ? "closed" : "stale"}, reconnecting`);
+          // Close the old stream first: nulling the ref without closing
+          // left it open (duplicate handlers, stale presence).
+          try { nanaSseRef.current.close(); } catch {}
           nanaSseRef.current = null;
           startNanaSSE(connectionId);
           lastSseMessageTsRef.current = Date.now();
@@ -15689,17 +14769,27 @@ export default function App() {
   // `current_state` SSE event; idempotent (React skips no-op renders).
   useEffect(() => {
     if (!connectionId) return;
+    // A child's iPad on its PIN keypad isn't in a visit; polling there
+    // would run Nana's branches.
+    if (deviceView === "perry" && !perryAuthenticated) return;
     let cancelled = false;
     const isPerry = perryAuthenticated;
+    // The first response of each run only records the end-of-visit stamps:
+    // values already on the server belong to an earlier visit.
+    let primed = false;
     const poll = async () => {
       if (cancelled || document.visibilityState !== "visible") return;
       try {
+        const t0 = Date.now();
         const state = await api.sessions.getState(connectionId);
+        const t1 = Date.now();
         if (cancelled) return;
-        // Server stamps every /state response with its wall-clock time.
-        // Refresh the offset estimate on every poll so server-anchored
-        // timestamps downstream convert accurately.
-        if (state.serverTs) updateServerOffset(state.serverTs);
+        // Server stamps every /state response with its wall-clock time;
+        // refresh the offset on every poll so server-anchored timestamps
+        // (countdown startAt) convert accurately.
+        if (state.serverTs) updateServerOffsetFromPoll(state.serverTs, t0, t1);
+        const wasPrimed = primed;
+        primed = true;
 
         // Session-end backstop: if the SSE session_end was eaten by a
         // buffering proxy, the server still records lastSessionEndTs.
@@ -15710,19 +14800,42 @@ export default function App() {
           state.lastSessionEndTs &&
           state.lastSessionEndTs > lastAppliedSessionEndTsRef.current
         ) {
+          const firstSeen = !wasPrimed;
           lastAppliedSessionEndTsRef.current = state.lastSessionEndTs;
-          setFamilyStoriesSubMode("write");
           // Also drop the chapter-end card here — same reasoning as the
           // SSE session_end handler, but for the polling-only path.
           setChapterEndOverlay(null);
-          setMode((current) =>
-            current === "onboarding" || current === "familystories"
-              ? current
-              : "familystories",
-          );
+          // Only the child follows this backstop. Nana ends the visit
+          // herself; acting on her own echo bounced her into the journal
+          // right after End Call (Build 38). The first value a fresh app
+          // sees belongs to an earlier visit, so it's only recorded.
+          if (isPerry && !firstSeen) {
+            if (FEATURES.familyJournal) {
+              setFamilyStoriesSubMode("write");
+              setMode((current) =>
+                current === "onboarding" || current === "familystories"
+                  ? current
+                  : "familystories",
+              );
+            } else if (modeRef.current !== "onboarding") {
+              sendChildToPinRef.current?.();
+            }
+          }
           // After session end, server has wiped book/page/mode — skip the
           // rest of the reconciliation this tick to avoid flickering back.
           return;
+        }
+
+        // Child hang-up backstop (Nana side): the child's iPad already
+        // left the call; Nana's end-of-visit card must still appear even
+        // when the SSE event was buffered.
+        const hang = (state as { lastChildHangup?: { ts: number } }).lastChildHangup;
+        if (!isPerry && hang && typeof hang.ts === "number") {
+          const firstSeen = !wasPrimed;
+          if (hang.ts > lastAppliedChildHangupTsRef.current) {
+            lastAppliedChildHangupTsRef.current = hang.ts;
+            if (!firstSeen && modeRef.current === "goodbye") endVisitRef.current?.("childhangup");
+          }
         }
 
         // Session-complete backstop: when Nana taps Back from the
@@ -15733,10 +14846,10 @@ export default function App() {
           state.lastSessionCompleteTs &&
           state.lastSessionCompleteTs > lastAppliedSessionCompleteTsRef.current
         ) {
+          const firstSeen = !wasPrimed;
           lastAppliedSessionCompleteTsRef.current = state.lastSessionCompleteTs;
           if (isPerry) {
-            setMode("onboarding");
-            setPerryPinMode(true);
+            if (!firstSeen && modeRef.current !== "onboarding") sendChildToPinRef.current?.();
           } else {
             // Nana's local handleCloseVault already ran handleSwitchDevice;
             // the polling tick is just a safety net for that path.
@@ -15898,6 +15011,9 @@ export default function App() {
           setMode((current) => {
             if (!isPerry && (current === "onboarding" || current === "familystories")) return current;
             if (isPerry && current === "familystories") return current;
+            // The child's own "Words We're Learning" list is a local view;
+            // Nana's next screen change (SSE) still brings them along.
+            if (isPerry && current === "learnedwords") return current;
             // Cold-start gate: until Perry has received her first live SSE
             // event (session_started or phase_change), don't let polling
             // drag her into a previous session's mode. Without the
@@ -16019,11 +15135,12 @@ export default function App() {
         // would race the publish and snap her choice back to the
         // stale server value (same root cause as mode/bookId flicker).
         // Gate on isPerry so only the follower-side applies these.
-        if (isPerry && state.readingTheme && state.readingTheme !== readingTheme) {
-          setReadingTheme(state.readingTheme as ReadingTheme);
+        if (isPerry && isReadingTheme(state.readingTheme) && state.readingTheme !== readingTheme) {
+          setReadingTheme(state.readingTheme);
         }
-        if (isPerry && state.readingLayout && (READING_LAYOUTS as readonly string[]).includes(state.readingLayout)) {
-          setReadingLayout((curr) => curr === state.readingLayout ? curr : state.readingLayout as ReadingLayout);
+        if (isPerry && state.readingLayout) {
+          const nextLayout = normalizeLayout(state.readingLayout);
+          setReadingLayout((curr) => curr === nextLayout ? curr : nextLayout);
         }
         // Page mode + side — Nana drives both via the dropdown / advancePage.
         // Same source-of-truth gate as theme/layout: only the follower
@@ -16087,17 +15204,25 @@ export default function App() {
           }
         }
 
-        if (state.lastWord && state.lastWord.ts > lastAppliedWordTsRef.current) {
-          lastAppliedWordTsRef.current = state.lastWord.ts;
-          const w = state.lastWord;
-          // Word highlights only flow Nana→Perry — Perry never publishes
-          // word highlights, so polling-driven word updates only make
-          // sense on Perry's iPad. Skipping this gate would let Nana's
-          // polling re-apply her own old highlight from the server.
-          if (isPerry && (w.side === "L" || w.side === "R") && Number.isFinite(w.index)) {
-            setWordHighlight({ side: w.side, index: w.index, page: w.page, ts: w.ts });
-          }
+        // Sibling switch backstop: if the live active_child_change was
+        // missed, the child's iPad still learns Nana moved to Cooper and
+        // shows "It's Cooper's turn" on the PIN screen.
+        if (isPerry && typeof state.activeChildId === "string" && state.activeChildId
+            && state.activeChildId !== activeChildIdLatestRef.current) {
+          activeChildIdLatestRef.current = state.activeChildId;
+          setActiveChildIdRaw(state.activeChildId);
+          try { localStorage.setItem("nm_active_child_id", state.activeChildId); } catch {}
         }
+        // Word selection backstop for buffered SSE. Both iPads publish
+        // selections, so both apply; stale or own-older events are
+        // dropped inside applyServerSelection.
+        if (state.selection) applyServerSelection(state.selection);
+        // Page plan + reading boxes backstop (see "Measured pagination").
+        if (state.layoutProfiles) {
+          applyRemoteProfile(state.layoutProfiles.nana);
+          applyRemoteProfile(state.layoutProfiles.perry);
+        }
+        if (state.pagePlan) applyRemotePlan(state.pagePlan);
 
         // Silly-faces filters: each side drives its OWN filter (Nana
         // picks Nana's filter, Perry picks Perry's). Polling mirrors
@@ -16161,7 +15286,7 @@ export default function App() {
         // chapter_end event arrived since we last applied, raise the
         // overlay locally. If the server has cleared lastChapterEnd, the
         // dismiss has already happened — drop the overlay.
-        if (state.lastChapterEnd && state.lastChapterEnd.ts > lastAppliedChapterEndTsRef.current) {
+        if (CHAPTER_END_POPUP_ENABLED && state.lastChapterEnd && state.lastChapterEnd.ts > lastAppliedChapterEndTsRef.current) {
           lastAppliedChapterEndTsRef.current = state.lastChapterEnd.ts;
           setChapterEndOverlay({
             chapterIndex: state.lastChapterEnd.chapterIndex,
@@ -16201,7 +15326,7 @@ export default function App() {
     const interval = setInterval(poll, 400);
     return () => { cancelled = true; clearInterval(interval); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connectionId, perryAuthenticated]);
+  }, [connectionId, perryAuthenticated, deviceView]);
 
   // ── PERRY MODE JAIL ──────────────────────────────────────────────────
   // Defensive backstop the comment on `perryHasJoined` (line ~7966)
@@ -16316,7 +15441,13 @@ export default function App() {
     if (!connectionId) return;
     setAuthLoading(true);
     try {
-      await api.children.create({ connectionId, name, birthday, pin });
+      // The setup screen requires the parent's consent box (Build 38
+      // records when it was given).
+      const created = await api.children.create({ connectionId, name, birthday, pin, consent: true });
+      // This iPad now belongs to the child who was just set up: presence
+      // ("Perry is here") and the sibling handover need to know who it is.
+      setAuthenticatedChildId(created.id);
+      setActiveChildId(created.id);
       // Save Perry's connection info to localStorage for PIN login next time
       const connData = { connectionId, childName: name, nanaName: nanaDisplayName };
       localStorage.setItem("nm_perry_conn", JSON.stringify(connData));
@@ -16348,7 +15479,11 @@ export default function App() {
     // withCredentials so the session cookie travels with the SSE
     // request when the api is on a different subdomain in production.
     // No-op in dev (same-origin via the Vite proxy).
-    const es = new EventSource(api.sessions.streamUrl(connId), { withCredentials: true });
+    // role + childId register presence so Nana's Home can say "Perry is
+    // here". The child id was written to storage by the PIN login.
+    let presenceChild: string | null = null;
+    try { presenceChild = localStorage.getItem("nm_authed_child_id"); } catch {}
+    const es = new EventSource(api.sessions.streamUrl(connId, "perry", presenceChild), { withCredentials: true });
     sseRef.current = es;
     es.onmessage = (event) => {
       // Track the last time ANY message arrived. The health check below
@@ -16456,7 +15591,9 @@ export default function App() {
           // logged in), show the friendly "Nana stepped away" card for
           // 2.5s before her mode-jail drops her back to PIN. Avoids the
           // jarring "UI suddenly becomes login screen" experience.
-          const wasInSession = modeRef.current !== "onboarding" && perryHasJoined;
+          // Refs, not state: this handler was created when the stream
+          // opened, so state read here would be from that moment.
+          const wasInSession = modeRef.current !== "onboarding" && perryActiveRef.current;
           perryActiveRef.current = false;
           setPerryHasJoined(false);
           // Drop the silly-challenge host flag too. Otherwise the next
@@ -16503,14 +15640,10 @@ export default function App() {
           // Apply layout / theme / font / child-prompts immediately so when
           // Perry DOES transition, she's already in sync with Nana's reading
           // chrome. These don't move her off the waiting screen on their own.
-          const layout = msg.payload.readingLayout as ReadingLayout | undefined;
-          if (layout && (READING_LAYOUTS as readonly string[]).includes(layout)) {
-            setReadingLayout(layout);
-          }
-          const theme = msg.payload.readingTheme as ReadingTheme | undefined;
-          if (theme === "day" || theme === "sepia" || theme === "night") {
-            setReadingTheme(theme);
-          }
+          const layout = msg.payload.readingLayout;
+          if (typeof layout === "string" && layout) setReadingLayout(normalizeLayout(layout));
+          const theme = msg.payload.readingTheme;
+          if (isReadingTheme(theme)) setReadingTheme(theme);
           const pgMode = msg.payload.pageMode as "single" | "double" | undefined;
           if (pgMode === "single" || pgMode === "double") setPageMode(pgMode);
           const pgSide = msg.payload.pageSide as "L" | "R" | undefined;
@@ -16587,46 +15720,36 @@ export default function App() {
             lastAppliedPointerTsRef.current = ts;
             setPointerHighlight({ x: p.x, y: p.y, page: p.page, ts });
           }
-        } else if (msg.type === "word_highlight") {
-          const p = msg.payload as { side: "L" | "R"; index: number; page: number };
-          if ((p.side === "L" || p.side === "R") && Number.isFinite(p.index)) {
-            const ts = Date.now();
-            lastAppliedWordTsRef.current = ts;
-            setWordHighlight({ side: p.side, index: p.index, page: p.page, ts });
-          }
+        } else if (msg.type === "pointer") {
+          // Reading pointer backstop (the call's app messages are faster).
+          pointerBus.receive(msg.payload);
+        } else if (msg.type === "layout_profile") {
+          applyRemoteProfile(msg.payload);
+        } else if (msg.type === "page_plan") {
+          applyRemotePlan(msg.payload);
+        } else if (msg.type === "word_select" || msg.type === "word_select_clear") {
+          const p = (msg.payload ?? {}) as Record<string, unknown>;
+          applyServerSelection(msg.type === "word_select_clear" ? { cleared: true, ts: p.ts } : p);
         } else if (msg.type === "word_action") {
-          // Rick's Aug 8 shared word-action broadcast. When one side
-          // taps Say / Sound out / Meaning, the other side performs
-          // the same action locally so both hear/see it together.
-          // Save is intentionally NOT broadcast — it's a per-user
-          // review-list action, saved server-side via the REST call
-          // and picked up via the LearnedWordsView list on either side.
+          // Pronunciation tapped on the other iPad: play the same word
+          // here. Our own broadcast echoes back over SSE; the tapping
+          // iPad has already played it.
           const action = msg.payload?.action as string | undefined;
           const word = msg.payload?.word as string | undefined;
-          if (typeof word === "string" && word.length > 0) {
-            if (action === "say") {
-              speakTts(word, 0.75);
-            } else if (action === "sound_out") {
-              soundOutWord(word);
-            } else if (action === "define") {
-              const text = typeof msg.payload?.text === "string" ? msg.payload.text : "";
-              if (text) showDefinitionTransient(word, text);
-            }
+          const ownEcho = msg.payload?.origin === myLibraryOriginRef.current;
+          if (!ownEcho && action === "say" && typeof word === "string" && word.length > 0) {
+            void pronounce(word);
           }
         } else if (msg.type === "phonics_card") {
           // Rick's Build 30 review #3: Perry side must NOT render the
           // phonics card. Only Nana teaches through the lesson; Perry
           // just sees the highlight. Suppress on Perry entirely.
         } else if (msg.type === "layout_change") {
-          const l = msg.payload?.layout as ReadingLayout | undefined;
-          if (l && (READING_LAYOUTS as readonly string[]).includes(l)) {
-            setReadingLayout(l);
-          }
+          const l = msg.payload?.layout;
+          if (typeof l === "string" && l) setReadingLayout(normalizeLayout(l));
         } else if (msg.type === "theme_change") {
-          const t = msg.payload?.theme as ReadingTheme | undefined;
-          if (t === "day" || t === "sepia" || t === "night") {
-            setReadingTheme(t);
-          }
+          const t = msg.payload?.theme;
+          if (isReadingTheme(t)) setReadingTheme(t);
         } else if (msg.type === "reaction") {
           const r = msg.payload as unknown as ReactionEvent;
           if (r?.emoji) {
@@ -16691,14 +15814,20 @@ export default function App() {
           // dismiss event raced with session_end and the polling clear path
           // couldn't see it. Rick: "Chapter Complete stays on permanently."
           setChapterEndOverlay(null);
-          setFamilyStoriesSubMode("write");
-          setMode("familystories");
+          if (FEATURES.familyJournal) {
+            setFamilyStoriesSubMode("write");
+            setMode("familystories");
+          } else {
+            // Build 38: no journal detour. The visit is over, so the
+            // child's iPad leaves the call and returns to the PIN keypad.
+            sendChildToPinRef.current?.();
+          }
         } else if (msg.type === "session_complete") {
-          // Nana finished saving her memory and tapped Back. Take Perry
-          // back to the PIN screen so both iPads end the session
-          // together — Rick: "They should both transition together."
-          setMode("onboarding");
-          setPerryPinMode(true);
+          // Nana ended the visit. Take Perry back to the PIN screen so
+          // both iPads end the session together — Rick: "They should both
+          // transition together." Also leaves the video call.
+          lastAppliedSessionCompleteTsRef.current = Date.now();
+          sendChildToPinRef.current?.();
         } else if (msg.type === "schedule_proposal") {
           lastAppliedScheduleTsRef.current = Date.now();
           const date = new Date(msg.payload.date as string);
@@ -16725,13 +15854,11 @@ export default function App() {
             setPartnerRequestedReschedule("nana");
             window.setTimeout(() => setPartnerRequestedReschedule(null), 5000);
           }
-        } else if (msg.type === "child_added") {
-          // Nana added a sibling on her iPad — refetch the children list
-          // so Perry-side's PIN screen can show the new avatar without
-          // requiring a page reload.
-          if (connectionId) {
-            api.children.list(connectionId).then(setChildren).catch(() => {});
-          }
+        } else if (msg.type === "child_added" || msg.type === "child_updated") {
+          // Nana added a sibling (or changed a photo / name / PIN) on her
+          // iPad — refetch the children list so Perry-side's PIN screen
+          // shows it without requiring a page reload.
+          api.children.list(connId).then(setChildren).catch(() => {});
         } else if (msg.type === "active_child_change") {
           // Nana picked a different sibling from her home or the
           // post-session prompt. Mirror it locally so Perry-side reads
@@ -16814,7 +15941,7 @@ export default function App() {
           // both sides drop back to the regular Silly Faces screen.
           const who = msg.payload.who;
           setLaughWinner(who === "nana" || who === "perry" ? who : null);
-        } else if (msg.type === "chapter_end") {
+        } else if (msg.type === "chapter_end" && CHAPTER_END_POPUP_ENABLED) {
           // Nana crossed a chapter boundary — both iPads show the
           // celebratory overlay until she taps Next Chapter or End here.
           lastAppliedChapterEndTsRef.current = Date.now();
@@ -16871,7 +15998,7 @@ export default function App() {
     // withCredentials so the session cookie travels with the SSE
     // request when the api is on a different subdomain in production.
     // No-op in dev (same-origin via the Vite proxy).
-    const es = new EventSource(api.sessions.streamUrl(connId), { withCredentials: true });
+    const es = new EventSource(api.sessions.streamUrl(connId, "nana"), { withCredentials: true });
     nanaSseRef.current = es;
     es.onmessage = (event) => {
       lastSseMessageTsRef.current = Date.now();
@@ -16944,31 +16071,22 @@ export default function App() {
               setLibraryScrollTop(msg.payload.top);
             }
           }
-        } else if (msg.type === "word_highlight") {
-          const p = msg.payload as { side: "L" | "R"; index: number; page: number };
-          if ((p.side === "L" || p.side === "R") && Number.isFinite(p.index)) {
-            const ts = Date.now();
-            lastAppliedWordTsRef.current = ts;
-            setWordHighlight({ side: p.side, index: p.index, page: p.page, ts });
-          }
+        } else if (msg.type === "layout_profile") {
+          applyRemoteProfile(msg.payload);
+        } else if (msg.type === "page_plan") {
+          applyRemotePlan(msg.payload);
+        } else if (msg.type === "word_select" || msg.type === "word_select_clear") {
+          const p = (msg.payload ?? {}) as Record<string, unknown>;
+          applyServerSelection(msg.type === "word_select_clear" ? { cleared: true, ts: p.ts } : p);
         } else if (msg.type === "word_action") {
-          // Rick's Aug 8 shared word-action broadcast. When one side
-          // taps Say / Sound out / Meaning, the other side performs
-          // the same action locally so both hear/see it together.
-          // Save is intentionally NOT broadcast — it's a per-user
-          // review-list action, saved server-side via the REST call
-          // and picked up via the LearnedWordsView list on either side.
+          // Pronunciation tapped on the other iPad: play the same word
+          // here. Our own broadcast echoes back over SSE; the tapping
+          // iPad has already played it.
           const action = msg.payload?.action as string | undefined;
           const word = msg.payload?.word as string | undefined;
-          if (typeof word === "string" && word.length > 0) {
-            if (action === "say") {
-              speakTts(word, 0.75);
-            } else if (action === "sound_out") {
-              soundOutWord(word);
-            } else if (action === "define") {
-              const text = typeof msg.payload?.text === "string" ? msg.payload.text : "";
-              if (text) showDefinitionTransient(word, text);
-            }
+          const ownEcho = msg.payload?.origin === myLibraryOriginRef.current;
+          if (!ownEcho && action === "say" && typeof word === "string" && word.length > 0) {
+            void pronounce(word);
           }
         } else if (msg.type === "phonics_card") {
           // Rick's Aug 14: cross-iPad phonics coaching card. Whichever
@@ -17005,24 +16123,20 @@ export default function App() {
             }
           }
         } else if (msg.type === "selection_broadcast") {
-          // Rick's Build 30 review #3: Perry highlighted a word — anchor
-          // Nana's SelectionActionMenu to the matching span on her page
-          // so she can tap Phonics/Pronunciation/Save on Perry's behalf.
+          // Child iPad still on an older build: it sends the word only,
+          // no word id, so Nana gets the actions without a highlight.
           const p = msg.payload as { word?: string; sentence?: string };
           if (typeof p.word === "string" && p.word.length > 0) {
-            const ts = Date.now();
-            setRemoteSelection({ word: p.word, sentence: p.sentence ?? "", ts });
-            if (remoteSelectionTimerRef.current) window.clearTimeout(remoteSelectionTimerRef.current);
-            remoteSelectionTimerRef.current = window.setTimeout(() => setRemoteSelection(null), 20_000);
+            setWordSelection({ wid: "", word: p.word, sentence: p.sentence ?? "", by: "perry", ts: Date.now() });
           }
         } else if (msg.type === "perry_request") {
           // Rick's Build 30 review #2: Perry tapped a request pill on
           // her iPad. Nana sees a floating banner + Accept button.
           const p = msg.payload as { kind?: string };
           const kind = p.kind;
-          if (kind === "showandtell" || kind === "silly" || kind === "pickbook" || kind === "wave") {
+          if (kind === "showandtell" || kind === "silly" || kind === "pickbook" || kind === "wave" || kind === "goodbye") {
             const ts = Date.now();
-            setPerryRequest({ kind: kind as "showandtell" | "silly" | "pickbook" | "wave", ts });
+            setPerryRequest({ kind: kind as "showandtell" | "silly" | "pickbook" | "wave" | "goodbye", ts });
             if (perryRequestTimerRef.current) window.clearTimeout(perryRequestTimerRef.current);
             perryRequestTimerRef.current = window.setTimeout(() => setPerryRequest(null), 15_000);
           }
@@ -17041,15 +16155,11 @@ export default function App() {
             window.setTimeout(() => setBookRequestApprovedToast(null), 8000);
           }
         } else if (msg.type === "layout_change") {
-          const l = msg.payload?.layout as ReadingLayout | undefined;
-          if (l && (READING_LAYOUTS as readonly string[]).includes(l)) {
-            setReadingLayout(l);
-          }
+          const l = msg.payload?.layout;
+          if (typeof l === "string" && l) setReadingLayout(normalizeLayout(l));
         } else if (msg.type === "theme_change") {
-          const t = msg.payload?.theme as ReadingTheme | undefined;
-          if (t === "day" || t === "sepia" || t === "night") {
-            setReadingTheme(t);
-          }
+          const t = msg.payload?.theme;
+          if (isReadingTheme(t)) setReadingTheme(t);
         } else if (msg.type === "reaction") {
           const r = msg.payload as unknown as ReactionEvent;
           if (r?.emoji) {
@@ -17103,13 +16213,28 @@ export default function App() {
             setPartnerRequestedReschedule("perry");
             window.setTimeout(() => setPartnerRequestedReschedule(null), 5000);
           }
-        } else if (msg.type === "child_added") {
+        } else if (msg.type === "child_added" || msg.type === "child_updated") {
           // Mirrors the Perry-side handler — refetch children list so
           // multi-iPad Nana setups (rare but possible) see the new
-          // sibling without a reload.
-          if (connectionId) {
-            api.children.list(connectionId).then(setChildren).catch(() => {});
+          // sibling without a reload. child_updated covers photo, name
+          // and PIN edits (Build 38).
+          api.children.list(connId).then(setChildren).catch(() => {});
+        } else if (msg.type === "presence") {
+          // Build 38: real "Perry is here" (the child's iPad has the live
+          // stream open after a PIN login). The 3s status poll backs this up.
+          const p = msg.payload as { perryOnline?: boolean; perryChildId?: string | null };
+          if (typeof p.perryOnline === "boolean") {
+            setPerryConnected(p.perryOnline);
+            setPerryHereChildId(p.perryOnline ? (p.perryChildId ?? null) : null);
           }
+        } else if (msg.type === "child_hangup") {
+          // The child tapped "Bye Nana! Tap to Hang Up!" at the end of the
+          // Goodbye ritual. Their iPad has already left the call; finish
+          // the visit here and show Nana's end-of-visit card.
+          // serverTs is stamped after the server records lastChildHangup,
+          // so the poll backstop won't fire a second time.
+          lastAppliedChildHangupTsRef.current = msg.serverTs ?? Date.now() + serverOffsetMsRef.current;
+          endVisitRef.current?.("childhangup");
         } else if (msg.type === "active_child_change") {
           const nextId = msg.payload?.childId as string | undefined;
           if (nextId) {
@@ -17207,7 +16332,7 @@ export default function App() {
           // both sides drop back to the regular Silly Faces screen.
           const who = msg.payload.who;
           setLaughWinner(who === "nana" || who === "perry" ? who : null);
-        } else if (msg.type === "chapter_end") {
+        } else if (msg.type === "chapter_end" && CHAPTER_END_POPUP_ENABLED) {
           // Nana's own publish echoes back via SSE — applying is idempotent
           // (her local state was already set by changePage interception).
           // Apply anyway so a reconnect-after-fire still recovers the overlay.
@@ -17239,6 +16364,27 @@ export default function App() {
     setPerryOnboardingStep(0);
     if (errorMessage) setPerryInviteError(errorMessage);
   };
+
+  // Build 38: one exit for the child's iPad when a visit ends (Nana's End
+  // Call, the Goodbye hang-up, or the session-end backstops). Logging the
+  // child out disables their VideoSessionProvider, which leaves the Daily
+  // room, so the camera and microphone really stop. Closing the live
+  // stream clears "Perry is here" on Nana's Home until the next PIN.
+  const sendChildToPin = () => {
+    setChapterEndOverlay(null);
+    setWordSelection(null);
+    if (sseRef.current) { sseRef.current.close(); sseRef.current = null; }
+    perryActiveRef.current = false;
+    setPerryHasJoined(false);
+    setPerryAuthenticated(false);
+    setAuthenticatedChildId(null);
+    setPerryPinError("");
+    setGoodbyePhase(0);
+    setGoodbyeStartTime(null);
+    setPerryPinMode(true);
+    setMode("onboarding");
+  };
+  sendChildToPinRef.current = sendChildToPin;
 
   const handlePerryPinLogin = async (pin: string) => {
     const data = perryConnRef.current;
@@ -17345,6 +16491,11 @@ export default function App() {
   // waiting at connected screen and nana is on homepage, then nana
   // should be informed here."
   const [perryConnected, setPerryConnected] = useState(false);
+  // Build 38: which child is logged in on the child's iPad right now
+  // (server presence), so Home can select that child automatically.
+  const [perryHereChildId, setPerryHereChildId] = useState<string | null>(null);
+  const perryConnectedRef = useRef(false);
+  perryConnectedRef.current = perryConnected;
 
   // Controls the AddChildModal visibility. Opened from NanaHomeView's
   // ChildPicker "Add a sibling" tile and (Phase C) from the
@@ -17354,7 +16505,7 @@ export default function App() {
   // use the same iPad as Perry, just have him enter his PIN") so Nana
   // isn't left wondering whether she needs to send a new invite or
   // configure anything on the kid's side. Cleared by setTimeout below.
-  const [addChildToast, setAddChildToast] = useState<{ name: string } | null>(null);
+  const [addChildToast, setAddChildToast] = useState<{ name: string; photoFailed?: boolean } | null>(null);
 
   // ── Multi-child handlers (used by NanaHomeView's ChildPicker + the
   // post-session SwitchChildPrompt) ───────────────────────────────────
@@ -17377,18 +16528,38 @@ export default function App() {
   // new active sibling immediately so Nana can start a session with
   // them without an extra tap. Broadcasts `child_added` so any open
   // Perry iPad refreshes its PIN-screen avatar list.
-  const handleAddChild = useCallback(async (body: { name: string; birthday: string | null; pin: string }) => {
+  const handleAddChild = useCallback(async (body: { name: string; pin: string; consent: boolean; photo: string | null }) => {
     if (!connectionId) throw new Error("No active connection");
-    const created = await api.children.create({ connectionId, ...body });
+    let created = await api.children.create({ connectionId, name: body.name, pin: body.pin, birthday: null, consent: body.consent });
+    let photoFailed = false;
+    if (body.photo) {
+      try { created = (await api.children.setPhoto(created.id, body.photo)).child; } catch { photoFailed = true; }
+    }
     setChildren((curr) => [...curr, created]);
-    setActiveChildId(created.id);
+    // Select the new child only when nobody is on the kids' iPad and no
+    // visit is on; otherwise the child reading would be sent to the PIN
+    // screen ("It's Cooper's turn") just because a sibling was added.
+    if (!perryConnectedRef.current && !sessionStartedFiredRef.current) setActiveChildId(created.id);
     api.sessions.publishEvent(connectionId, "child_added", { childId: created.id }).catch(() => {});
     // Surface a brief "What's next?" hint so Nana isn't left guessing.
     // The kid's iPad already has the family's invite — Cooper just
     // needs to enter his PIN there. No new URL to send.
-    setAddChildToast({ name: created.name });
+    setAddChildToast({ name: created.name, photoFailed });
     return created;
   }, [connectionId, setActiveChildId]);
+
+  // Grandchild profile edits (Build 38). The server broadcasts
+  // child_updated, so the child's PIN screen refreshes too.
+  const replaceChild = (c: Child) => setChildren(curr => curr.map(x => (x.id === c.id ? c : x)));
+  const handleSetChildPhoto = async (childId: string, dataUrl: string) => {
+    replaceChild((await api.children.setPhoto(childId, dataUrl)).child);
+  };
+  const handleRemoveChildPhoto = async (childId: string) => {
+    replaceChild((await api.children.removePhoto(childId)).child);
+  };
+  const handleUpdateChild = async (childId: string, body: { name?: string; pin?: string }) => {
+    replaceChild((await api.children.update(childId, body)).child);
+  };
 
   // Auto-clear the toast 8s after it appears (long enough to read,
   // short enough not to linger past the moment).
@@ -17398,19 +16569,28 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, [addChildToast]);
   useEffect(() => {
-    if (!connectionId || perryAuthenticated) return; // Nana side only
+    if (!connectionId || perryAuthenticated || deviceView === "perry") return; // Nana side only
     let cancelled = false;
     const poll = async () => {
       if (cancelled) return;
       try {
-        const { status } = await api.connections.status(connectionId);
-        if (!cancelled) setPerryConnected(status === "active");
+        const r = await api.connections.status(connectionId);
+        if (cancelled) return;
+        // Real presence (Build 38): the child's iPad has the live stream
+        // open after a PIN login. Older servers only report whether the
+        // family ever connected, so fall back to that.
+        if (typeof r.perryOnline === "boolean") {
+          setPerryConnected(r.perryOnline);
+          setPerryHereChildId(r.perryOnline ? (r.perryChildId ?? null) : null);
+        } else {
+          setPerryConnected(r.status === "active");
+        }
       } catch {}
     };
     void poll();
     const interval = setInterval(poll, 3000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [connectionId, perryAuthenticated]);
+  }, [connectionId, perryAuthenticated, deviceView]);
 
   // Nana polls for Perry joining while on the waiting screen
   useEffect(() => {
@@ -17431,8 +16611,12 @@ export default function App() {
   // entry in case Nana added a sibling between Perry sessions and
   // the child_added SSE event missed (offline iPad, etc.).
   useEffect(() => {
-    if (!perryPinMode || !connectionId) return;
-    api.children.list(connectionId).then(setChildren).catch(() => {});
+    // On a fresh launch the connection id is only in the saved invite
+    // (it becomes the live connection after the PIN), so use that to
+    // show the grandchildren's photos straight away.
+    const connId = connectionId ?? perryConnRef.current?.connectionId ?? null;
+    if (!perryPinMode || !connId) return;
+    api.children.list(connId).then(setChildren).catch(() => {});
   }, [perryPinMode, connectionId]);
 
   // Cooper-takeover prompt — when Nana switches her active sibling
@@ -17450,12 +16634,10 @@ export default function App() {
     if (authenticatedChildId === activeChildId) return;
     // Mismatch — drop back to PIN entry. Don't wipe perryConnRef so
     // the kid's iPad stays bound to the family connection; only the
-    // child-level auth gets reset. Children list is already loaded
-    // (or will refetch via the perryPinMode effect above).
-    setPerryAuthenticated(false);
-    setAuthenticatedChildId(null);
-    setPerryPinMode(true);
-    setMode("onboarding");
+    // child-level auth gets reset. Same exit as the end of a visit, so
+    // the live stream closes too (Home then stops saying the previous
+    // child is here) and the camera turns off.
+    sendChildToPinRef.current?.();
   }, [activeChildId, authenticatedChildId, perryAuthenticated, setAuthenticatedChildId]);
 
   // Fetch dashboard data when Nana reaches step 3 (connected). Loads
@@ -17534,7 +16716,9 @@ export default function App() {
     }
     if (openWith === "video") {
       if (connectionId) {
-        api.sessions.publishEvent(connectionId, "session_started", {}).catch(() => {});
+        api.sessions.publishEvent(connectionId, "session_started", {})
+          .then(() => api.sessions.publishEvent(connectionId, "font_change", { scale: nanaFontScaleRef.current }))
+          .catch(() => {});
         sessionStartedFiredRef.current = true;
       }
       shownThisSession.current.clear();
@@ -17551,7 +16735,10 @@ export default function App() {
   // "Begin with this book" shortcut).
   const handleStartReadingSession = () => {
     if (connectionId) {
-      api.sessions.publishEvent(connectionId, "session_started", {}).catch(() => {});
+      api.sessions.publishEvent(connectionId, "session_started", {})
+        // Nana's text size rides along (Master Plan §5).
+        .then(() => api.sessions.publishEvent(connectionId, "font_change", { scale: nanaFontScaleRef.current }))
+        .catch(() => {});
       // Mark fired locally so the auto-fire effect (which also covers the
       // dashboard-direct-to-library path) doesn't double-publish.
       sessionStartedFiredRef.current = true;
@@ -17597,6 +16784,28 @@ export default function App() {
   const handleBeginWithBook = (bookId: string, startPage: number) => {
     setPreSelectedBook({ bookId, startPage });
     handleStartReadingSession();
+  };
+  // Rick's Build 33: tapping Cooper after a session goes straight into
+  // Cooper's session (his bookmark if he has one, otherwise the greeting
+  // and Pick a Book). The child's iPad gets active_child_change first,
+  // shows "It's Cooper's turn" on the PIN screen, then joins.
+  const handleReadWithChild = async (childId: string) => {
+    if (childId !== activeChildId) handleSelectChild(childId);
+    let resume: { bookId: string; page: number } | null = null;
+    if (connectionId) {
+      try {
+        const { progress } = await api.progress.all(connectionId, childId);
+        const latest = progress
+          .filter(r => r.childId === childId && booksLibrary[r.bookId]
+            && r.currentPage > 1 && r.currentPage < booksLibrary[r.bookId].pages.length)
+          .sort((a, b) => Date.parse(b.lastReadAt) - Date.parse(a.lastReadAt))[0];
+        if (latest) resume = { bookId: latest.bookId, page: latest.currentPage };
+      } catch {}
+    }
+    setPostEndCall(false);
+    setChapterEndOverlay(null);
+    if (resume) handleBeginWithBook(resume.bookId, resume.page);
+    else handleStartReadingSession();
   };
   const handleSkipOnboarding = () => setMode("home");
   const handleNanaBack = () => setNanaOnboardingStep(s => Math.max(0, s - 1));
@@ -17750,160 +16959,60 @@ export default function App() {
     }
   };
 
-  // Word-highlight sync: Nana taps a SPECIFIC WORD on the page → both screens
-  // highlight that exact word with an amber background for ~2.5s. This is the
-  // "industry-standard co-reading pointer" — Caribu used the same pattern.
-  const [wordHighlight, setWordHighlight] = useState<WordHighlightState | null>(null);
-  useEffect(() => {
-    if (!wordHighlight) return;
-    // Rick's Aug 8: the word action bar depends on this timer to stay
-    // visible while Nana / Perry decide whether to say / sound-out /
-    // save the word. 2.5s was too aggressive; 8s gives the bar room
-    // to be used and matches the standard "long-hover" pattern.
-    const t = setTimeout(() => setWordHighlight(null), 8000);
-    return () => clearTimeout(t);
-  }, [wordHighlight]);
-  const handleBookWord = (side: "L" | "R", index: number, page: number) => {
-    const payload = { side, index, page };
-    setWordHighlight({ ...payload, ts: Date.now() });
+  // Word selection mirrored on both iPads (Rick's Build 33 A-1). Either
+  // reader taps a word; both iPads paint the highlight on the same word
+  // id and only Nana's iPad shows the word actions. Server events apply
+  // in server order (our own echo included) so both iPads settle on the
+  // same word even when Nana and the child tap at the same moment.
+  const [wordSelection, setWordSelection] = useState<WordSelection | null>(null);
+  const selectionServerTsRef = useRef(0);
+  const lastLocalSelectionAtRef = useRef(0);
+  const selectedBookIdRef = useRef(selectedBookId);
+  selectedBookIdRef.current = selectedBookId;
+  const applyServerSelection = useCallback((sel: {
+    wid?: unknown; word?: unknown; sentence?: unknown; by?: unknown; bookId?: unknown; cleared?: unknown; ts?: unknown;
+  } | null | undefined) => {
+    if (!sel || typeof sel.ts !== "number" || sel.ts <= selectionServerTsRef.current) return;
+    // Older than a tap made on this iPad since: our tap wins.
+    if (serverToLocal(sel.ts) < lastLocalSelectionAtRef.current - 150) return;
+    selectionServerTsRef.current = sel.ts;
+    if (sel.cleared) { setWordSelection(null); return; }
+    if (typeof sel.word !== "string" || !sel.word) return;
+    if (typeof sel.bookId === "string" && sel.bookId && sel.bookId !== selectedBookIdRef.current) return;
+    setWordSelection({
+      wid: typeof sel.wid === "string" ? sel.wid : "",
+      word: sel.word,
+      sentence: typeof sel.sentence === "string" ? sel.sentence : "",
+      by: sel.by === "perry" ? "perry" : "nana",
+      ts: sel.ts,
+    });
+  }, [serverToLocal]);
+  const handleSelectWord = useCallback((sel: { wid: string; word: string; sentence: string } | null, by: "nana" | "perry") => {
+    lastLocalSelectionAtRef.current = Date.now();
+    if (!sel) {
+      setWordSelection(null);
+      if (connectionId) api.sessions.publishEvent(connectionId, "word_select_clear", { by }).catch(() => {});
+      return;
+    }
+    setWordSelection({ ...sel, by, ts: Date.now() });
     if (connectionId) {
-      api.sessions.publishEvent(connectionId, "word_highlight", payload).catch(() => {});
+      api.sessions.publishEvent(connectionId, "word_select", { ...sel, by, bookId: selectedBookIdRef.current }).catch(() => {});
     }
-  };
-
-  // ── Word action bar state + handlers ─────────────────────────────
-  // Rick's Aug 8 feature: floating action popup on a highlighted word
-  // with Say / Sound out / Meaning / Save actions. Say + Sound out +
-  // Define broadcast so BOTH iPads hear the audio / see the meaning
-  // simultaneously. Save persists to the per-child learned_words
-  // table via api.learnedWords.
-  const [wordDefinition, setWordDefinition] = useState<{ word: string; text: string } | null>(null);
-  const [wordSaveState, setWordSaveState] = useState<{ word: string; status: "saving" | "saved" | "already" } | null>(null);
-  const wordDefinitionTimerRef = useRef<number | null>(null);
-  const wordSaveTimerRef = useRef<number | null>(null);
-
-  // Prime + play a TTS utterance. Reused for Say and Sound-out. Same
-  // safety net as speakWord in BookSpread: resume the synth if Safari
-  // paused it silently, wait for voices to load on the first call.
-  const speakTts = useCallback((text: string, rate = 0.85) => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    try {
-      const synth = window.speechSynthesis;
-      if (synth.paused) synth.resume();
-      synth.cancel();
-      const say = () => {
-        const u = new SpeechSynthesisUtterance(text);
-        u.rate = rate;
-        u.pitch = 1.0;
-        u.lang = "en-US";
-        const voices = synth.getVoices();
-        const en = voices.find(v => v.lang.startsWith("en"));
-        if (en) u.voice = en;
-        synth.speak(u);
-      };
-      if (synth.getVoices().length === 0) {
-        const onVoices = () => { synth.removeEventListener("voiceschanged", onVoices); say(); };
-        synth.addEventListener("voiceschanged", onVoices);
-        window.setTimeout(() => { synth.removeEventListener("voiceschanged", onVoices); if (!synth.speaking) say(); }, 150);
-      } else {
-        say();
-      }
-    } catch {}
+  }, [connectionId]);
+  // iOS keeps Web Audio suspended until a gesture; re-arm on every tap so
+  // a pronunciation triggered from the other iPad can play here.
+  useEffect(() => {
+    const prime = () => primeAudio();
+    document.addEventListener("pointerdown", prime, { passive: true });
+    return () => document.removeEventListener("pointerdown", prime);
   }, []);
-
-  // Sound-out: split into syllables and speak each with a short pause
-  // between, then the whole word at normal pace.
-  const soundOutWord = useCallback((word: string) => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    const parts = splitIntoSyllables(word);
-    const synth = window.speechSynthesis;
-    try { synth.cancel(); if (synth.paused) synth.resume(); } catch {}
-    const queue = [
-      ...parts.map(p => ({ text: p, rate: 0.55, gap: 350 })),
-      { text: word, rate: 0.9, gap: 0 },
-    ];
-    const runAt = (i: number) => {
-      if (i >= queue.length) return;
-      const { text, rate, gap } = queue[i];
-      const u = new SpeechSynthesisUtterance(text);
-      u.rate = rate;
-      u.pitch = 1.0;
-      u.lang = "en-US";
-      u.onend = () => window.setTimeout(() => runAt(i + 1), gap);
-      try { synth.speak(u); } catch {}
-    };
-    runAt(0);
-  }, []);
-
-  // Fetch a child-friendly definition. Uses the free Dictionary API;
-  // silent fallback if the network / word lookup fails.
-  const fetchDefinition = useCallback(async (word: string): Promise<string | null> => {
-    try {
-      const res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
-      if (!res.ok) return null;
-      const data = await res.json();
-      if (!Array.isArray(data) || !data[0]?.meanings?.length) return null;
-      // Prefer the first noun definition, fall back to the first of any type.
-      const meanings = data[0].meanings as Array<{ partOfSpeech: string; definitions: Array<{ definition: string }> }>;
-      const preferred = meanings.find(m => m.partOfSpeech === "noun") ?? meanings[0];
-      const first = preferred?.definitions?.[0]?.definition;
-      if (typeof first === "string" && first.length > 0) {
-        // Keep it short so the popup stays legible on iPad.
-        return first.length > 220 ? first.slice(0, 217) + "…" : first;
-      }
-      return null;
-    } catch { return null; }
-  }, []);
-
-  const showDefinitionTransient = useCallback((word: string, text: string) => {
-    if (wordDefinitionTimerRef.current) window.clearTimeout(wordDefinitionTimerRef.current);
-    setWordDefinition({ word, text });
-    wordDefinitionTimerRef.current = window.setTimeout(() => setWordDefinition(null), 9000);
-  }, []);
-
-  const handleWordSay = useCallback((word: string) => {
-    speakTts(word, 0.75);
-    if (connectionId) api.sessions.publishEvent(connectionId, "word_action", { action: "say", word }).catch(() => {});
-  }, [speakTts, connectionId]);
-
-  const handleWordSoundOut = useCallback((word: string) => {
-    soundOutWord(word);
-    if (connectionId) api.sessions.publishEvent(connectionId, "word_action", { action: "sound_out", word }).catch(() => {});
-  }, [soundOutWord, connectionId]);
-
-  const handleWordDefine = useCallback(async (word: string) => {
-    // Optimistic placeholder so the user gets immediate feedback.
-    showDefinitionTransient(word, "Looking it up…");
-    const def = await fetchDefinition(word);
-    const text = def ?? "No definition found for this word.";
-    showDefinitionTransient(word, text);
-    if (connectionId) api.sessions.publishEvent(connectionId, "word_action", { action: "define", word, text }).catch(() => {});
-  }, [fetchDefinition, showDefinitionTransient, connectionId]);
-
-  const handleWordSave = useCallback(async (word: string, sentence: string) => {
-    if (!connectionId) return;
-    if (wordSaveTimerRef.current) window.clearTimeout(wordSaveTimerRef.current);
-    setWordSaveState({ word, status: "saving" });
-    try {
-      const res = await api.learnedWords.save(connectionId, {
-        word,
-        sentence,
-        bookId: selectedBookId || undefined,
-        page: nanaPageRef.current,
-        childId: activeChildId || undefined,
-      });
-      setWordSaveState({ word, status: res.created ? "saved" : "already" });
-    } catch {
-      setWordSaveState({ word, status: "saved" });
-    }
-    wordSaveTimerRef.current = window.setTimeout(() => setWordSaveState(null), 2500);
-  }, [connectionId, selectedBookId, activeChildId]);
-
-  const handleWordActionsClose = useCallback(() => {
-    setWordHighlight(null);
-    if (wordDefinitionTimerRef.current) window.clearTimeout(wordDefinitionTimerRef.current);
-    setWordDefinition(null);
-  }, []);
+  const handleSelectWordNana = useCallback((sel: { wid: string; word: string; sentence: string } | null) => handleSelectWord(sel, "nana"), [handleSelectWord]);
+  const handleSelectWordPerry = useCallback((sel: { wid: string; word: string; sentence: string } | null) => handleSelectWord(sel, "perry"), [handleSelectWord]);
+  // Warm the pronunciation clip on both iPads as soon as a word is picked.
+  useEffect(() => {
+    if (wordSelection?.word) preloadPronunciation(wordSelection.word);
+  }, [wordSelection?.word]);
+  useEffect(() => { setWordSelection(null); }, [selectedBookId]);
 
   // ── SelectionActionMenu handlers (Rick's Aug 14 rewrite #7-11) ──
   // Wired to iOS native text selection via SelectionActionMenu.
@@ -17931,15 +17040,10 @@ export default function App() {
     syllables?: string;
   } | null>(null);
   const [selPhonicsStep, setSelPhonicsStep] = useState<number>(0);
-  // Rick's Build 30 review #3: Perry broadcasts her selection to Nana
-  // via SSE. Nana sees a SelectionActionMenu anchored to the matching
-  // word on her own page. Perry sees no popup at all.
-  const [remoteSelection, setRemoteSelection] = useState<{ word: string; sentence: string; ts: number } | null>(null);
-  const remoteSelectionTimerRef = useRef<number | null>(null);
   // Rick's Build 30 review #2: Perry can tap Ask/Pick-a-Book/etc pills
   // that ask Nana to do something. Nana sees a floating banner and
   // taps Accept to route the request.
-  const [perryRequest, setPerryRequest] = useState<{ kind: "showandtell" | "silly" | "pickbook" | "wave"; ts: number } | null>(null);
+  const [perryRequest, setPerryRequest] = useState<{ kind: "showandtell" | "silly" | "pickbook" | "wave" | "goodbye"; ts: number } | null>(null);
   const perryRequestTimerRef = useRef<number | null>(null);
   // Rick's Sep 2026 library-search: family "Request a book we don't
   // have" flow. Nana can submit a request from the library screen; when
@@ -17947,6 +17051,11 @@ export default function App() {
   // catalog auto-refreshes.
   const [bookRequestApprovedToast, setBookRequestApprovedToast] = useState<{ bookId: string; ts: number } | null>(null);
   const [bookRequestModalOpen, setBookRequestModalOpen] = useState(false);
+  const [bookRequestQuery, setBookRequestQuery] = useState("");
+  const openBookRequest = useCallback((query?: unknown) => {
+    setBookRequestQuery(typeof query === "string" ? query : "");
+    setBookRequestModalOpen(true);
+  }, []);
   // Rick's Sep 25 (C-3): in-app "Send Feedback" — accessible from
   // Menu on every screen. Both Nana and Perry can send.
   const [feedbackModalOpen, setFeedbackModalOpen] = useState(false);
@@ -17978,53 +17087,18 @@ export default function App() {
     } catch { return null; }
   }, []);
 
-  const playAudio = useCallback((url: string) => {
-    try { new Audio(url).play(); } catch {}
-  }, []);
-
-  // Optimistic audio play — returns true if playback started, false if
-  // the Audio element rejected the source. Used for the Google TTS path
-  // where we want to try-and-fall-back without waiting on the network.
-  const playAudioFast = useCallback((url: string): boolean => {
-    try {
-      const a = new Audio(url);
-      // If audio errors out (404, CORS, etc.) suppress silently — the
-      // caller has already fired the Dictionary fetch as backup.
-      a.onerror = () => { /* silent */ };
-      const p = a.play();
-      if (p && typeof p.then === "function") p.catch(() => {});
-      return true;
-    } catch { return false; }
-  }, []);
-
+  // Rick's Build 33: one voice on both iPads. Broadcast first so the
+  // partner iPad starts at the same moment, then play locally. The
+  // dictionary lookup only enriches a later Save.
   const handleSelectionPronounce = useCallback(async (word: string) => {
     setSelPronState({ word, status: "loading" });
-    // Rick's Build 32 review #A-2: 10-second delay + robotic voice.
-    // New order-of-preference:
-    //   1. Server /api/tts (Google Translate voice, ~200ms, cached
-    //      forever per word) — natural human voice, always fast.
-    //   2. Free Dictionary audio (rare, sometimes region-specific).
-    //   3. Web Speech local TTS (robotic, but works offline).
-    // We speak immediately from step 1; the dictionary fetch runs in
-    // parallel just to enrich the Words We're Learning save later.
-    const spoken = playAudioFast(api.tts.audioUrl(word));
-    // Enrichment fetch in the background — never blocks audio playback.
-    const dict = await fetchDict(word);
-    if (!spoken && dict?.audioUrl) {
-      playAudio(dict.audioUrl);
-    } else if (!spoken) {
-      try {
-        if ("speechSynthesis" in window) {
-          window.speechSynthesis.cancel();
-          const u = new SpeechSynthesisUtterance(word);
-          u.rate = 0.85; u.lang = "en-US";
-          window.speechSynthesis.speak(u);
-        }
-      } catch {}
+    if (connectionId) {
+      api.sessions.publishEvent(connectionId, "word_action", { action: "say", word, origin: myLibraryOriginRef.current }).catch(() => {});
     }
-    setSelPronState({ word, status: dict || spoken ? "done" : "err" });
-    if (connectionId) api.sessions.publishEvent(connectionId, "word_action", { action: "say", word }).catch(() => {});
-  }, [fetchDict, playAudio, connectionId]);
+    const how = await pronounce(word);
+    setSelPronState({ word, status: how === "none" ? "err" : "done" });
+    void fetchDict(word);
+  }, [fetchDict, connectionId]);
 
   const handleSelectionPhonics = useCallback(async (word: string) => {
     const cached = selPhoCacheRef.current.get(word.toLowerCase());
@@ -18072,21 +17146,8 @@ export default function App() {
     }
   }, [connectionId]);
 
-  // Rick's Build 30 review #3: Perry publishes her selection so Nana's
-  // iPad can render the SelectionActionMenu at the matching word.
-  // Debounced — same word within 400ms doesn't re-publish.
-  const lastShareRef = useRef<{ word: string; ts: number } | null>(null);
-  const handleShareSelection = useCallback((word: string, sentence: string) => {
-    if (!connectionId) return;
-    const now = Date.now();
-    const last = lastShareRef.current;
-    if (last && last.word.toLowerCase() === word.toLowerCase() && now - last.ts < 400) return;
-    lastShareRef.current = { word, ts: now };
-    api.sessions.publishEvent(connectionId, "selection_broadcast", { word, sentence }).catch(() => {});
-  }, [connectionId]);
-
   // Perry-side request-to-Nana pill (Rick's Build 30 review #2).
-  const handlePerryRequest = useCallback((kind: "showandtell" | "silly" | "pickbook" | "wave") => {
+  const handlePerryRequest = useCallback((kind: "showandtell" | "silly" | "pickbook" | "wave" | "goodbye") => {
     if (!connectionId) return;
     api.sessions.publishEvent(connectionId, "perry_request", { kind }).catch(() => {});
   }, [connectionId]);
@@ -18125,7 +17186,7 @@ export default function App() {
   const [readingTheme, setReadingTheme] = useState<ReadingTheme>(() => {
     try {
       const v = localStorage.getItem("nm_reading_theme");
-      if (v === "day" || v === "sepia" || v === "night") return v;
+      if (isReadingTheme(v)) return v;
     } catch {}
     return "day";
   });
@@ -18155,7 +17216,7 @@ export default function App() {
   const [readingLayout, setReadingLayout] = useState<ReadingLayout>(() => {
     try {
       const v = localStorage.getItem("nm_reading_layout");
-      if (v && (READING_LAYOUTS as readonly string[]).includes(v)) return v as ReadingLayout;
+      if (v) return normalizeLayout(v);
     } catch {}
     return "classic";
   });
@@ -18217,6 +17278,142 @@ export default function App() {
   const [pageSide, setPageSide] = useState<"L" | "R">("L");
   const pageSideRef = useRef<"L" | "R">("L");
   useEffect(() => { pageSideRef.current = pageSide; }, [pageSide]);
+
+  // ── Measured pagination (Rick's Build 33 A-3) ──────────────────────
+  // Each iPad measures its own reading box and publishes it. Nana's iPad
+  // plans spreads that fit BOTH boxes and publishes the plan; the child's
+  // iPad follows it, so both show the same words per page and turn at
+  // the same point. Picture and non-chapter books keep one source page
+  // per spread.
+  const [localProfiles, setLocalProfiles] = useState<Partial<Record<"nana" | "perry", PageProfile>>>({});
+  const [remoteProfiles, setRemoteProfiles] = useState<Partial<Record<"nana" | "perry", PageProfile>>>({});
+  const [pagePlan, setPagePlan] = useState<PagePlan | null>(null);
+  const pagePlanRef = useRef<PagePlan | null>(null);
+  pagePlanRef.current = pagePlan;
+  const isPagePlanner = deviceView !== "perry";
+  const isPagePlannerRef = useRef(isPagePlanner);
+  isPagePlannerRef.current = isPagePlanner;
+
+  const handlePageProfile = useCallback((p: PageProfile) => {
+    setLocalProfiles(cur => {
+      const prev = cur[p.role];
+      if (prev && profilesClose(prev, p)) return cur;
+      return { ...cur, [p.role]: p };
+    });
+  }, []);
+  const applyRemoteProfile = useCallback((raw: unknown) => {
+    const p = asPageProfile(raw);
+    if (!p) return;
+    // Our own published profile echoes back; the local copy is current.
+    const mine = deviceViewRef.current === "both" || (deviceViewRef.current === "perry" ? p.role === "perry" : p.role === "nana");
+    if (mine) return;
+    setRemoteProfiles(cur => {
+      const prev = cur[p.role];
+      if (prev && profilesClose(prev, p)) return cur;
+      return { ...cur, [p.role]: p };
+    });
+  }, []);
+  const applyRemotePlan = useCallback((raw: unknown) => {
+    if (isPagePlannerRef.current) return;
+    const plan = asPagePlan(raw);
+    if (!plan) return;
+    if (pagePlanRef.current && pagePlanRef.current.key === plan.key
+        && pagePlanRef.current.starts.length === plan.starts.length
+        && pagePlanRef.current.estimatedTotal === plan.estimatedTotal) return;
+    setPagePlan(plan);
+  }, []);
+
+  useEffect(() => {
+    if (!connectionId) return;
+    const t = window.setTimeout(() => {
+      for (const role of ["nana", "perry"] as const) {
+        const p = localProfiles[role];
+        if (p) api.sessions.publishEvent(connectionId, "layout_profile", p).catch(() => {});
+      }
+    }, 400);
+    return () => window.clearTimeout(t);
+  }, [localProfiles, connectionId]);
+
+  const planIsChapterBook = isChapterBook(currentBook);
+  const planProfiles = useMemo(() => {
+    const list: PageProfile[] = [];
+    const n = localProfiles.nana;
+    if (n && n.mode === pageMode) list.push(n);
+    const c = localProfiles.perry ?? remoteProfiles.perry;
+    if (c && c.mode === pageMode) list.push(c);
+    return list;
+  }, [localProfiles, remoteProfiles, pageMode]);
+  const planProfilesKey = planProfiles.map(profileSignature).sort().join("|");
+
+  useEffect(() => {
+    if (!isPagePlanner || !planIsChapterBook || planProfiles.length === 0 || mode !== "reading") return;
+    let aborted = false;
+    const bookId = selectedBookId;
+    const book = currentBook;
+    const t = window.setTimeout(() => {
+      void buildPagePlan(
+        {
+          bookId,
+          pages: book.pages,
+          chapterStarts: chapterStartSet(book),
+          mode: pageMode,
+          profiles: planProfiles,
+          focusPage: nanaPageRef.current,
+          previous: pagePlanRef.current,
+        },
+        (plan) => {
+          if (aborted) return;
+          setPagePlan(plan);
+          if (connectionId) {
+            api.sessions.publishEvent(connectionId, "page_plan", {
+              bookId: plan.bookId, key: plan.key, mode: plan.mode, starts: plan.starts, splits: plan.splits,
+              ...(plan.estimatedTotal ? { estimatedTotal: plan.estimatedTotal } : {}),
+            }).catch(() => {});
+          }
+        },
+        () => aborted,
+      );
+    }, 300);
+    return () => { aborted = true; window.clearTimeout(t); };
+    // planProfiles is captured through planProfilesKey.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPagePlanner, planIsChapterBook, planProfilesKey, pageMode, selectedBookId, catalogVersion, mode, connectionId]);
+
+  // A plan made for the other page mode (or an older font size) stays in
+  // use until the new one arrives a moment later: its spreads are still
+  // whole runs of text, so paging never repeats or skips words in between.
+  const effectivePagePlan = useMemo<PagePlan | null>(() => {
+    if (!planIsChapterBook || !pagePlan) return null;
+    if (pagePlan.bookId !== selectedBookId) return null;
+    const last = pagePlan.starts[pagePlan.starts.length - 1];
+    if (!last || last > currentBook.pages.length) return null;
+    return pagePlan;
+  }, [planIsChapterBook, pagePlan, selectedBookId, pageMode, currentBook]);
+  const effectivePagePlanRef = useRef<PagePlan | null>(effectivePagePlan);
+  effectivePagePlanRef.current = effectivePagePlan;
+  const displayPagePlan = useMemo(
+    () => effectivePagePlan ?? identityPlan(selectedBookId, currentBook.pages.length, pageMode),
+    [effectivePagePlan, selectedBookId, currentBook, pageMode],
+  );
+  const nanaReadingPos = readingPosition(currentBook, displayPagePlan, nanaPage, pageSide, pageMode);
+  const childReadingPos = readingPosition(currentBook, displayPagePlan, childPage, pageSide, pageMode);
+
+  // Drop the word highlight once its page leaves the screen (page turn,
+  // new book). Checked against the visible spread rather than "page
+  // changed" so a highlight that arrives just before this iPad finishes
+  // its own page flip survives.
+  useEffect(() => {
+    setWordSelection(cur => {
+      if (!cur) return cur;
+      const ref = parseWid(cur.wid);
+      if (!ref) return cur;
+      const plan = effectivePagePlan ?? identityPlan(selectedBookId, currentBook.pages.length, pageMode);
+      const shown = deviceView === "perry" ? childPage : nanaPage;
+      const k = spreadIndexOf(plan, shown);
+      const visible = ref.page >= plan.starts[k] && ref.page < spreadEnd(plan, k, currentBook.pages.length);
+      return visible ? cur : null;
+    });
+  }, [nanaPage, childPage, effectivePagePlan, deviceView, selectedBookId, currentBook, pageMode]);
 
   const handlePageModeChange = (next: "single" | "double") => {
     setPageMode(next);
@@ -18322,90 +17519,53 @@ export default function App() {
    */
   const advancePage = (dir: 1 | -1) => {
     const current = nanaPageRef.current;
+    // Steps follow the shared page plan (Rick's Build 33 A-3), so both
+    // modes walk the same spreads and one-page mode never repeats text.
+    const plan = effectivePagePlanRef.current ?? identityPlan(selectedBookId, currentBook.pages.length, pageMode);
+    const k = spreadIndexOf(plan, current);
     // Image-page picture books (e.g. Aubrees) render each spread as one
-    // full-bleed illustration; the BookContent two-page render is bypassed.
-    // L→R within the same spread would just paint the same image again,
-    // so single-page mode is meaningless for them — always step spreads.
+    // full-bleed illustration, so one-page mode just steps spreads.
     const isImageBook = currentBook.pages.some(p => !!p.imageUrl);
     if (pageMode === "double" || isImageBook) {
-      // Wish 2: for chapter books at smaller fonts we pack multiple
-      // source pages per displayed spread. Step by chunkSize so each
-      // advance lands on the next chunk-start; the cover (page 1) is
-      // never chunked. Keyed off nanaFontScale so Nana and Perry agree.
-      const step = chunkSizeFor(currentBook, nanaFontScaleRef.current);
-      if (current === 1 && dir === 1 && step > 1) {
-        // Cover → first chunked spread starting at page 2.
-        changePage(2);
-        return;
-      }
-      const stride = step > 1 && current > 1 ? step : 1;
-      const next = current + dir * stride;
-      // Stepping backward past page 2 must land on the cover, not at
-      // page 0 (which `changePage` would block). The cover is its own
-      // standalone "spread" regardless of chunkSize, so it's the
-      // natural previous step from the first chunked spread at page 2.
-      if (next < 2 && dir === -1 && current > 1) {
-        changePage(1);
-        return;
-      }
-      changePage(next);
+      const target = plan.starts[k + dir];
+      if (target !== undefined) changePage(target);
       return;
     }
     const side = pageSideRef.current;
-    // Cover (spread 1) is a typographic title page — only the right side
-    // carries content. Treat it as a single combined page in single mode
-    // so we don't surface a blank "left of cover" beat.
-    if (current === 1) {
-      if (dir === 1) {
-        // Cover → page 1 of spread 2, side L.
-        changePage(2);
+    const pages = currentBook.pages;
+    // The cover is a typographic title page: one combined page.
+    const isCover = (kk: number) => plan.starts[kk] === 1 && !!pages[0]?.rightIsTitle;
+    const hasRight = (kk: number) => !isCover(kk) && spreadHasRight(pages, plan, kk);
+    const publishSide = (page: number, s: "L" | "R") => {
+      setPageSide(s);
+      if (connectionId) {
+        api.sessions.publishEvent(connectionId, "page_change", { page, side: s }).catch(() => {});
       }
-      // dir === -1 on cover: stay put.
+    };
+    if (dir === 1) {
+      if (side === "L" && hasRight(k)) {
+        publishSide(current, "R");
+      } else {
+        const target = plan.starts[k + 1];
+        if (target !== undefined) changePage(target);
+      }
       return;
     }
-    if (dir === 1) {
-      if (side === "L") {
-        // Same spread, flip to right.
-        setPageSide("R");
-        if (connectionId) {
-          api.sessions.publishEvent(connectionId, "page_change", { page: current, side: "R" }).catch(() => {});
-        }
-      } else {
-        // Advance spread, reset to left.
-        changePage(current + 1);
-      }
-    } else {
-      if (side === "R") {
-        setPageSide("L");
-        if (connectionId) {
-          api.sessions.publishEvent(connectionId, "page_change", { page: current, side: "L" }).catch(() => {});
-        }
-      } else {
-        // Going back from spread N side L → spread N-1 side R.
-        // Set side BEFORE changePage so the publish includes the right
-        // side. changePage resets side to L by default; we override with
-        // a follow-up setPageSide + publish.
-        const prev = current - 1;
-        if (prev < 1) return;
-        // Hand off to changePage to handle chapter-end detection
-        // (irrelevant on backward, but keeps the publish/animation path
-        // consistent), then jump side to R.
-        changePage(prev);
-        // Race-free: changePage's publish goes out with no side, then
-        // we follow with a side update. Both Nana's local state and
-        // Perry's mirror end up at (prev, "R").
-        setPageSide("R");
-        if (connectionId) {
-          api.sessions.publishEvent(connectionId, "page_change", { page: prev, side: "R" }).catch(() => {});
-        }
-      }
+    if (side === "R" && !isCover(k)) {
+      publishSide(current, "L");
+      return;
     }
+    const target = plan.starts[k - 1];
+    if (target === undefined) return;
+    // Back from a spread's left page lands on the previous spread's
+    // right page when it has one.
+    if (changePage(target) && hasRight(k - 1)) publishSide(target, "R");
   };
 
-  const changePage = (newPage: number, opts?: { skipChapterEndDetection?: boolean }) => {
-    if (newPage < 1 || newPage > currentBook.pages.length || busy) return;
+  const changePage = (newPage: number, opts?: { skipChapterEndDetection?: boolean }): boolean => {
+    if (newPage < 1 || newPage > currentBook.pages.length || busy) return false;
     const now = Date.now();
-    if (now - lastPageChangeRef.current < 100) return;
+    if (now - lastPageChangeRef.current < 100) return false;
     lastPageChangeRef.current = now;
     // Chapter-end interception — only on FORWARD navigation in books with
     // structured chapters, and only when the page being LEFT is the last
@@ -18414,6 +17574,7 @@ export default function App() {
     // navigation and books without chapters[] skip this entirely.
     const old = nanaPageRef.current;
     if (
+      CHAPTER_END_POPUP_ENABLED &&
       !opts?.skipChapterEndDetection &&
       newPage > old &&
       isChapterEnd(currentBook, old)
@@ -18459,7 +17620,7 @@ export default function App() {
           api.sessions.publishEvent(connectionId, "chapter_end", payload).catch(() => {});
         }
         lastPageChangeRef.current = 0; // allow immediate retry after dismiss
-        return; // pause advance until Nana taps Next Chapter
+        return false; // pause advance until Nana taps Next Chapter
         } // end short-chapter gate else-branch
       }
     }
@@ -18486,6 +17647,23 @@ export default function App() {
     setFlipToPage(newPage);
     setChildFlipping(true);
     timerRef.current = setTimeout(() => { setChildPage(newPage); setChildFlipping(false); setBusy(false); }, 500);
+    return true;
+  };
+
+  /** Menu → Chapters & Pages: jump to the spread holding `page`. */
+  const handleJumpToPage = (page: number) => {
+    const plan = effectivePagePlanRef.current ?? identityPlan(selectedBookId, currentBook.pages.length, pageMode);
+    const k = spreadIndexOf(plan, Math.max(1, Math.min(page, currentBook.pages.length)));
+    const target = plan.starts[k] ?? page;
+    if (target === nanaPageRef.current) {
+      if (pageSideRef.current !== "L") {
+        setPageSide("L");
+        if (connectionId) api.sessions.publishEvent(connectionId, "page_change", { page: target, side: "L" }).catch(() => {});
+      }
+      return;
+    }
+    lastPageChangeRef.current = 0;
+    changePage(target, { skipChapterEndDetection: true });
   };
 
   /** Nana taps "Next Chapter" on the chapter-end card. Dismisses the
@@ -18516,7 +17694,10 @@ export default function App() {
    *  chapter the family ended in is included. Picture books and flat
    *  books get bookTitle + pagesRead only. Recomputed per render — cheap. */
   const sessionSummary = (() => {
-    const pagesRead = Math.max(0, nanaPage - sessionStartPageRef.current);
+    // Same count as the end-of-visit card: display pages under the shared
+    // plan. Only Nana's iPad knows where the visit started.
+    const startPos = readingPosition(currentBook, displayPagePlan, sessionStartPageRef.current, "L", pageMode);
+    const pagesRead = deviceView === "perry" ? 0 : Math.max(0, nanaReadingPos.pageNum - startPos.pageNum);
     const chapInfo = isChapterBook(currentBook)
       ? getChapterForPage(currentBook, nanaPage)
       : null;
@@ -18571,7 +17752,11 @@ export default function App() {
     const inSession = SESSION_MODES.has(mode);
     if (connectionId && isNanaSide && inSession && !sessionStartedFiredRef.current) {
       sessionStartedFiredRef.current = true;
-      api.sessions.publishEvent(connectionId, "session_started", {}).catch(() => {});
+      api.sessions.publishEvent(connectionId, "session_started", {}).catch(() => {})
+        // Nana's text size rides along so the child's iPad starts every
+        // visit at her size (the server also keeps it across sessions).
+        .then(() => api.sessions.publishEvent(connectionId, "font_change", { scale: nanaFontScaleRef.current }))
+        .catch(() => {});
       // Re-arm the "first-time" help cards for every new reading session.
       // Without this, a family doing back-to-back sessions in the same
       // browser instance only sees the help cards on the FIRST session —
@@ -18808,8 +17993,76 @@ export default function App() {
   const handleOpenScheduleFromHome = () => { setCloseReturnsTo("home"); setMode("parentcheck"); };
   const handleOpenBookRequests = () => setMode("bookrequests");
   const handleOpenSettings = () => setMode("settings");
-  const handleOpenLearnedWords = () => { setCloseReturnsTo(modeRef.current === "home" ? "home" : "icebreaker"); setMode("learnedwords"); };
+  // Words We're Learning returns to the screen it was opened from (the
+  // child's copy used to have no way out at all).
+  const learnedWordsReturnRef = useRef<Mode>("home");
+  const handleOpenLearnedWords = () => {
+    learnedWordsReturnRef.current = modeRef.current === "learnedwords" ? learnedWordsReturnRef.current : modeRef.current;
+    setCloseReturnsTo(modeRef.current === "home" ? "home" : "icebreaker");
+    setMode("learnedwords");
+  };
+  const handleCloseLearnedWords = () => {
+    const back = learnedWordsReturnRef.current;
+    setMode(back && back !== "learnedwords" ? back : (deviceView === "perry" ? "onboarding" : "home"));
+  };
   const handleGoHome = () => setMode("home");
+
+  // ── Menu "← Back" (Master Plan §4): exactly one meaningful screen back.
+  // Nana's screens are a short history; Home resets it. The child only
+  // has one screen of their own (Words We're Learning).
+  const navHistoryRef = useRef<Mode[]>([]);
+  const navBackPendingRef = useRef(false);
+  const [canNavBack, setCanNavBack] = useState(false);
+  useEffect(() => {
+    if (deviceView === "perry") return;
+    if (navBackPendingRef.current) { navBackPendingRef.current = false; return; }
+    if (mode === "home" || mode === "onboarding") {
+      navHistoryRef.current = mode === "home" ? ["home"] : [];
+      setCanNavBack(false);
+      return;
+    }
+    if (mode === "familystories" || mode === "vault" || mode === "bookrequests") return;
+    const h = navHistoryRef.current;
+    if (h[h.length - 1] !== mode) h.push(mode);
+    if (h.length > 24) h.splice(0, h.length - 24);
+    setCanNavBack(h.length > 1);
+  }, [mode, deviceView]);
+  const handleNavBack = () => {
+    const h = navHistoryRef.current;
+    if (h.length < 2) return;
+    h.pop();
+    const prev = h[h.length - 1];
+    navBackPendingRef.current = true;
+    setCanNavBack(h.length > 1);
+    if (prev === "goodbye") { setGoodbyePhase(0); setGoodbyeStartTime(null); }
+    setMode(prev);
+  };
+
+  // Reading pointer style (Menu → Reading Setup). Nana's iPad only.
+  const [pointerMode, setPointerModeState] = useState<PointerMode>(() => {
+    try {
+      const v = localStorage.getItem("nm_pointer_mode");
+      return v === "ruler" || v === "off" ? v : "finger";
+    } catch { return "finger"; }
+  });
+  const setPointerMode = (m: PointerMode) => {
+    setPointerModeState(m);
+    try { localStorage.setItem("nm_pointer_mode", m); } catch {}
+  };
+  // Session-stream backstop for the pointer (the server relays it only
+  // while a visit is live and keeps it out of the request log).
+  useEffect(() => {
+    if (deviceView === "perry" || !connectionId) return;
+    pointerBus.setSseSender((m) => { api.sessions.publishEvent(connectionId, "pointer", m).catch(() => {}); });
+    return () => pointerBus.setSseSender(null);
+  }, [deviceView, connectionId]);
+
+  // True from session start until the visit ends. Mirrors the ref that
+  // many start paths set, so the Menu knows when to pin End Call.
+  const [visitActive, setVisitActive] = useState(false);
+  useEffect(() => {
+    if (sessionStartedFiredRef.current !== visitActive) setVisitActive(sessionStartedFiredRef.current);
+  });
   const handleCloseVault  = () => {
     // Single-tap exit straight to home. Rick: "Memory Vault back button
     // requires multiple taps and kills the camera." Old behavior hopped
@@ -18862,6 +18115,9 @@ export default function App() {
       const nanaLabel = nanaDisplayName.trim() || getRoleLabel("nana");
       setRecordingName(`${childLabel} · ${nanaLabel} · ${dateStr}`);
       setShowSaveDialog(true);
+    } else if (children.length > 1) {
+      // Rick's Build 33: with brothers and sisters, stay on "Memory
+      // saved!" so the next child's session is one tap away.
     } else {
       setMode("vault");
     }
@@ -19025,6 +18281,7 @@ export default function App() {
       if (!sessionStartedFiredRef.current) {
         sessionStartedFiredRef.current = true;
         try { await api.sessions.publishEvent(connectionId, "session_started", {}); } catch {}
+        api.sessions.publishEvent(connectionId, "font_change", { scale: nanaFontScaleRef.current }).catch(() => {});
       }
       api.sessions.publishEvent(connectionId, "book_change", { bookId: selectedBookId, page: startPage }).catch(() => {});
       api.sessions.publishEvent(connectionId, "phase_change", { mode: "reading", bookId: selectedBookId, page: startPage }).catch(() => {});
@@ -19035,7 +18292,12 @@ export default function App() {
   const handleNextPrompt = () => setPromptIndex(i => (i + 1) % icebreakerPrompts.length);
   const handleNextChildPrompt = () => setChildPromptIndex(i => (i + 1) % childIcebreakerPrompts.length);
   const handleNextShowAndTellPrompt = () => setShowAndTellPromptIndex(i => (i + 1) % showAndTellPrompts.length);
-  const handleBackToReading = () => setMode("reading");
+  // Back to the book only when one was opened this visit; otherwise go
+  // pick one (the default book id would open a book nobody chose).
+  const handleBackToReading = () => {
+    if (readThisVisitRef.current) setMode("reading");
+    else handleStartReading();
+  };
   const handleStartParentCheck = () => { setNanaSillyFilter("none"); setPerrySillyFilter("none"); setSillyChallenge("idle"); setLaughWinner(null); setMode("parentcheck"); };
   const handleStartSillyFaces  = () => setMode("sillyfaces");
   const handleSetNanaFilter = (f: string) => {
@@ -19086,7 +18348,10 @@ export default function App() {
     setSillyChallenge("counting");
     setSillyCountNum(3);
     const myRole: "nana" | "perry" = deviceView === "perry" ? "perry" : "nana";
-    if (connectionId) api.sessions.publishEvent(connectionId, "challenge_state", { state: "counting", delayMs: 1500, host: myRole }).catch(() => {});
+    if (connectionId) {
+      const startAt = Math.round(startTs + serverOffsetMsRef.current);
+      api.sessions.publishEvent(connectionId, "challenge_state", { state: "counting", delayMs: 1500, startAt, host: myRole }).catch(() => {});
+    }
   };
   const handleLaughedFirst = (who: "nana" | "perry") => {
     setLaughWinner(who);
@@ -19120,7 +18385,14 @@ export default function App() {
     if (by === "nana") {
       setNanaScheduleAccepted(true);
       if (connectionId) {
-        api.sessions.publishEvent(connectionId, "schedule_proposal", { date: date.toISOString(), time }).catch(() => {});
+        // startsAt + childId let the server keep the visit once both
+        // sides accept (Home's "Next • Today 4:00 PM").
+        const startsAt = scheduleStartsAt(date, time);
+        api.sessions.publishEvent(connectionId, "schedule_proposal", {
+          date: date.toISOString(), time,
+          ...(startsAt ? { startsAt } : {}),
+          ...(activeChildId ? { childId: activeChildId } : {}),
+        }).catch(() => {});
       }
     } else {
       setPerryScheduleAccepted(true);
@@ -19179,7 +18451,7 @@ export default function App() {
   const [childConsentSeen, setChildConsentSeen] = useState(false);
   const [nanaRecordingOn, setNanaRecordingOn] = useState(true);
   const [childRecordingOn, setChildRecordingOn] = useState(true);
-  const isRecording = nanaConsentSeen && childConsentSeen && nanaRecordingOn && childRecordingOn;
+  const isRecording = FEATURES.recording && nanaConsentSeen && childConsentSeen && nanaRecordingOn && childRecordingOn;
 
 
   // Nana drives the countdown locally and publishes each phase change to Perry via SSE.
@@ -19279,11 +18551,15 @@ export default function App() {
     // in lockstep within ~RTT/2. The SSE goodbye_start handler is
     // guarded below so Nana's own echo doesn't overwrite this
     // tap-time anchor with the slightly-later echo-time conversion.
-    const localStart = Date.now() + 800;
+    // Rick's Build 33 (4 vs 5): the server used to stamp startAt when
+    // Nana's event ARRIVED, so the child's countdown ran late by Nana's
+    // upload time. Nana now sends the exact moment in server clock.
+    const localStart = Date.now() + 1200;
     setGoodbyeStartTime(localStart);
     setGoodbyePhase(0);
     if (connectionId) {
-      api.sessions.publishEvent(connectionId, "goodbye_start", { delayMs: 800 }).catch(() => {});
+      const startAt = Math.round(localStart + serverOffsetMsRef.current);
+      api.sessions.publishEvent(connectionId, "goodbye_start", { delayMs: 1200, startAt }).catch(() => {});
     }
   };
   const handleSkipToGoodbye  = () => {
@@ -19394,7 +18670,135 @@ export default function App() {
     sessionStartedFiredRef.current = false;
   };
 
+  // ── End of visit (Build 38, Master Plan §4 and §11) ─────────────────
+  // Every way a visit ends lands here on Nana's iPad: End Call from the
+  // Menu, Hang Up after the Goodbye ritual, or the child's own "Tap to
+  // Hang Up". Progress is saved, the child's iPad is released to its PIN
+  // keypad (which leaves the video call there), Nana's own call drops
+  // while her end-of-visit card is up, and the card shows what they read
+  // plus the next saved visit.
+  const [visitEndCard, setVisitEndCard] = useState<VisitEndCardData | null>(null);
+  const visitEndCardRef = useRef<VisitEndCardData | null>(null);
+  visitEndCardRef.current = visitEndCard;
+  // True once a book was open during this visit, so the card can say
+  // what they read even when no pages were turned.
+  const readThisVisitRef = useRef(false);
+  useEffect(() => { if (mode === "reading") readThisVisitRef.current = true; }, [mode]);
+
+  const endVisit = (reason: "endcall" | "goodbye" | "childhangup") => {
+    if (deviceView === "perry") return;
+    if (visitEndCardRef.current) return; // already ended
+    const startPos = readingPosition(currentBook, displayPagePlan, sessionStartPageRef.current, "L", pageMode);
+    const pagesRead = Math.max(0, nanaReadingPos.pageNum - startPos.pageNum);
+    const childLabel = (activeChild?.name || dashboardPerryName || "").trim() || getRoleLabel("child");
+    const accepted = scheduleProposal && nanaScheduleAccepted && perryScheduleAccepted
+      ? scheduleStartsAt(scheduleProposal.date, scheduleProposal.time)
+      : null;
+    const card: VisitEndCardData = {
+      childName: childLabel,
+      childPhotoUrl: activeChild?.photoUrl ?? null,
+      bookTitle: readThisVisitRef.current ? currentBook.title : null,
+      bookEmoji: currentBook.emoji,
+      pagesRead: readThisVisitRef.current ? pagesRead : 0,
+      chapterLabel: readThisVisitRef.current ? nanaReadingPos.chapterLabel : null,
+      nextVisitIso: accepted,
+      reason,
+    };
+    visitEndCardRef.current = card;
+    setVisitEndCard(card);
+    readThisVisitRef.current = false;
+
+    finalizeSession();
+    if (connectionId) {
+      api.sessions.publishEvent(connectionId, "session_complete", {}).catch(() => {});
+      // The server keeps visits both sides accepted; show its answer
+      // when the local proposal didn't carry one.
+      api.connections.nextSession(connectionId, activeChildId)
+        .then(r => {
+          const iso = r.nextSession?.startsAt;
+          if (!iso) return;
+          setVisitEndCard(prev => (prev && !prev.nextVisitIso ? { ...prev, nextVisitIso: iso } : prev));
+        })
+        .catch(() => {});
+    }
+    // Reset transient session UI so the next visit starts clean.
+    setWordSelection(null);
+    setSelPhonicsCard(null);
+    setSelPronState(null);
+    setSelPhoState(null);
+    setSelSaveState(null);
+    setChapterEndOverlay(null);
+    setGoodbyePhase(0);
+    setGoodbyeStartTime(null);
+    setScheduleProposal(null);
+    setNanaScheduleAccepted(false);
+    setPerryScheduleAccepted(false);
+    setPostEndCall(false);
+    setMode("home");
+  };
+  endVisitRef.current = endVisit;
+
+  const closeVisitEndCard = () => setVisitEndCard(null);
+
+  // ── Home (Build 38) ─────────────────────────────────────────────────
+  // Next saved visit for the selected grandchild ("Next • Today 4:00 PM").
+  const [nextVisitIso, setNextVisitIso] = useState<string | null>(null);
+  useEffect(() => {
+    if (deviceView === "perry" || !connectionId || mode !== "home") return;
+    let cancelled = false;
+    api.connections.nextSession(connectionId, activeChildId)
+      .then(r => { if (!cancelled) setNextVisitIso(r.nextSession?.startsAt ?? null); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [deviceView, connectionId, mode, activeChildId, visitEndCard]);
+
+  // The selected child's book in progress, for "Continue <Book> with …".
+  // Mid-visit (Nana came Home with the call still on) it's the open book.
+  const homeContinueBook = useMemo(() => {
+    if (visitActive && readThisVisitRef.current && booksLibrary[selectedBookId]) {
+      const b = booksLibrary[selectedBookId];
+      return { title: b.title, emoji: b.emoji };
+    }
+    const latest = dashboardProgress
+      .filter(r => (!activeChildId || r.childId === activeChildId || r.childId == null) && booksLibrary[r.bookId]
+        && r.currentPage > 1 && r.currentPage < booksLibrary[r.bookId].pages.length)
+      .sort((a, b) => Date.parse(b.lastReadAt) - Date.parse(a.lastReadAt))[0];
+    if (!latest) return null;
+    const b = booksLibrary[latest.bookId];
+    return { title: b.title, emoji: b.emoji };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dashboardProgress, activeChildId, visitActive, selectedBookId, catalogVersion]);
+
+  const handleHomePrimary = () => {
+    // Call still on: go straight back to the visit.
+    if (visitActive && readThisVisitRef.current && selectedBookId) { setMode("reading"); return; }
+    if (visitActive) { setMode("greeting"); return; }
+    const id = activeChildId ?? children[0]?.id;
+    if (id) void handleReadWithChild(id);
+    else handleStartReadingSession();
+  };
+
+  // "If NeverMiss already knows which child is connected, select that
+  // child automatically" (Master Plan §3). Only on a change of who is on
+  // the child's iPad, so Nana can still pick someone else by hand.
+  const lastPresenceChildRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (deviceView === "perry") return;
+    if (perryHereChildId === lastPresenceChildRef.current) return;
+    lastPresenceChildRef.current = perryHereChildId;
+    if (!perryHereChildId || visitActive || mode !== "home") return;
+    if (perryHereChildId !== activeChildId && children.some(c => c.id === perryHereChildId)) {
+      handleSelectChild(perryHereChildId);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [perryHereChildId, mode, children]);
+
+
   const handleEndSession = () => {
+    if (!FEATURES.familyJournal) {
+      endVisit("endcall");
+      return;
+    }
     finalizeSession();
     // Rick's Aug 14 #8: this is the "Save a Memory" path. Route to
     // the family-stories write screen so Nana can save a note.
@@ -19403,24 +18807,14 @@ export default function App() {
     setMode("familystories");
   };
 
-  const handleHangUp = () => {
-    // Rick's Aug 14 #8: quick-exit without the memory-save detour.
-    // Same session persistence + broadcast, but land Nana back on
-    // home directly. Also broadcast session_complete so Perry's iPad
-    // returns to the PIN screen cleanly instead of sitting on a
-    // dead goodbye view.
-    finalizeSession();
-    if (connectionId) {
-      api.sessions.publishEvent(connectionId, "session_complete", {}).catch(() => {});
-    }
-    setPostEndCall(true);
-    // Reset transient reading UI so the next session starts clean.
-    setWordHighlight(null);
-    setSelPhonicsCard(null);
-    setSelPronState(null);
-    setSelPhoState(null);
-    setSelSaveState(null);
-    setMode("home");
+  // Hang Up after the Goodbye ritual, and End Call from the Menu.
+  const handleHangUp = () => endVisit(modeRef.current === "goodbye" ? "goodbye" : "endcall");
+
+  // Child's iPad, after the hang-up celebration: tell Nana's iPad (her
+  // end-of-visit card) and leave the call right away.
+  const handleChildHangUp = () => {
+    if (connectionId) api.sessions.publishEvent(connectionId, "child_hangup", {}).catch(() => {});
+    sendChildToPin();
   };
 
   const btnStyle = (disabled: boolean) => ({
@@ -19684,6 +19078,7 @@ export default function App() {
               {perryRequest.kind === "showandtell" ? "🎁"
                 : perryRequest.kind === "silly" ? "🎭"
                 : perryRequest.kind === "pickbook" ? "📚"
+                : perryRequest.kind === "goodbye" ? "💕"
                 : "👋"}
             </span>
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -19694,6 +19089,7 @@ export default function App() {
                 {perryRequest.kind === "showandtell" ? "Can we do Show & Tell?"
                   : perryRequest.kind === "silly" ? "Can we play Silly Faces?"
                   : perryRequest.kind === "pickbook" ? "Ready to pick a book!"
+                  : perryRequest.kind === "goodbye" ? "Ready to say goodbye"
                   : "Waving hello!"}
               </div>
             </div>
@@ -19723,6 +19119,7 @@ export default function App() {
                 else if (kind === "silly") handleStartSillyFaces();
                 else if (kind === "pickbook") handleOpenLibrary();
                 else if (kind === "wave") handleSendReaction("heart");
+                else if (kind === "goodbye") handleStartGoodbye();
               }}
               style={{
                 background: "linear-gradient(135deg, #86efac 0%, #22c55e 100%)",
@@ -19977,8 +19374,12 @@ export default function App() {
       {bookRequestModalOpen && connectionId && (
         <BookRequestModal
           connectionId={connectionId}
+          initialQuery={bookRequestQuery}
           onClose={() => setBookRequestModalOpen(false)}
         />
+      )}
+      {visitEndCard && deviceView !== "perry" && (
+        <VisitEndCard data={visitEndCard} onHome={closeVisitEndCard} />
       )}
       {/* Rick's Sep 25 (C-3): Send Feedback modal. Accessible from
           Menu on every screen. Auto-captures the current mode as
@@ -19988,10 +19389,16 @@ export default function App() {
         <FeedbackModal
           connectionId={connectionId}
           senderRole={deviceView === "perry" ? "child" : (currentUser?.role === "parent" ? "parent" : "nana")}
-          senderName={(dashboardPerryName || nanaDisplayName || currentUser?.firstName || "").trim() || undefined}
-          pageContext={`mode=${mode}${selectedBookId ? ` book=${selectedBookId}` : ""}`}
-          appVersion="Build 35"
+          senderName={(deviceView === "perry" ? (perryConnRef.current?.childName || dashboardPerryName) : (nanaDisplayName || currentUser?.firstName || "")).trim() || undefined}
+          pageContext={`mode=${mode}${selectedBookId ? ` book=${selectedBookId}` : ""} device=${deviceView ?? "none"}`}
+          appVersion={APP_BUILD}
+          childName={dashboardPerryName || undefined}
+          bookTitle={selectedBookId ? currentBook.title : undefined}
+          pageLabel={mode === "reading"
+            ? `Page ${(deviceView === "perry" ? childReadingPos : nanaReadingPos).pageNum} of ${(deviceView === "perry" ? childReadingPos : nanaReadingPos).pageTotal}${nanaReadingPos.chapterLabel ? ` · ${nanaReadingPos.chapterLabel}` : ""}`
+            : undefined}
           onClose={() => setFeedbackModalOpen(false)}
+          autoCloseIfEmptyMs={deviceView === "perry" ? 10000 : undefined}
         />
       )}
       <style>{`
@@ -20064,7 +19471,10 @@ export default function App() {
       {/* Header — Switch User pill. Was a tiny 10px / 0.28-opacity link
           that Rick "did not see" when trapped on Nana login. Bumped to
           a proper amber-bordered pill at higher contrast so it reads
-          as an actionable button at a glance. */}
+          as an actionable button at a glance. Build 38: only on the
+          sign-in screens; once signed in it lives in Settings, so it no
+          longer steals a strip above every visit screen. */}
+      {mode === "onboarding" && (
       <div style={{ flexShrink: 0, position: "relative", width: "100%", height: "32px" }}>
         <button
           onClick={handleSwitchDevice}
@@ -20088,6 +19498,7 @@ export default function App() {
           <span>Switch user</span>
         </button>
       </div>
+      )}
 
       {/* Device frames */}
       <div style={{
@@ -20116,9 +19527,11 @@ export default function App() {
         {(deviceView === "nana" || deviceView === "both") && <VideoSessionProvider
           connectionId={connectionId}
           role="nana"
-          enabled={connectionId !== null && (mode !== "onboarding" || perryAuthenticated)}
+          // Off while the end-of-visit card is up, so hanging up really
+          // ends Nana's call too (Build 38).
+          enabled={connectionId !== null && (mode !== "onboarding" || perryAuthenticated) && !visitEndCard}
         ><DeviceFrame
-          label="NANA'S iPAD"
+          label={deviceView === "both" ? "NANA'S iPAD" : ""}
           isNana={true}
           displayPage={nanaPage}
           flipping={false}
@@ -20186,6 +19599,7 @@ export default function App() {
           childrenList={children}
           activeChildId={activeChildId}
           onSelectChild={handleSelectChild}
+          onReadWithChild={(id) => { void handleReadWithChild(id); }}
           onOpenAddChild={() => setAddChildModalOpen(true)}
           pinScreenExpectedChild={(activeChildId && activeChildId !== authenticatedChildId) ? children.find((c) => c.id === activeChildId) ?? null : null}
           familyStoriesSubMode={familyStoriesSubMode}
@@ -20245,19 +19659,11 @@ export default function App() {
           onFontScaleChange={applyFontScale}
           pointerHighlight={pointerHighlight}
           onPointer={handleBookPointer}
-          wordHighlight={wordHighlight}
-          onWord={handleBookWord}
-          onWordSay={handleWordSay}
-          onWordSoundOut={handleWordSoundOut}
-          onWordDefine={handleWordDefine}
-          onWordSave={handleWordSave}
-          wordDefinition={wordDefinition}
-          wordSaveState={wordSaveState}
-          onWordActionsClose={handleWordActionsClose}
+          wordSelection={wordSelection}
+          onSelectWord={handleSelectWordNana}
           onSelectionPronounce={handleSelectionPronounce}
           onSelectionPhonics={handleSelectionPhonics}
           onSelectionSave={handleSelectionSave}
-          remoteSelection={remoteSelection}
           selectionPronunciationState={selPronState}
           selectionPhonicsState={selPhoState}
           selectionSaveState={selSaveState}
@@ -20268,7 +19674,8 @@ export default function App() {
           pageMode={pageMode}
           pageSide={pageSide}
           onPageModeChange={handlePageModeChange}
-          chunkSize={chunkSizeFor(currentBook, nanaFontScale)}
+          pagePlan={effectivePagePlan}
+          onPageProfile={handlePageProfile}
           currentReaction={currentReaction}
           onReact={handleSendReaction}
           readingStartedAt={readingStartedAt}
@@ -20278,7 +19685,22 @@ export default function App() {
           onLibraryScroll={handleLibraryScroll}
           libraryScrollTop={libraryScrollTop}
           onSignOut={handleSignOut}
-          onOpenBookRequest={() => setBookRequestModalOpen(true)}
+          readingPos={nanaReadingPos}
+          phonicsCardOpen={!!selPhonicsCard}
+          perryHereChildId={perryHereChildId}
+          nextVisitIso={nextVisitIso}
+          homeContinueBook={homeContinueBook}
+          onHomePrimary={handleHomePrimary}
+          onSetChildPhoto={handleSetChildPhoto}
+          onRemoveChildPhoto={handleRemoveChildPhoto}
+          onUpdateChild={handleUpdateChild}
+          onJumpToPage={handleJumpToPage}
+          pointerMode={pointerMode}
+          onPointerModeChange={setPointerMode}
+          onNavBack={canNavBack ? handleNavBack : undefined}
+          onCloseLearnedWords={handleCloseLearnedWords}
+          visitActive={visitActive}
+          onOpenBookRequest={openBookRequest}
           onOpenFeedback={() => setFeedbackModalOpen(true)}
           readingFullscreen={readingFullscreen}
           onToggleReadingFullscreen={toggleReadingFullscreen}
@@ -20286,10 +19708,13 @@ export default function App() {
         {(deviceView === "perry" || deviceView === "both") && <VideoSessionProvider
           connectionId={connectionId}
           role="perry"
-          enabled={connectionId !== null && (mode !== "onboarding" || perryAuthenticated)}
+          // Only while a child is logged in: the PIN keypad after a visit
+          // must not keep the camera and microphone live (Build 38).
+          enabled={connectionId !== null && perryAuthenticated}
         ><DeviceFrame
-          label="PERRY'S iPAD"
+          label={deviceView === "both" ? "PERRY'S iPAD" : ""}
           isNana={false}
+          onSwitchDevice={handleSwitchDevice}
           displayPage={childPage}
           flipping={childFlipping}
           flipFromPage={flipFromPage}
@@ -20325,11 +19750,12 @@ export default function App() {
           onBackFromSillyFaces={handleBackFromSillyFaces}
           goodbyePhase={goodbyePhase}
           goodbyeStartTime={goodbyeStartTime}
-          onStartGoodbye={handleStartGoodbye}
+          onStartGoodbye={() => handlePerryRequest("goodbye")}
           onBeginGoodbyeCountdown={handleBeginGoodbyeCountdown}
           onSkipToGoodbye={handleSkipToGoodbye}
           onEndSession={handleEndSession}
           onHangUp={handleHangUp}
+          onChildHangUp={handleChildHangUp}
           showConsentOverlay={!childConsentSeen}
           recordingOn={childRecordingOn}
           onToggleRecording={() => setChildRecordingOn(v => !v)}
@@ -20413,19 +19839,8 @@ export default function App() {
           onCycleFontScale={cycleFontScale}
           pointerHighlight={pointerHighlight}
           onPointer={handleBookPointer}
-          wordHighlight={wordHighlight}
-          onWord={handleBookWord}
-          onWordSay={handleWordSay}
-          onWordSoundOut={handleWordSoundOut}
-          onWordDefine={handleWordDefine}
-          onWordSave={handleWordSave}
-          wordDefinition={wordDefinition}
-          wordSaveState={wordSaveState}
-          onWordActionsClose={handleWordActionsClose}
-          onSelectionPronounce={handleSelectionPronounce}
-          onSelectionPhonics={handleSelectionPhonics}
-          onSelectionSave={handleSelectionSave}
-          onShareSelection={handleShareSelection}
+          wordSelection={wordSelection}
+          onSelectWord={handleSelectWordPerry}
           onPerryPickBook={() => handlePerryRequest("pickbook")}
           onOpenFeedback={() => setFeedbackModalOpen(true)}
           onPerryAskNana={() => handlePerryRequest("wave")}
@@ -20436,7 +19851,8 @@ export default function App() {
           readingLayout={readingLayout}
           pageMode={pageMode}
           pageSide={pageSide}
-          chunkSize={chunkSizeFor(currentBook, nanaFontScale)}
+          pagePlan={effectivePagePlan}
+          onPageProfile={handlePageProfile}
           currentReaction={currentReaction}
           onReact={handleSendReaction}
           readingStartedAt={readingStartedAt}
@@ -20446,163 +19862,16 @@ export default function App() {
           onLibraryScroll={handleLibraryScroll}
           libraryScrollTop={libraryScrollTop}
           onSignOut={handleSignOut}
+          readingPos={childReadingPos}
+          onNavBack={mode === "learnedwords" ? handleCloseLearnedWords : undefined}
+          onCloseLearnedWords={handleCloseLearnedWords}
+          visitActive={visitActive}
         /></VideoSessionProvider>}
       </div>
 
-      {/* Perry's combined controls — single row to prevent wrapping on iPad mini */}
-      {mode === "reading" && deviceView === "perry" && (
-        <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "4px", flexShrink: 0, flexWrap: "nowrap", justifyContent: "center" }}>
-          <TileButton
-            icon="←"
-            label="Prev"
-            tone="primary"
-            size="sm"
-            onClick={() => advancePage(-1)}
-            disabled={childPage === 1 || busy}
-          />
-          <div style={{ textAlign: "center", minWidth: "80px" }}>
-            <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 600, opacity: 0.8, letterSpacing: "0.02em" }}>{currentBook.title}</div>
-            <div style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: "11px", opacity: 0.7 }}>Page {childPage} / {currentBook.pages.length}</div>
-          </div>
-          <TileButton
-            icon="→"
-            label="Next"
-            tone="primary"
-            size="sm"
-            onClick={() => advancePage(1)}
-            disabled={childPage === currentBook.pages.length || busy}
-          />
-          <TileButton
-            icon={`A${fontScale >= 1.5 ? "﹢﹢" : fontScale >= 1.25 ? "﹢" : ""}`}
-            label="Size"
-            tone="secondary"
-            size="sm"
-            onClick={cycleFontScale}
-            ariaLabel="Cycle font size"
-          />
-        </div>
-      )}
-
-      {/* Reading toolbar — separate buttons with consistent height (40px)
-          and unified styling. No outer pill container that forces
-          mismatched proportions. Rick's Build 32 review #B-5: in
-          fullscreen mode the toolbar collapses to just a compact
-          Prev / page-count / Next pill so the book claims the screen. */}
-      {mode === "reading" && deviceView !== "perry" && readingFullscreen && (
-        <div style={{
-          position: "fixed", bottom: 12, left: "50%", transform: "translateX(-50%)",
-          zIndex: 55,
-          display: "inline-flex", alignItems: "center", gap: 6,
-          padding: "6px 8px",
-          background: "rgba(11,23,46,0.85)",
-          border: "1px solid rgba(201,146,42,0.35)",
-          borderRadius: 999,
-          backdropFilter: "blur(8px)",
-          boxShadow: "0 6px 20px rgba(0,0,0,0.55)",
-        }}>
-          <button
-            onClick={() => advancePage(-1)}
-            disabled={nanaPage === 1 || busy}
-            aria-label="Previous page"
-            style={{
-              width: 34, height: 34, borderRadius: "50%",
-              background: nanaPage === 1 || busy ? "rgba(255,255,255,0.06)" : AMBER,
-              color: nanaPage === 1 || busy ? "rgba(247,240,227,0.35)" : NAVY,
-              border: "none", cursor: nanaPage === 1 || busy ? "not-allowed" : "pointer",
-              fontSize: 16, fontWeight: 900,
-              display: "inline-flex", alignItems: "center", justifyContent: "center",
-              padding: 0, touchAction: "manipulation",
-            }}
-          >←</button>
-          <span style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 600, padding: "0 8px", fontVariantNumeric: "oldstyle-nums", whiteSpace: "nowrap" }}>
-            {nanaPage} / {currentBook.pages.length}
-          </span>
-          <button
-            onClick={() => advancePage(1)}
-            disabled={nanaPage === currentBook.pages.length || busy}
-            aria-label="Next page"
-            style={{
-              width: 34, height: 34, borderRadius: "50%",
-              background: nanaPage === currentBook.pages.length || busy ? "rgba(255,255,255,0.06)" : AMBER,
-              color: nanaPage === currentBook.pages.length || busy ? "rgba(247,240,227,0.35)" : NAVY,
-              border: "none", cursor: nanaPage === currentBook.pages.length || busy ? "not-allowed" : "pointer",
-              fontSize: 16, fontWeight: 900,
-              display: "inline-flex", alignItems: "center", justifyContent: "center",
-              padding: 0, touchAction: "manipulation",
-            }}
-          >→</button>
-        </div>
-      )}
-      {mode === "reading" && deviceView !== "perry" && !readingFullscreen && (
-        <div style={{
-          display: "flex", alignItems: "center", justifyContent: "center",
-          gap: 8, marginTop: 8, flexShrink: 0,
-        }}>
-          <ReadingToolbarBtn
-            kind="primary"
-            onClick={() => advancePage(-1)}
-            disabled={nanaPage === 1 || busy}
-            ariaLabel="Previous page"
-          >
-            <span style={{ fontSize: 18, fontWeight: 800, lineHeight: 1, marginRight: 4 }}>←</span>
-            <span>Prev</span>
-          </ReadingToolbarBtn>
-
-          <div style={{
-            height: 40,
-            display: "flex", flexDirection: "column",
-            alignItems: "center", justifyContent: "center",
-            padding: "0 16px", minWidth: 140,
-            backgroundColor: "rgba(11,23,46,0.55)",
-            border: "1px solid rgba(255,255,255,0.08)",
-            borderRadius: 12,
-          }}>
-            <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800, opacity: 0.85, letterSpacing: "0.1em", textTransform: "uppercase", whiteSpace: "nowrap", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", lineHeight: 1.1 }}>{currentBook.title}</div>
-            <div style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 600, opacity: 0.85, fontVariantNumeric: "oldstyle-nums", marginTop: 2 }}>
-              Page {nanaPage} <span style={{ opacity: 0.55 }}>of {currentBook.pages.length}</span>
-              {childPage !== nanaPage && (
-                <span style={{ marginLeft: 8, color: AMBER, fontSize: 10, opacity: 0.7 }}>· Child {childPage}</span>
-              )}
-            </div>
-          </div>
-
-          <ReadingToolbarBtn
-            kind="primary"
-            onClick={() => advancePage(1)}
-            disabled={nanaPage === currentBook.pages.length || busy}
-            ariaLabel="Next page"
-          >
-            <span>Next</span>
-            <span style={{ fontSize: 18, fontWeight: 800, lineHeight: 1, marginLeft: 4 }}>→</span>
-          </ReadingToolbarBtn>
-
-          {/* Conversation prompt — was a floating bookmark panel over the
-              book area. Rick: "doesn't need to display text on screen
-              alongside the book." Tucked into the toolbar as a popover
-              that only appears when Nana taps the button. */}
-          <PromptButton
-            prompt={currentBook.pages[nanaPage - 1]?.nanaPrompt ?? null}
-            onStartChat={handleStartChat}
-          />
-
-          <ReadingToolbarBtn
-            kind="ghost"
-            onClick={cycleFontScale}
-            ariaLabel="Cycle font size"
-          >
-            <span style={{ fontFamily: "Playfair Display, serif", fontSize: 13, fontWeight: 700 }}>A</span>
-            <span style={{ fontFamily: "Playfair Display, serif", fontSize: 17, fontWeight: 700, marginLeft: 1 }}>A</span>
-            <span style={{ marginLeft: 6, fontSize: 10, fontWeight: 700, letterSpacing: "0.04em", opacity: 0.7 }}>
-              {fontScale >= 1.5 ? "XL" : fontScale >= 1.25 ? "L" : fontScale >= 1 ? "M" : "S"}
-            </span>
-          </ReadingToolbarBtn>
-
-          <ReadingToolbarBtn kind="success" onClick={handleStartShowAndTell} ariaLabel="Start Show & Tell">
-            <span style={{ fontSize: 14, marginRight: 4 }}>🎭</span>
-            <span>Show &amp; Tell</span>
-          </ReadingToolbarBtn>
-        </div>
-      )}
+      {/* Build 38: page turning lives in the page pill under the book on
+          both iPads; the old bottom toolbars (and the child's size button)
+          are gone. */}
 
       {showSaveDialog && (
         <div style={{
@@ -20679,7 +19948,7 @@ export default function App() {
           sits above the device frame on both Nana and Perry sides.
           Synced via the `chapter_end` event; dismissed via Nana's tap
           on "Next Chapter" or "End here for today". */}
-      {chapterEndOverlay && (
+      {CHAPTER_END_POPUP_ENABLED && chapterEndOverlay && (
         <div
           role="dialog"
           aria-label="Chapter complete"
@@ -20902,6 +20171,7 @@ export default function App() {
             </div>
             <div style={{ fontSize: 12, color: "rgba(220,252,231,0.85)" }}>
               Same iPad as the others — have {addChildToast.name} enter the new PIN to take over.
+              {addChildToast.photoFailed && " The photo didn't save; tap Add photo on Home to try again."}
             </div>
           </div>
           <button
