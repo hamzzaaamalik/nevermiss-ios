@@ -64,19 +64,37 @@ import { APP_BUILD } from "./lib/build";
 import { pointerBus, type PointerMsg } from "./lib/reading/pointerBus";
 import { ReadingPointerLayer, localPointer } from "./lib/reading/ReadingPointer";
 import {
+  DROP_CAP_DECL,
+  TEXT_STYLE_PROPS,
   asPagePlan,
   asPageProfile,
+  boxFor,
+  boxSignature,
   buildPagePlan,
+  chapterHeadingStyles,
+  chooseStage,
+  cmpPos,
   composeSpread,
+  headingAt,
+  headingFontPx,
+  fontPctFor,
   identityPlan,
-  profileSignature,
+  planSignature,
   profilesClose,
-  spreadEnd,
+  rightStartPos,
+  singlePageMaxEm as singlePageMaxEmFor,
+  splitChapterLabel,
   spreadHasRight,
   spreadIndexOf,
+  spreadLastPage,
+  spreadStart,
+  spreadStop,
+  widPos,
   type ColumnSegment,
   type PagePlan,
   type PageProfile,
+  type PlanPos,
+  type StageSize,
 } from "./lib/reading/pagePlan";
 import {
   CameraMicPanel,
@@ -687,11 +705,12 @@ function readingPosition(
   book: Book,
   plan: PagePlan,
   page: number,
+  off: number,
   side: "L" | "R",
   pageMode: "single" | "double",
 ): { pageNum: number; pageTotal: number; atStart: boolean; atEnd: boolean; chapterLabel: string | null } {
   const pages = book.pages;
-  const k = spreadIndexOf(plan, page);
+  const k = spreadIndexOf(plan, page, off);
   const K = plan.starts.length;
   const stepsSpreads = pageMode === "double" || pages.some(p => !!p.imageUrl);
   let pageNum = k + 1;
@@ -734,23 +753,24 @@ const FALLBACK_NANA_PROMPTS = [
   "Ask: What was the most surprising part so far?",
 ];
 
-/** The conversation prompt for the spread containing `page`: the first
- *  page in the spread that has one, otherwise a rotating general one. */
-function spreadPrompt(pages: BookPage[], plan: PagePlan, page: number): string {
-  const k = spreadIndexOf(plan, page);
-  const end = spreadEnd(plan, k, pages.length);
-  for (let i = plan.starts[k] ?? page; i < end; i++) {
+/** The conversation prompt for the spread holding word `off` of `page`:
+ *  the first page on the spread that has one, otherwise a rotating
+ *  general one. */
+function spreadPrompt(pages: BookPage[], plan: PagePlan, page: number, off = 0): string {
+  const k = spreadIndexOf(plan, page, off);
+  const last = spreadLastPage(plan, k, pages.length);
+  for (let i = plan.starts[k] ?? page; i <= last; i++) {
     const t = pages[i - 1]?.nanaPrompt?.trim();
     if (t) return t;
   }
   return FALLBACK_NANA_PROMPTS[k % FALLBACK_NANA_PROMPTS.length];
 }
 
-/** First non-empty Nana cue in the spread. */
-function spreadCue(pages: BookPage[], plan: PagePlan, page: number): string {
-  const k = spreadIndexOf(plan, page);
-  const end = spreadEnd(plan, k, pages.length);
-  for (let i = plan.starts[k] ?? page; i < end; i++) {
+/** First non-empty Nana cue on the spread. */
+function spreadCue(pages: BookPage[], plan: PagePlan, page: number, off = 0): string {
+  const k = spreadIndexOf(plan, page, off);
+  const last = spreadLastPage(plan, k, pages.length);
+  for (let i = plan.starts[k] ?? page; i <= last; i++) {
     const t = pages[i - 1]?.cue?.trim();
     if (t) return t;
   }
@@ -760,16 +780,16 @@ function spreadCue(pages: BookPage[], plan: PagePlan, page: number): string {
 /** Let's Talk questions (Build 38): this spread's prompt first, then the
  *  prompts written for the pages just read, then the general ones, so
  *  "Another question" always has somewhere to go. */
-function talkQuestions(pages: BookPage[], plan: PagePlan, page: number): string[] {
+function talkQuestions(pages: BookPage[], plan: PagePlan, page: number, off = 0): string[] {
   const out: string[] = [];
   const add = (t: string | undefined | null) => {
     const v = (t ?? "").trim();
     if (v && !out.includes(v)) out.push(v);
   };
-  add(spreadPrompt(pages, plan, page));
-  const k = spreadIndexOf(plan, page);
-  const end = spreadEnd(plan, k, pages.length);
-  for (let i = end - 1; i >= Math.max(1, (plan.starts[k] ?? page) - 8); i--) add(pages[i - 1]?.nanaPrompt);
+  add(spreadPrompt(pages, plan, page, off));
+  const k = spreadIndexOf(plan, page, off);
+  const last = spreadLastPage(plan, k, pages.length);
+  for (let i = last; i >= Math.max(1, (plan.starts[k] ?? page) - 8); i--) add(pages[i - 1]?.nanaPrompt);
   for (const f of FALLBACK_NANA_PROMPTS) add(f);
   return out;
 }
@@ -786,20 +806,17 @@ function chapterStartSet(book: Book): Set<number> {
 /**
  * PAGINATION CONTRACT — read this before adding/editing any page body.
  *
- * Both `leftBody` and `rightBody` MUST fit on the page at the LARGEST
- * font scale (1.5x) without overflow. The reading container is locked
- * to `overflow: hidden`, so anything that doesn't fit is silently
- * clipped — which Rick has explicitly rejected ("you couldn't read the
- * last couple sentence"). At smaller font sizes (1.0x / 1.25x), pages
- * just leave whitespace at the bottom.
+ * Chapter books (with `chapters`) are paginated from measured text (see
+ * lib/reading/pagePlan): their source pages are only a way to store the
+ * words, and pages on screen are cut wherever they fill up.
  *
+ * Books without chapters show one source page per spread, so for those
+ * both `leftBody` and `rightBody` MUST fit on the page at the LARGEST
+ * font scale (1.5x) without overflow, or the page has to scroll.
  * Practical limit at 1.5x: ~380 characters per body side. Longer than
  * that — split into two pages on a natural narrative break (paragraph
  * break, sentence end). The audit script `audit-pages.mjs` flags
  * anything over the threshold; run `node audit-pages.mjs` after edits.
- *
- * This rule is what guarantees Nana on 1.5x and Perry on 1.0x see the
- * same content per page and turn pages at exactly the same point.
  */
 const booksLibrary: Record<string, Book> = {
   alice: {
@@ -1683,12 +1700,17 @@ function WordWrapped({
           style={{
             backgroundColor: active ? "rgba(255,201,80,0.85)" : "transparent",
             color: active ? "#1B2B4B" : undefined,
-            boxShadow: active ? "0 0 0 2px rgba(201,146,42,0.55)" : undefined,
+            // The highlight reaches past the letters with shadows, not side
+            // padding, and a word never breaks inside itself (Safari may
+            // break before an em dash): either could leave part of a page's
+            // last word on a line of its own, which the planner can't see.
+            boxShadow: active ? "0 0 0 3px rgba(255,201,80,0.85), 0 0 0 5px rgba(201,146,42,0.55)" : undefined,
+            whiteSpace: "nowrap",
             borderRadius: 4,
             // Tall padding with matching negative margin so neighbouring
             // lines' tap targets meet in the middle of the leading.
-            padding: "7px 3px",
-            margin: "-5px -1px",
+            padding: "7px 0",
+            margin: "-5px 0",
             transition: "background-color 180ms ease, color 180ms ease",
             boxDecorationBreak: "clone",
             WebkitBoxDecorationBreak: "clone",
@@ -1862,18 +1884,23 @@ function WordActionMenu({
 
 function BookContent({
   page,
+  off = 0,
   bookPages,
   bookTitle,
   fontScale = 1,
   highlightWid = null,
   theme = "day",
-  pageMode = "double",
+  pageMode: selectedMode = "double",
   pageSide = "L",
   plan = null,
   profileRole,
   onProfile,
+  area = null,
 }: {
   page: number;
+  /** Word on `page` the reader is on (Rick's Pagination Spec: positions
+   *  are words, so a spread can begin partway through a source page). */
+  off?: number;
   bookPages: BookPage[];
   bookTitle: string;
   fontScale?: number;
@@ -1893,6 +1920,9 @@ function BookContent({
   profileRole?: "nana" | "perry";
   /** Receives this iPad's measured reading box for the page planner. */
   onProfile?: (p: PageProfile) => void;
+  /** This iPad's own book area (the book may be drawn in a smaller shared
+   *  box and scaled up to fill it). */
+  area?: StageSize | null;
 }) {
   const themeColors = READING_THEMES[theme] ?? READING_THEMES.day;
   // Night and White pages skip the parchment grain and spine vignette.
@@ -1904,38 +1934,55 @@ function BookContent({
   // logged, props aren't reaching the render; if it agrees but the right
   // page still shows, the condition logic is wrong.
   // eslint-disable-next-line no-console
-  console.log(`[BookContent] render pageMode=${pageMode} pageSide=${pageSide} page=${page}`);
+  console.log(`[BookContent] render pageMode=${selectedMode} pageSide=${pageSide} page=${page}`);
   // Clamp the requested page index into the actual book's range. Without
   // this, an out-of-range `page` (e.g. cached page=10 from a different
   // book, or a stale state from before a Phase C page-split) returns
   // `undefined` and renders a blank page — Rick's "blank G-page" report.
   const safePage = Math.max(1, Math.min(page, bookPages.length));
-  // Rick's Build 33 A-3: the spread comes from the shared page plan —
-  // measured merging of short source pages plus a left/right split both
-  // iPads agree on. Without a plan, each source page is its own spread.
-  const activePlan = plan && plan.starts.length > 0 ? plan : identityPlan("", bookPages.length, pageMode);
-  const spreadIdx = spreadIndexOf(activePlan, safePage);
-  const spreadStart = activePlan.starts[spreadIdx] ?? safePage;
-  const spreadStop = spreadEnd(activePlan, spreadIdx, bookPages.length);
+  // The spread comes from the shared page plan (Rick's Pagination Spec):
+  // pages cut from measured text, so a spread can begin on any word.
+  // Without a plan, each source page is its own spread.
+  const activePlan = plan && plan.starts.length > 0 ? plan : identityPlan("", bookPages.length, selectedMode);
+  // A measured plan is drawn in the page mode and text size it was cut
+  // for, so a new size or mode switches over in one step once its plan is
+  // ready, on both iPads (never the old pages at the new size).
+  const planBuilt = typeof activePlan.fontPct === "number";
+  const pageMode = planBuilt ? activePlan.mode : selectedMode;
+  const targetFontPct = planBuilt ? activePlan.fontPct! : fontPctFor(fontScale);
+  const spreadIdx = spreadIndexOf(activePlan, safePage, safePage === page ? off : 0);
+  const start = spreadStart(activePlan, spreadIdx);
+  const stop = spreadStop(activePlan, spreadIdx, bookPages.length);
   const spreadSplit = activePlan.splits[spreadIdx] ?? -1;
   // Heading, emoji, images and title flags come from the first page.
-  const p: BookPage = bookPages[spreadStart - 1] ?? bookPages[0];
-  const isTitleSpread = !!p.rightIsTitle;
-  const isCoverSpread = spreadStart === 1;
+  const p: BookPage = bookPages[start.page - 1] ?? bookPages[0];
+  // A planned spread shows a chapter heading or pictures only where the
+  // planner left room for them: on the spread that opens that page.
+  const planned = spreadSplit >= 0;
+  const opensPage = start.off === 0;
+  const heading = planned ? (opensPage ? headingAt(bookPages, start.page - 1) : null) : (p.leftChapter || null);
+  const images = (!planned || opensPage) && p.images && p.images.length > 0 ? p.images : null;
+  // Planned picture spread: the left page is the picture, the words begin
+  // on the right page.
+  const imagesOnly = planned && !!images;
+  const motif = planned ? (heading ? p.leftEmoji || null : null) : (p.leftEmoji || null);
+  const isTitleSpread = !!p.rightIsTitle && opensPage;
+  const isCoverSpread = start.page === 1 && opensPage;
   const { leftSegs, rightSegs } = isTitleSpread
-    ? composeSpread(bookPages, spreadStart, spreadStart + 1, -1)
-    : composeSpread(bookPages, spreadStart, spreadStop, spreadSplit);
-  const textKey = `${spreadStart}-${spreadStop}-${spreadSplit}`;
+    ? composeSpread(bookPages, start, { page: start.page + 1, off: 0 }, -1)
+    : composeSpread(bookPages, start, stop, spreadSplit);
+  const textKey = `${start.page}.${start.off}-${stop.page}.${stop.off}-${spreadSplit}`;
   const leftPageNum  = isCoverSpread ? null : spreadIdx * 2;
   const rightPageNum = isCoverSpread ? null : spreadIdx * 2 + 1;
   const bodyFs = fontScale >= 1.5 ? "clamp(16px, 2.4vw, 22px)" : fontScale >= 1.25 ? "clamp(13px, 1.8vw, 17px)" : "clamp(10px, 1.3vw, 13px)";
-  const headFs = fontScale >= 1.5 ? "clamp(20px, 2.8vw, 30px)" : fontScale >= 1.25 ? "clamp(17px, 2.4vw, 25px)" : "clamp(14px, 2vw, 20px)";
+  const headPx = headingFontPx(targetFontPct);
+  const headSt = chapterHeadingStyles(headPx);
   const subFs  = fontScale >= 1.5 ? "clamp(14px, 1.8vw, 18px)" : fontScale >= 1.25 ? "clamp(12px, 1.6vw, 16px)" : "clamp(10px, 1.35vw, 13px)";
 
   const leftRef = useRef<HTMLParagraphElement>(null);
   const rightRef = useRef<HTMLParagraphElement>(null);
 
-  // Target scale (in %) from the user's fontScale pick. Also applied as
+  // Target scale (in %): the plan's, else the user's fontScale pick. Also applied as
   // an inline default on both `<p>` elements below so both pages START
   // at the same size even before the auto-fit effect runs — this is
   // the fix for Rick's "font only changes the right page." Previous
@@ -1943,7 +1990,9 @@ function BookContent({
   // fontSize onto both refs; when the effect raced with a React re-render
   // one side could be updated while the other stayed at the pre-effect
   // default, causing asymmetry.
-  const targetFontPct = fontScale >= 1.5 ? 150 : fontScale >= 1.25 ? 125 : fontScale >= 1 ? 100 : 88;
+  // One-page mode caps the line at about 65 characters (Rick's
+  // Pagination Spec: 60 to 75 per line), in the page's own em.
+  const singlePageMaxEm = singlePageMaxEmFor(targetFontPct);
 
   // Rick's Build 32 review #A-3: pagination fix. The original behavior
   // (Aug 14) was "honor target % strictly, scroll on overflow" — which
@@ -1959,8 +2008,13 @@ function BookContent({
   // scroll gesture — see nm-book-body-fade below).
   useLayoutEffect(() => {
     const apply = (pct: number) => {
-      if (leftRef.current)  leftRef.current.style.fontSize  = `${pct}%`;
-      if (rightRef.current) rightRef.current.style.fontSize = `${pct}%`;
+      for (const el of [leftRef.current, rightRef.current]) {
+        if (!el) continue;
+        el.style.fontSize = `${pct}%`;
+        // Lets tests (and a curious developer) see a page that had to shrink.
+        el.dataset.fitPct = String(pct);
+        el.dataset.targetPct = String(targetFontPct);
+      }
     };
     const parents = () =>
       ([leftRef.current, rightRef.current]
@@ -1977,6 +2031,11 @@ function BookContent({
       while (iterations++ < 6) {
         const overflows = containers.some(c => c.scrollHeight > c.clientHeight + 4);
         if (!overflows || currentPct <= minPct) break;
+        // A measured spread should always fit; this means the planner and
+        // the page disagree (or a new plan is on its way).
+        if (iterations === 1 && spreadSplit >= 0) {
+          console.warn(`[plan] spread ${textKey} overflows at ${targetFontPct}%: ${containers.map(c => `${c.scrollHeight}/${c.clientHeight}`).join(" ")}`);
+        }
         currentPct = Math.max(minPct, currentPct - 5);
         apply(currentPct);
       }
@@ -2011,14 +2070,15 @@ function BookContent({
   }, [textKey, targetFontPct, pageMode, pageSide]);
 
   // Measure this iPad's reading box for the shared page planner. Only
-  // text spreads are measurable; in one-page mode only one column is on
-  // screen, so the other column's capacity is derived from it.
+  // text spreads are measurable. In one-page mode only one column is on
+  // screen; both columns hold the same height of text (the running
+  // headers have a fixed height), so the hidden one equals it.
+  const rootRef = useRef<HTMLDivElement>(null);
   const motifRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLDivElement>(null);
   const imagesRef = useRef<HTMLDivElement>(null);
   const leftFleuronRef = useRef<HTMLDivElement>(null);
   const rightFleuronRef = useRef<HTMLDivElement>(null);
-  const headProbeRef = useRef<HTMLSpanElement>(null);
   const lastProfileRef = useRef<PageProfile | null>(null);
   const onProfileRef = useRef(onProfile);
   onProfileRef.current = onProfile;
@@ -2026,63 +2086,81 @@ function BookContent({
   // (including the cover's left page) can be measured. The sign-off page
   // hides its running header, so its box differs.
   const measurable = !!profileRole && !p.imageUrl && !p.signOff;
+  const areaKey = area ? `${area.w}x${area.h}` : "";
+  const areaRef = useRef(area);
+  areaRef.current = area;
   useLayoutEffect(() => {
     if (!measurable || !profileRole) return;
     const measure = () => {
       const lp = leftRef.current;
       const rp = rightRef.current;
       const ref = lp ?? rp;
-      if (!ref || !ref.parentElement || !onProfileRef.current) return;
+      const root = rootRef.current;
+      if (!ref || !ref.parentElement || !root || !onProfileRef.current) return;
       const parentPx = parseFloat(getComputedStyle(ref.parentElement).fontSize) || 16;
       const cs = getComputedStyle(ref);
       const curPx = parseFloat(cs.fontSize) || parentPx;
       const lhPx = parseFloat(cs.lineHeight);
       const lhFactor = Number.isFinite(lhPx) && lhPx > 0 ? lhPx / curPx : 1.95;
-      const fontPx = parentPx * targetFontPct / 100;
       const prev = lastProfileRef.current && lastProfileRef.current.mode === pageMode ? lastProfileRef.current : null;
       const outerH = (el: HTMLElement) => {
         const st = getComputedStyle(el);
         return el.offsetHeight + (parseFloat(st.marginTop) || 0) + (parseFloat(st.marginBottom) || 0);
       };
-      const motifH = motifRef.current ? outerH(motifRef.current) : prev ? Math.max(0, prev.capRightPx - prev.capLeftPlainPx) : 62;
       let capLeftPlainPx = prev?.capLeftPlainPx ?? 0;
       let capRightPx = prev?.capRightPx ?? 0;
       if (lp && lp.parentElement) {
         const fleur = leftFleuronRef.current ? leftFleuronRef.current.offsetHeight : 0;
-        const imgs = imagesRef.current ? outerH(imagesRef.current) : 0;
         const head = headingRef.current ? outerH(headingRef.current) : 0;
-        capLeftPlainPx = lp.parentElement.clientHeight - fleur - imgs + head;
-        if (!rp) capRightPx = capLeftPlainPx + motifH;
+        const mot = motifRef.current ? outerH(motifRef.current) : 0;
+        capLeftPlainPx = lp.parentElement.clientHeight - fleur + head + mot;
+        if (!rp) capRightPx = capLeftPlainPx;
       }
       if (rp && rp.parentElement) {
         const fleur = rightFleuronRef.current ? rightFleuronRef.current.offsetHeight : 0;
         capRightPx = rp.parentElement.clientHeight - fleur;
-        if (!lp) capLeftPlainPx = capRightPx - motifH;
+        if (!lp) capLeftPlainPx = capRightPx;
       }
-      if (capLeftPlainPx <= 0 || capRightPx <= 0 || ref.clientWidth <= 0) return;
+      // Width with its fraction: a rounded width can move a line break.
+      const colWidth = parseFloat(cs.width) || ref.clientWidth;
+      if (capLeftPlainPx <= 0 || capRightPx <= 0 || colWidth <= 0) return;
+      const stageW = root.clientWidth;
+      const stageH = root.clientHeight;
+      const own = areaRef.current;
+      const text: Record<string, string> = {};
+      for (const k of TEXT_STYLE_PROPS) {
+        const v = cs.getPropertyValue(k);
+        if (v) text[k] = v;
+      }
+      const pageEl = ref.closest(".nm-book-page") as HTMLElement | null;
+      const pst = pageEl ? getComputedStyle(pageEl) : null;
       const profile: PageProfile = {
         role: profileRole,
         mode: pageMode,
-        colWidth: ref.clientWidth,
-        fontFamily: cs.fontFamily,
-        fontPx,
-        lineHeightPx: lhFactor * fontPx,
+        fontPct: targetFontPct,
+        stageW,
+        stageH,
+        areaW: own?.w ?? stageW,
+        areaH: own?.h ?? stageH,
+        colWidth,
+        pagePadX: pst ? (parseFloat(pst.paddingLeft) || 0) + (parseFloat(pst.paddingRight) || 0) : 32,
+        parentPx,
+        lhFactor,
         letterSpacingEm: (parseFloat(cs.letterSpacing) || 0) / curPx,
         wordSpacingEm: (parseFloat(cs.wordSpacing) || 0) / curPx,
-        fontFeatureSettings: cs.fontFeatureSettings || "normal",
+        text,
         capLeftPlainPx,
         capRightPx,
-        headNameFontPx: headProbeRef.current ? parseFloat(getComputedStyle(headProbeRef.current).fontSize) || 20 : 20,
       };
       lastProfileRef.current = profile;
       onProfileRef.current(profile);
     };
     measure();
-    const host = (leftRef.current ?? rightRef.current)?.closest(".nm-book-page")?.parentElement;
+    const host = rootRef.current;
     const ro = host && typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => measure()) : null;
     if (ro && host) ro.observe(host);
     return () => ro?.disconnect();
-  }, [measurable, profileRole, pageMode, pageSide, targetFontPct, textKey]);
+  }, [measurable, profileRole, pageMode, pageSide, targetFontPct, textKey, areaKey]);
 
   // Rick's Sep 25 (C-1): fixed-layout / image-page render path. When
   // the current page carries an imageUrl (either an Aubrees-style
@@ -2156,15 +2234,21 @@ function BookContent({
 
   // One-page mode on a wide iPad: cap the page at a comfortable line
   // length instead of stretching text across the whole screen.
-  const singlePageCap: React.CSSProperties = pageMode === "single" ? { maxWidth: 740 } : {};
+  const singlePageCap: React.CSSProperties = pageMode === "single" ? { maxWidth: `calc(${singlePageMaxEm.toFixed(2)}em + 32px)` } : {};
+  // Running headers are one line of fixed height, so every page's text
+  // box is the same height whatever the title or author.
+  const runningHeadText: React.CSSProperties = {
+    display: "block", maxWidth: "100%", height: 12, lineHeight: "12px",
+    whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+    color: themeColors.muted, fontFamily: "Merriweather, serif", fontSize: "9px", fontStyle: "italic", letterSpacing: "0.14em", textTransform: "uppercase",
+  };
   return (
-    <div style={{
+    <div ref={rootRef} style={{
       display: "flex", width: "100%", height: "100%",
       justifyContent: "center",
       boxShadow: "0 8px 32px rgba(0,0,0,0.55), 0 1px 4px rgba(0,0,0,0.3)",
       position: "relative",
     }}>
-      <span ref={headProbeRef} aria-hidden style={{ position: "absolute", visibility: "hidden", pointerEvents: "none", fontSize: headFs, fontFamily: "Playfair Display, serif" }}>A</span>
       {/* Premium book typography settings — applied via class so both
           pages and the chapter heading inherit consistent hyphenation,
           ligatures, and legibility hints. Keeps the iPad rendering
@@ -2241,15 +2325,9 @@ function BookContent({
            first paragraph on a chapter/title body is enlarged, embossed
            into 3 lines of text. Only applied where the parent has
            .nm-book-dropcap so we don't mid-paragraph drop-cap regular
-           pages. */
+           pages. The shape is shared with the page planner. */
         .nm-book-dropcap > *:first-child::first-letter {
-          font-family: "Playfair Display", serif;
-          font-weight: 700;
-          font-size: 3.4em;
-          float: left;
-          line-height: 0.9;
-          padding: 0.06em 0.08em 0 0;
-          margin-right: 0.04em;
+          ${DROP_CAP_DECL}
           color: var(--nm-dropcap, #5C3A1E);
         }
 
@@ -2327,51 +2405,43 @@ function BookContent({
       }}>
         {/* Running header — small caps, refined letter-spacing */}
         <div style={{ borderBottom: `1px solid ${themeColors.muted}`, paddingBottom: "4px", marginBottom: "10px", display: "flex", justifyContent: "center", opacity: 0.55 }}>
-          <span style={{ color: themeColors.muted, fontFamily: "Merriweather, serif", fontSize: "9px", fontStyle: "italic", letterSpacing: "0.14em", textTransform: "uppercase" }}>
+          <span style={runningHeadText}>
             {bookTitle}
           </span>
         </div>
 
-        {/* Illustration motif — small, centered, no boxed frame.
-            Mirrors the printed-book convention of a small spot
-            illustration above a chapter opener (Rick / NOOK feedback:
-            "the book remains central, no clutter"). */}
-        <div ref={motifRef} style={{
-          textAlign: "center",
-          margin: "0 0 6px",
-          padding: 0,
-        }}>
-          <span style={{
-            fontSize: "clamp(36px, 5.4vw, 56px)",
-            lineHeight: 1,
-            display: "inline-block",
-            letterSpacing: "-2px",
-            opacity: 0.88,
-            filter: theme === "night" ? "none" : "saturate(0.85)",
-          }}>{p.leftEmoji}</span>
-        </div>
+        {/* Illustration motif without a chapter heading (hand-made
+            picture pages). Mirrors the printed-book convention of a small
+            spot illustration (Rick / NOOK feedback: "the book remains
+            central, no clutter"). */}
+        {!heading && motif && (
+          <div ref={motifRef} style={{ ...(headSt.motif as React.CSSProperties), textAlign: "center", opacity: 0.88, filter: theme === "night" ? "none" : "saturate(0.85)" }}>
+            {motif}
+          </div>
+        )}
 
-        {/* Chapter heading — small caps eyebrow for "Chapter X" + serif
-            italic title + ornamental rule. Closer to a printed chapter
-            opener than a dashboard heading. */}
-        {p.leftChapter && (() => {
-          const parts = p.leftChapter.split(" · ");
-          const chapterNum  = parts.length > 1 ? parts[0] : null;
-          const chapterName = parts.length > 1 ? parts.slice(1).join(" · ") : p.leftChapter;
+        {/* Chapter opener: spot picture, "Chapter X" eyebrow, title and
+            ornamental rule. Its styles are shared with the page planner,
+            which reserves exactly this much room. */}
+        {heading && (() => {
+          const { num, name } = splitChapterLabel(heading);
           return (
-            <div ref={headingRef} style={{ textAlign: "center", marginBottom: "12px" }}>
-              {chapterNum && (
-                <span style={{ display: "block", color: themeColors.muted, fontFamily: "Merriweather, serif", fontSize: "10px", fontWeight: 700, letterSpacing: "0.22em", textTransform: "uppercase", marginBottom: "6px", opacity: 0.65 }}>
-                  {chapterNum}
+            <div ref={headingRef} style={headSt.wrap as React.CSSProperties}>
+              {motif && (
+                <span style={{ ...(headSt.motif as React.CSSProperties), opacity: 0.88, filter: theme === "night" ? "none" : "saturate(0.85)" }}>{motif}</span>
+              )}
+              {num && (
+                <span style={{ ...(headSt.eyebrow as React.CSSProperties), color: themeColors.muted, opacity: 0.65 }}>
+                  {num}
                 </span>
               )}
-              <span style={{ display: "block", color: themeColors.text, fontFamily: "Playfair Display, serif", fontSize: headFs, fontWeight: 700, lineHeight: 1.15, marginBottom: "4px", letterSpacing: "0.005em" }}>
-                {chapterName}
+              <span style={{ ...(headSt.name as React.CSSProperties), color: themeColors.text }}>
+                {name}
               </span>
               {/* Ornamental rule — tiny diamond between two short lines */}
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, marginTop: 8, opacity: 0.45 }}>
+              <div style={{ ...(headSt.rule as React.CSSProperties), opacity: 0.45 }}>
                 <span style={{ width: 24, height: 1, backgroundColor: themeColors.muted }} />
-                <span style={{ color: themeColors.muted, fontSize: 8, transform: "translateY(-1px)" }}>◆</span>
+                <span style={{ color: themeColors.muted, fontSize: 8, lineHeight: "10px" }}>◆</span>
                 <span style={{ width: 24, height: 1, backgroundColor: themeColors.muted }} />
               </div>
             </div>
@@ -2387,30 +2457,31 @@ function BookContent({
             side picked (Rick: "everyone always sees the same lines per
             page and turns at exactly the same point — regardless of
             which font size they have chosen"). */}
-        <div className={p.leftChapter ? "nm-book-dropcap" : undefined} style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative", zIndex: 1 }}>
+        <div className={heading && !images ? "nm-book-dropcap" : undefined} style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative", zIndex: 1 }}>
           {/* Rick's Build 32 review #A-7: inline illustrations
-              extracted from the source EPUB. Render at the top of the
-              chapter's first page (that's where the admin importer
-              attaches them). Each image is a data: URL, sized to fit
-              the page width. */}
-          {p.images && p.images.length > 0 && (
+              extracted from the source EPUB, on the spread that opens
+              their page. On a planned spread they fill the left page and
+              the words begin on the right page; otherwise they sit above
+              the text. Each image is a data: URL. */}
+          {images && (
             <div ref={imagesRef} style={{
               display: "flex", flexDirection: "column",
-              gap: 10, marginBottom: 12, alignItems: "center",
-              // Give illustrations roughly half the page height so
-              // they read as real pictures, not thumbnails. If there
-              // are 2+ images each shares the space proportionally.
-              maxHeight: p.images.length === 1 ? "55%" : "45%",
+              gap: 10, marginBottom: imagesOnly ? 0 : 12, alignItems: "center",
+              justifyContent: imagesOnly ? "center" : undefined,
+              flex: imagesOnly ? 1 : undefined, minHeight: 0,
+              // Otherwise roughly half the page height so they read as
+              // real pictures, not thumbnails; 2+ share the space.
+              maxHeight: imagesOnly ? "100%" : images.length === 1 ? "55%" : "45%",
               overflow: "hidden",
             }}>
-              {p.images.map((src, i) => (
+              {images.map((src, i) => (
                 <img
                   key={i}
                   src={src}
                   alt=""
                   style={{
                     maxWidth: "100%",
-                    maxHeight: p.images!.length === 1 ? "100%" : `${Math.floor(100 / p.images!.length)}%`,
+                    maxHeight: images.length === 1 ? "100%" : `${Math.floor(100 / images.length)}%`,
                     objectFit: "contain",
                     borderRadius: 6,
                     boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
@@ -2492,7 +2563,7 @@ function BookContent({
             body page. */}
         {!p.signOff && (
           <div style={{ borderBottom: `1px solid ${themeColors.muted}`, paddingBottom: "4px", marginBottom: "10px", display: "flex", justifyContent: "center", opacity: 0.55 }}>
-            <span style={{ color: themeColors.muted, fontFamily: "Merriweather, serif", fontSize: "9px", fontStyle: "italic", letterSpacing: "0.14em", textTransform: "uppercase" }}>
+            <span style={runningHeadText}>
               {(bookPages[0]?.rightTitleSub ?? "").replace(/^by\s*/i, "")}
             </span>
           </div>
@@ -2504,7 +2575,7 @@ function BookContent({
         <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "flex-start", overflow: "hidden" }}>
           {p.rightIsTitle ? (
             <>
-              <h2 style={{ color: themeColors.text, fontFamily: "Playfair Display, serif", fontSize: headFs, fontWeight: 700, textAlign: "center", marginBottom: 8, marginTop: 14, lineHeight: 1.2, letterSpacing: "0.005em" }}>
+              <h2 style={{ color: themeColors.text, fontFamily: "Playfair Display, serif", fontSize: headPx, fontWeight: 700, textAlign: "center", marginBottom: 8, marginTop: 14, lineHeight: 1.2, letterSpacing: "0.005em" }}>
                 {p.rightTitle}
               </h2>
               <p style={{ color: themeColors.muted, fontStyle: "italic", fontFamily: "Merriweather, serif", fontSize: subFs, textAlign: "center", marginBottom: 14, opacity: 0.8 }}>
@@ -3524,10 +3595,12 @@ function ShowAndTellView({
 
 function BookSpread({
   displayPage,
+  displayOff = 0,
   isNana,
   flipping,
   flipFromPage,
   flipToPage,
+  flipToOff = 0,
   flipDirection,
   onStartChat,
   bookPages,
@@ -3559,10 +3632,13 @@ function BookSpread({
   pointerSuppressed = false,
 }: {
   displayPage: number;
+  /** Word on `displayPage` the reader is on. */
+  displayOff?: number;
   isNana: boolean;
   flipping: boolean;
   flipFromPage: number;
   flipToPage: number;
+  flipToOff?: number;
   flipDirection?: "forward" | "backward";
   onStartChat: () => void;
   bookPages: BookPage[];
@@ -3607,6 +3683,45 @@ function BookSpread({
   const touchStartX = useRef<number | null>(null);
   const touchStartY = useRef<number | null>(null);
   const bookAreaRef = useRef<HTMLDivElement>(null);
+  // Which spread is on screen, as one number for the reading pointer
+  // (two spreads can begin on the same source page).
+  const spreadKey = (() => {
+    const plan = pagePlan && pagePlan.starts.length > 0 ? pagePlan : identityPlan("", bookPages.length, pageMode);
+    const s = spreadStart(plan, spreadIndexOf(plan, safeDisplayPage, safeDisplayPage === displayPage ? displayOff : 0));
+    return s.page * 100000 + s.off;
+  })();
+
+  // This iPad's book area. With a plan, the book is drawn in the plan's
+  // shared box (the smaller of the two iPads' areas) and scaled up to
+  // fill this one, so both iPads show the same full pages.
+  const layerRef = useRef<HTMLDivElement>(null);
+  const [area, setArea] = useState<StageSize | null>(null);
+  useLayoutEffect(() => {
+    const el = layerRef.current;
+    if (!el) return;
+    const read = () => {
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      if (w > 0 && h > 0) setArea(cur => (cur && cur.w === w && cur.h === h ? cur : { w, h }));
+    };
+    read();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(read) : null;
+    ro?.observe(el);
+    return () => ro?.disconnect();
+  }, []);
+  const stage = pagePlan?.stage ?? null;
+  const stageScale = stage && area ? Math.min(area.w / stage.w, area.h / stage.h) : 1;
+  const stageStyle: React.CSSProperties = stage && area
+    ? {
+        position: "absolute",
+        left: (area.w - stage.w * stageScale) / 2,
+        top: (area.h - stage.h * stageScale) / 2,
+        width: stage.w, height: stage.h,
+        transform: stageScale !== 1 ? `scale(${stageScale})` : undefined,
+        transformOrigin: "0 0",
+        display: "flex",
+      }
+    : { position: "absolute", inset: 0, display: "flex" };
 
   // Tap a word to highlight it on both iPads; tap it again, or tap off
   // the text, to clear. iOS text selection is off on the book, so the
@@ -3676,7 +3791,7 @@ function BookSpread({
       style: pointerMode === "ruler" ? "ruler" : "finger",
       x: Math.max(0, Math.min(1, (px - a.left) / a.width)),
       y: Math.max(0, Math.min(1, (py - a.top) / a.height)),
-      page: displayPage,
+      page: spreadKey,
     };
     if (w?.dataset.wid) {
       const r = w.getBoundingClientRect();
@@ -3839,7 +3954,7 @@ function BookSpread({
             bookAreaRef={bookAreaRef}
             selection={wordSelection}
             childName={childName}
-            layoutKey={`${displayPage}|${pageSide}|${pageMode}|${fontScale}|${pagePlan?.key ?? ""}`}
+            layoutKey={`${displayPage}.${displayOff}|${pageSide}|${pageMode}|${fontScale}|${pagePlan?.key ?? ""}|${area?.w ?? 0}x${area?.h ?? 0}`}
             onPronounce={onSelectionPronounce}
             onPhonics={onSelectionPhonics}
             onSave={onSelectionSave}
@@ -3855,7 +3970,7 @@ function BookSpread({
           areaRef={bookAreaRef}
           source={isNana ? "local" : "remote"}
           suppressed={!!wordSelection || pointerSuppressed}
-          page={displayPage}
+          page={spreadKey}
         />
 
         {/* Pointer highlight ring — visible on both devices when Nana taps the book */}
@@ -3882,7 +3997,7 @@ function BookSpread({
         )}
 
         {/* Static book layer */}
-        <div style={{
+        <div ref={layerRef} style={{
           position: "absolute", inset: 0,
           backgroundColor: READING_THEMES[readingTheme].page,
           borderTop: `3px solid ${READING_THEMES[readingTheme].spine}`,
@@ -3959,19 +4074,23 @@ function BookSpread({
               );
             }
             return (
-              <BookContent
-                page={idxPage}
-                bookPages={bookPages}
-                bookTitle={bookTitle}
-                fontScale={fontScale}
-                highlightWid={wordSelection?.wid || null}
-                theme={readingTheme}
-                pageMode={pageMode}
-                pageSide={pageSide}
-                plan={pagePlan}
-                profileRole={isNana ? "nana" : "perry"}
-                onProfile={onPageProfile}
-              />
+              <div style={stageStyle}>
+                <BookContent
+                  page={idxPage}
+                  off={flipping ? flipToOff : displayOff}
+                  bookPages={bookPages}
+                  bookTitle={bookTitle}
+                  fontScale={fontScale}
+                  highlightWid={wordSelection?.wid || null}
+                  theme={readingTheme}
+                  pageMode={pageMode}
+                  pageSide={pageSide}
+                  plan={pagePlan}
+                  profileRole={isNana ? "nana" : "perry"}
+                  onProfile={onPageProfile}
+                  area={area}
+                />
+              </div>
             );
           })()}
         </div>
@@ -10761,9 +10880,11 @@ function DeviceFrame({
   label,
   isNana,
   displayPage,
+  displayOff = 0,
   flipping,
   flipFromPage,
   flipToPage,
+  flipToOff = 0,
   flipDirection,
   mode,
   promptIndex,
@@ -10937,9 +11058,12 @@ function DeviceFrame({
   label: string;
   isNana: boolean;
   displayPage: number;
+  /** Word on `displayPage` the reader is on. */
+  displayOff?: number;
   flipping: boolean;
   flipFromPage: number;
   flipToPage: number;
+  flipToOff?: number;
   flipDirection?: "forward" | "backward";
   mode: Mode;
   promptIndex: number;
@@ -11812,8 +11936,8 @@ function DeviceFrame({
         ) : isChatMode ? (
           <ChatModeView
             isNana={isNana}
-            nanaPromptText={spreadPrompt(bookPages, pagePlan ?? identityPlan("", bookPages.length, pageMode), Math.max(1, Math.min(displayPage, bookPages.length)))}
-            questions={bookPages.length > 0 ? talkQuestions(bookPages, pagePlan ?? identityPlan("", bookPages.length, pageMode), Math.max(1, Math.min(displayPage, bookPages.length))) : undefined}
+            nanaPromptText={spreadPrompt(bookPages, pagePlan ?? identityPlan("", bookPages.length, pageMode), Math.max(1, Math.min(displayPage, bookPages.length)), displayOff)}
+            questions={bookPages.length > 0 ? talkQuestions(bookPages, pagePlan ?? identityPlan("", bookPages.length, pageMode), Math.max(1, Math.min(displayPage, bookPages.length)), displayOff) : undefined}
             onStartReading={onBackToReading}
             childName={childName}
             nanaName={nanaName}
@@ -11828,10 +11952,12 @@ function DeviceFrame({
             const bookEl = (
               <BookSpread
                 displayPage={displayPage}
+                displayOff={displayOff}
                 isNana={isNana}
                 flipping={flipping}
                 flipFromPage={flipFromPage}
                 flipToPage={flipToPage}
+                flipToOff={flipToOff}
                 flipDirection={flipDirection}
                 onStartChat={onStartChat}
                 bookPages={bookPages}
@@ -11874,7 +12000,7 @@ function DeviceFrame({
                 readingTheme={readingTheme}
                 onThemeChange={isNana ? onThemeChange : undefined}
                 onReact={onReact}
-                cue={isNana && bookPages.length > 0 ? (spreadCue(bookPages, plan, safePage) || spreadPrompt(bookPages, plan, safePage).replace(/^Ask:\s*/, "")) : null}
+                cue={isNana && bookPages.length > 0 ? (spreadCue(bookPages, plan, safePage, displayOff) || spreadPrompt(bookPages, plan, safePage, displayOff).replace(/^Ask:\s*/, "")) : null}
                 onLetsTalk={isNana ? onStartChat : undefined}
                 onShowAndTell={onStartShowAndTell}
                 readingPos={readingPos}
@@ -14781,7 +14907,9 @@ export default function App() {
       if (cancelled || document.visibilityState !== "visible") return;
       try {
         const t0 = Date.now();
-        const state = await api.sessions.getState(connectionId);
+        // The page plan is the biggest part of the state: skip it when
+        // ours is current.
+        const state = await api.sessions.getState(connectionId, planSignature(pagePlanRef.current) || undefined);
         const t1 = Date.now();
         if (cancelled) return;
         // Server stamps every /state response with its wall-clock time;
@@ -14897,11 +15025,12 @@ export default function App() {
           setSelectedBookId(state.lastBookChange.bookId);
           if (state.lastBookChange.page != null) {
             const pg = state.lastBookChange.page;
+            const off = typeof state.lastBookChange.off === "number" ? state.lastBookChange.off : 0;
             lastAppliedPageTsRef.current = Date.now();
             childPageRef.current = pg;
-            setChildPage(pg);
+            setChildPage(pg, off);
             nanaPageRef.current = pg;
-            setNanaPage(pg);
+            setNanaPage(pg, off);
           }
         }
         // Perry's page guard checks BOTH timestamps:
@@ -14916,10 +15045,14 @@ export default function App() {
         const pageGuardOk =
           Date.now() - lastAppliedPageTsRef.current >= 1500 &&
           Date.now() - lastPageChangeRef.current >= 1500;
+        // An older server doesn't keep the word: hold ours on the same page.
+        const statePageOff = (pg: number, cur: number, curOff: number) =>
+          typeof state.pageOff === "number" ? state.pageOff : pg === cur ? curOff : 0;
         if (isPerry && state.page != null && pageGuardOk) {
           const pg = state.page;
+          const off = statePageOff(pg, childPageRef.current, childOffRef.current);
           childPageRef.current = pg;
-          setChildPage(pg);
+          setChildPage(pg, off);
           // Same fix as the SSE page_change handler — Perry's advancePage
           // computes `nanaPageRef.current + dir` to derive the next page,
           // so this ref MUST track the current canonical page on Perry's
@@ -14928,7 +15061,7 @@ export default function App() {
           // permanently stale and her next-tap publishes the wrong page,
           // dragging Nana backward.
           nanaPageRef.current = pg;
-          setNanaPage(pg);
+          setNanaPage(pg, off);
         }
         // Nana-side page-sync fallback. Rick: "if perry change the page,
         // it does not change on the nana side." Root cause: the polling
@@ -14952,16 +15085,17 @@ export default function App() {
         if (!isPerry) {
           const sinceLocalChange = Date.now() - lastPageChangeRef.current;
           if (sinceLocalChange > 1500) {
-            const pageNeedsUpdate = state.page != null && state.page !== nanaPageRef.current;
+            const stateOff = state.page != null ? statePageOff(state.page, nanaPageRef.current, nanaOffRef.current) : 0;
+            const pageNeedsUpdate = state.page != null && (state.page !== nanaPageRef.current || stateOff !== nanaOffRef.current);
             const sideNeedsUpdate = (state.pageSide === "L" || state.pageSide === "R") && state.pageSide !== pageSideRef.current;
             if (pageNeedsUpdate && state.page != null) {
               const pg = state.page;
               nanaPageRef.current = pg;
-              setNanaPage(pg);
+              setNanaPage(pg, stateOff);
               // Also bring childPage along so flip animations elsewhere
               // (and per-tile displays in "both" view) stay coherent.
               childPageRef.current = pg;
-              setChildPage(pg);
+              setChildPage(pg, stateOff);
             }
             if (sideNeedsUpdate && (state.pageSide === "L" || state.pageSide === "R")) {
               setPageSide(state.pageSide);
@@ -15219,8 +15353,11 @@ export default function App() {
         if (state.selection) applyServerSelection(state.selection);
         // Page plan + reading boxes backstop (see "Measured pagination").
         if (state.layoutProfiles) {
-          applyRemoteProfile(state.layoutProfiles.nana);
-          applyRemoteProfile(state.layoutProfiles.perry);
+          // A box measured in an older visit (maybe on another iPad)
+          // must not shrink today's book.
+          const fresh = (p?: { ts: number }) => !!p && typeof p.ts === "number" && Date.now() - p.ts < 6 * 3600_000;
+          if (fresh(state.layoutProfiles.nana)) applyRemoteProfile(state.layoutProfiles.nana);
+          if (fresh(state.layoutProfiles.perry)) applyRemoteProfile(state.layoutProfiles.perry);
         }
         if (state.pagePlan) applyRemotePlan(state.pagePlan);
 
@@ -15499,6 +15636,7 @@ export default function App() {
         if (msg.serverTs) updateServerOffset(msg.serverTs);
         if (msg.type === "page_change") {
           const newPage = msg.payload.page as number;
+          const newOff = typeof msg.payload.off === "number" ? msg.payload.off : 0;
           const side = msg.payload.side as "L" | "R" | undefined;
           const samePage = newPage === childPageRef.current;
           // Apply side immediately — both spread-change and side-flip cases.
@@ -15517,17 +15655,28 @@ export default function App() {
           // `advancePage` work identically on either side.
           lastAppliedPageTsRef.current = Date.now();
           nanaPageRef.current = newPage;
-          setNanaPage(newPage);
-          if (samePage) return;
-          setFlipDirection(newPage > childPageRef.current ? "forward" : "backward");
+          setNanaPage(newPage, newOff);
+          // A one-page-mode side flip moves the word within the spread.
+          const plan = effectivePagePlanRef.current;
+          const sameSpread = plan
+            ? spreadIndexOf(plan, newPage, newOff) === spreadIndexOf(plan, childPageRef.current, childOffRef.current)
+            : samePage;
+          if (sameSpread) {
+            childPageRef.current = newPage;
+            setChildPage(newPage, newOff);
+            return;
+          }
+          const forward = newPage > childPageRef.current || (newPage === childPageRef.current && newOff > childOffRef.current);
+          setFlipDirection(forward ? "forward" : "backward");
           setFlipFromPage(childPageRef.current);
           setFlipToPage(newPage);
+          setFlipToOff(newOff);
           setChildFlipping(true);
           // Both sides hear the page turn — Perry's page audibly arrives the
           // moment Nana flips. Tactile + auditory sync.
           playPageTurn();
           haptic("light");
-          setTimeout(() => { setChildPage(newPage); setChildFlipping(false); }, 500);
+          setTimeout(() => { setChildPage(newPage, newOff); setChildFlipping(false); }, 500);
         } else if (msg.type === "page_mode") {
           // Nana toggled the page-mode dropdown — mirror exactly.
           const m = msg.payload.mode as "single" | "double" | undefined;
@@ -15615,11 +15764,12 @@ export default function App() {
           }
           if (msg.payload.page != null) {
             const pg = msg.payload.page as number;
+            const off = typeof msg.payload.pageOff === "number" ? msg.payload.pageOff : 0;
             lastAppliedPageTsRef.current = Date.now();
             childPageRef.current = pg;
-            setChildPage(pg);
+            setChildPage(pg, off);
             nanaPageRef.current = pg;
-            setNanaPage(pg);
+            setNanaPage(pg, off);
           }
           // UNJAIL: when the server replays current_state, sessionAlive is
           // already guaranteed true (the server-side gate at dev-server
@@ -15665,11 +15815,12 @@ export default function App() {
           if (msg.payload.bookId) setSelectedBookId(msg.payload.bookId as string);
           if (msg.payload.page != null) {
             const pg = msg.payload.page as number;
+            const off = typeof msg.payload.off === "number" ? msg.payload.off : 0;
             childPageRef.current = pg;
-            setChildPage(pg);
+            setChildPage(pg, off);
             // Mirror to nanaPage too — see page_change handler comment.
             nanaPageRef.current = pg;
-            setNanaPage(pg);
+            setNanaPage(pg, off);
           }
           // Reset stale goodbye state when entering goodbye fresh — without
           // this, Perry's local `goodbyePhase` could still be 7 from a prior
@@ -16026,9 +16177,11 @@ export default function App() {
           // the direction off the (now stale) ref value while React is
           // still mid-render of the first update.
           const oldRef = nanaPageRef.current;
+          const oldOff = nanaOffRef.current;
+          const newOff = typeof msg.payload.off === "number" ? msg.payload.off : 0;
           nanaPageRef.current = newPage;
-          setNanaPage(newPage);
-          const dir: "forward" | "backward" = newPage > oldRef ? "forward" : "backward";
+          setNanaPage(newPage, newOff);
+          const dir: "forward" | "backward" = newPage > oldRef || (newPage === oldRef && newOff > oldOff) ? "forward" : "backward";
           setFlipDirection(dir);
           setFlipFromPage(oldRef);
           setFlipToPage(newPage);
@@ -16041,7 +16194,7 @@ export default function App() {
           if (msg.payload.page != null) {
             const pg = msg.payload.page as number;
             nanaPageRef.current = pg;
-            setNanaPage(pg);
+            setNanaPage(pg, typeof msg.payload.off === "number" ? msg.payload.off : 0);
           }
           // Symmetric with Perry's handler: reset stale goodbye state when
           // entering goodbye fresh, so the Ready stage shows even if a
@@ -16184,7 +16337,7 @@ export default function App() {
           if (msg.payload.page != null) {
             const pg = msg.payload.page as number;
             nanaPageRef.current = pg;
-            setNanaPage(pg);
+            setNanaPage(pg, typeof msg.payload.pageOff === "number" ? msg.payload.pageOff : 0);
           }
         } else if (msg.type === "book_change") {
           if (msg.payload.bookId) setSelectedBookId(msg.payload.bookId as string);
@@ -16824,8 +16977,25 @@ export default function App() {
   const [childPromptIndex, setChildPromptIndex] = useState(0);
   const [showChildIcebreakerPrompts, setShowChildIcebreakerPrompts] = useState(false);
   const [showAndTellPromptIndex, setShowAndTellPromptIndex] = useState(0);
-  const [nanaPage, setNanaPage] = useState(1);
-  const [childPage, setChildPage] = useState(1);
+  const [nanaPage, setNanaPageState] = useState(1);
+  const [childPage, setChildPageState] = useState(1);
+  // Word on that page each view is on (Rick's Pagination Spec): pages are
+  // cut from measured text, so a spread can begin partway through a
+  // source page. Setting a page without a word means its first word.
+  const [nanaOff, setNanaOff] = useState(0);
+  const [childOff, setChildOff] = useState(0);
+  const nanaOffRef = useRef(0);
+  const childOffRef = useRef(0);
+  const setNanaPage = useCallback((page: number, off = 0) => {
+    nanaOffRef.current = off;
+    setNanaOff(off);
+    setNanaPageState(page);
+  }, []);
+  const setChildPage = useCallback((page: number, off = 0) => {
+    childOffRef.current = off;
+    setChildOff(off);
+    setChildPageState(page);
+  }, []);
   const childPageRef = useRef(1);
   useEffect(() => { childPageRef.current = childPage; }, [childPage]);
   const nanaPageRef = useRef(1);
@@ -16833,6 +17003,7 @@ export default function App() {
   const [childFlipping, setChildFlipping] = useState(false);
   const [flipFromPage, setFlipFromPage] = useState(1);
   const [flipToPage, setFlipToPage] = useState(1);
+  const [flipToOff, setFlipToOff] = useState(0);
   const [flipDirection, setFlipDirection] = useState<"forward" | "backward">("forward");
   const [busy, setBusy] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -17317,9 +17488,7 @@ export default function App() {
     if (isPagePlannerRef.current) return;
     const plan = asPagePlan(raw);
     if (!plan) return;
-    if (pagePlanRef.current && pagePlanRef.current.key === plan.key
-        && pagePlanRef.current.starts.length === plan.starts.length
-        && pagePlanRef.current.estimatedTotal === plan.estimatedTotal) return;
+    if (planSignature(pagePlanRef.current) === planSignature(plan)) return;
     setPagePlan(plan);
   }, []);
 
@@ -17335,21 +17504,41 @@ export default function App() {
   }, [localProfiles, connectionId]);
 
   const planIsChapterBook = isChapterBook(currentBook);
-  const planProfiles = useMemo(() => {
-    const list: PageProfile[] = [];
+
+  // The box both iPads draw the book in (Rick's Pagination Spec): the
+  // smaller of the two book areas. The larger iPad scales it up, so both
+  // show the same words on full pages.
+  const [planStage, setPlanStage] = useState<StageSize | null>(null);
+  useEffect(() => {
+    if (!isPagePlanner) return;
+    const areas: StageSize[] = [];
     const n = localProfiles.nana;
-    if (n && n.mode === pageMode) list.push(n);
+    if (n) areas.push({ w: n.areaW, h: n.areaH });
     const c = localProfiles.perry ?? remoteProfiles.perry;
-    if (c && c.mode === pageMode) list.push(c);
-    return list;
-  }, [localProfiles, remoteProfiles, pageMode]);
-  const planProfilesKey = planProfiles.map(profileSignature).sort().join("|");
+    if (c) areas.push({ w: c.areaW, h: c.areaH });
+    setPlanStage(cur => {
+      const next = chooseStage(areas, cur);
+      return next && cur && next.w === cur.w && next.h === cur.h ? cur : next;
+    });
+  }, [isPagePlanner, localProfiles, remoteProfiles]);
+
+  // Nana's own measured box plans for both iPads: at the shared stage the
+  // child's iPad lays the book out identically. Any measurement will do:
+  // the box for the chosen page mode and text size is derived from it, so
+  // a new choice is planned before the book is redrawn.
+  const planProfile = localProfiles.nana ?? null;
+  const planFontPct = fontPctFor(fontScale);
+  const planProfilesKey = planProfile && planStage ? boxSignature(boxFor(planProfile, planStage, pageMode, planFontPct)) : "";
 
   useEffect(() => {
-    if (!isPagePlanner || !planIsChapterBook || planProfiles.length === 0 || mode !== "reading") return;
+    if (!isPagePlanner || !planIsChapterBook || !planProfile || !planStage || mode !== "reading") return;
     let aborted = false;
     const bookId = selectedBookId;
     const book = currentBook;
+    const stage = planStage;
+    const fontPct = planFontPct;
+    // For tests and debugging: what the planner measures with.
+    (window as unknown as { __nmPlan?: unknown }).__nmPlan = { stage, fontPct, mode: pageMode, box: boxFor(planProfile, stage, pageMode, fontPct) };
     const t = window.setTimeout(() => {
       void buildPagePlan(
         {
@@ -17357,7 +17546,9 @@ export default function App() {
           pages: book.pages,
           chapterStarts: chapterStartSet(book),
           mode: pageMode,
-          profiles: planProfiles,
+          fontPct,
+          profiles: [planProfile],
+          stage,
           focusPage: nanaPageRef.current,
           previous: pagePlanRef.current,
         },
@@ -17366,7 +17557,8 @@ export default function App() {
           setPagePlan(plan);
           if (connectionId) {
             api.sessions.publishEvent(connectionId, "page_plan", {
-              bookId: plan.bookId, key: plan.key, mode: plan.mode, starts: plan.starts, splits: plan.splits,
+              bookId: plan.bookId, key: plan.key, mode: plan.mode,
+              starts: plan.starts, offs: plan.offs, splits: plan.splits, stage: plan.stage, fontPct: plan.fontPct,
               ...(plan.estimatedTotal ? { estimatedTotal: plan.estimatedTotal } : {}),
             }).catch(() => {});
           }
@@ -17375,9 +17567,9 @@ export default function App() {
       );
     }, 300);
     return () => { aborted = true; window.clearTimeout(t); };
-    // planProfiles is captured through planProfilesKey.
+    // planProfile and planStage are captured through planProfilesKey.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPagePlanner, planIsChapterBook, planProfilesKey, pageMode, selectedBookId, catalogVersion, mode, connectionId]);
+  }, [isPagePlanner, planIsChapterBook, planProfilesKey, pageMode, planFontPct, selectedBookId, catalogVersion, mode, connectionId]);
 
   // A plan made for the other page mode (or an older font size) stays in
   // use until the new one arrives a moment later: its spreads are still
@@ -17395,8 +17587,32 @@ export default function App() {
     () => effectivePagePlan ?? identityPlan(selectedBookId, currentBook.pages.length, pageMode),
     [effectivePagePlan, selectedBookId, currentBook, pageMode],
   );
-  const nanaReadingPos = readingPosition(currentBook, displayPagePlan, nanaPage, pageSide, pageMode);
-  const childReadingPos = readingPosition(currentBook, displayPagePlan, childPage, pageSide, pageMode);
+  const nanaReadingPos = readingPosition(currentBook, displayPagePlan, nanaPage, nanaOff, pageSide, pageMode);
+  const childReadingPos = readingPosition(currentBook, displayPagePlan, childPage, childOff, pageSide, pageMode);
+
+  // After a re-plan (text size, page mode, screen) the reader stays on
+  // the same words (Rick's Pagination Spec): the spread holding the word
+  // we were on is shown, and in one-page mode the page holding it. Both
+  // iPads work this out from the same plan; Nana also records the side so
+  // the child's polling backstop agrees.
+  useEffect(() => {
+    const plan = effectivePagePlan;
+    if (!plan || pageMode !== "single") return;
+    const onChild = deviceView === "perry";
+    const at: PlanPos = onChild
+      ? { page: childPageRef.current, off: childOffRef.current }
+      : { page: nanaPageRef.current, off: nanaOffRef.current };
+    const k = spreadIndexOf(plan, at.page, at.off);
+    const r = rightStartPos(currentBook.pages, plan, k);
+    const side: "L" | "R" = r && cmpPos(at, r) >= 0 ? "R" : "L";
+    if (side === pageSideRef.current) return;
+    setPageSide(side);
+    if (!onChild && connectionId) {
+      api.sessions.publishEvent(connectionId, "page_change", { page: at.page, off: at.off, side }).catch(() => {});
+    }
+    // Only a new plan moves the side; page turns set it themselves.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectivePagePlan]);
 
   // Drop the word highlight once its page leaves the screen (page turn,
   // new book). Checked against the visible spread rather than "page
@@ -17405,25 +17621,28 @@ export default function App() {
   useEffect(() => {
     setWordSelection(cur => {
       if (!cur) return cur;
-      const ref = parseWid(cur.wid);
-      if (!ref) return cur;
+      const at = widPos(currentBook.pages, cur.wid);
+      if (!at) return cur;
       const plan = effectivePagePlan ?? identityPlan(selectedBookId, currentBook.pages.length, pageMode);
-      const shown = deviceView === "perry" ? childPage : nanaPage;
-      const k = spreadIndexOf(plan, shown);
-      const visible = ref.page >= plan.starts[k] && ref.page < spreadEnd(plan, k, currentBook.pages.length);
+      const k = deviceView === "perry" ? spreadIndexOf(plan, childPage, childOff) : spreadIndexOf(plan, nanaPage, nanaOff);
+      const visible = cmpPos(at, spreadStart(plan, k)) >= 0 && cmpPos(at, spreadStop(plan, k, currentBook.pages.length)) < 0;
       return visible ? cur : null;
     });
-  }, [nanaPage, childPage, effectivePagePlan, deviceView, selectedBookId, currentBook, pageMode]);
+  }, [nanaPage, nanaOff, childPage, childOff, effectivePagePlan, deviceView, selectedBookId, currentBook, pageMode]);
 
   const handlePageModeChange = (next: "single" | "double") => {
     setPageMode(next);
-    // Always restart from L when toggling, both directions. Avoids
-    // flashing R-only on a freshly-collapsed spread.
-    setPageSide("L");
+    // Restart from L when toggling, which avoids flashing R-only on a
+    // freshly-collapsed spread. A measured book going to two pages keeps
+    // its side: the one-page plan stays on screen until the two-page one
+    // is ready, and it should stay on the page being read; going to one
+    // page, the new plan picks the side holding the word being read.
+    const side: "L" | "R" = next === "double" && effectivePagePlanRef.current ? pageSideRef.current : "L";
+    setPageSide(side);
     // eslint-disable-next-line no-console
     console.log(`[nana] handlePageModeChange → ${next} (publishing to connId=${connectionId?.slice(0,8) ?? "none"})`);
     if (connectionId) {
-      api.sessions.publishEvent(connectionId, "page_mode", { mode: next, side: "L" })
+      api.sessions.publishEvent(connectionId, "page_mode", { mode: next, side })
         .then(r => {
           // eslint-disable-next-line no-console
           console.log(`[nana] page_mode publish OK, ${r.subscribers ?? "?"} subs`);
@@ -17518,52 +17737,54 @@ export default function App() {
    * (e.g., resuming after chapter-end dismiss); they reset side to L.
    */
   const advancePage = (dir: 1 | -1) => {
-    const current = nanaPageRef.current;
-    // Steps follow the shared page plan (Rick's Build 33 A-3), so both
-    // modes walk the same spreads and one-page mode never repeats text.
+    // Steps follow the shared page plan, so both modes walk the same
+    // spreads and one-page mode never repeats text.
     const plan = effectivePagePlanRef.current ?? identityPlan(selectedBookId, currentBook.pages.length, pageMode);
-    const k = spreadIndexOf(plan, current);
+    const k = spreadIndexOf(plan, nanaPageRef.current, nanaOffRef.current);
+    const goTo = (kk: number) => {
+      const s = plan.starts[kk];
+      return s === undefined ? false : changePage(s, { off: plan.offs[kk] ?? 0 });
+    };
     // Image-page picture books (e.g. Aubrees) render each spread as one
     // full-bleed illustration, so one-page mode just steps spreads.
     const isImageBook = currentBook.pages.some(p => !!p.imageUrl);
     if (pageMode === "double" || isImageBook) {
-      const target = plan.starts[k + dir];
-      if (target !== undefined) changePage(target);
+      goTo(k + dir);
       return;
     }
     const side = pageSideRef.current;
     const pages = currentBook.pages;
     // The cover is a typographic title page: one combined page.
-    const isCover = (kk: number) => plan.starts[kk] === 1 && !!pages[0]?.rightIsTitle;
+    const isCover = (kk: number) => plan.starts[kk] === 1 && (plan.offs[kk] ?? 0) === 0 && !!pages[0]?.rightIsTitle;
     const hasRight = (kk: number) => !isCover(kk) && spreadHasRight(pages, plan, kk);
-    const publishSide = (page: number, s: "L" | "R") => {
+    // In one-page mode the reader is on the first word of the page on
+    // screen, so a re-plan keeps that page's words in view.
+    const publishSide = (kk: number, s: "L" | "R") => {
+      const at = (s === "R" ? rightStartPos(pages, plan, kk) : null) ?? spreadStart(plan, kk);
+      nanaPageRef.current = at.page;
+      setNanaPage(at.page, at.off);
       setPageSide(s);
       if (connectionId) {
-        api.sessions.publishEvent(connectionId, "page_change", { page, side: s }).catch(() => {});
+        api.sessions.publishEvent(connectionId, "page_change", { page: at.page, off: at.off, side: s }).catch(() => {});
       }
     };
     if (dir === 1) {
-      if (side === "L" && hasRight(k)) {
-        publishSide(current, "R");
-      } else {
-        const target = plan.starts[k + 1];
-        if (target !== undefined) changePage(target);
-      }
+      if (side === "L" && hasRight(k)) publishSide(k, "R");
+      else goTo(k + 1);
       return;
     }
     if (side === "R" && !isCover(k)) {
-      publishSide(current, "L");
+      publishSide(k, "L");
       return;
     }
-    const target = plan.starts[k - 1];
-    if (target === undefined) return;
     // Back from a spread's left page lands on the previous spread's
     // right page when it has one.
-    if (changePage(target) && hasRight(k - 1)) publishSide(target, "R");
+    if (goTo(k - 1) && hasRight(k - 1)) publishSide(k - 1, "R");
   };
 
-  const changePage = (newPage: number, opts?: { skipChapterEndDetection?: boolean }): boolean => {
+  const changePage = (newPage: number, opts?: { off?: number; skipChapterEndDetection?: boolean }): boolean => {
     if (newPage < 1 || newPage > currentBook.pages.length || busy) return false;
+    const newOff = Math.max(0, opts?.off ?? 0);
     const now = Date.now();
     if (now - lastPageChangeRef.current < 100) return false;
     lastPageChangeRef.current = now;
@@ -17628,42 +17849,47 @@ export default function App() {
     playPageTurn();
     haptic("light");
     setBusy(true);
-    setNanaPage(newPage);
+    nanaPageRef.current = newPage;
+    setNanaPage(newPage, newOff);
     // Whenever the SPREAD changes, default the visible side back to L so
     // Nana doesn't land mid-spread on a freshly jumped-to target (e.g.,
     // chapter-end dismiss → next chapter's first page). advancePage()
     // emits an explicit side follow-up when it wants R after a backward
     // step.
     setPageSide("L");
-    const dir: "forward" | "backward" = newPage > childPageRef.current ? "forward" : "backward";
+    const forward = newPage > childPageRef.current || (newPage === childPageRef.current && newOff > childOffRef.current);
+    const dir: "forward" | "backward" = forward ? "forward" : "backward";
     if (connectionId) {
       // Include side="L" so Perry's mirror matches the local reset above.
       // In double mode side is harmless metadata; in single mode it
       // ensures Perry's pageSide tracks Nana's exactly.
-      api.sessions.publishEvent(connectionId, "page_change", { page: newPage, side: "L" }).catch(() => {});
+      api.sessions.publishEvent(connectionId, "page_change", { page: newPage, off: newOff, side: "L" }).catch(() => {});
     }
     setFlipDirection(dir);
     setFlipFromPage(childPageRef.current);
     setFlipToPage(newPage);
+    setFlipToOff(newOff);
     setChildFlipping(true);
-    timerRef.current = setTimeout(() => { setChildPage(newPage); setChildFlipping(false); setBusy(false); }, 500);
+    timerRef.current = setTimeout(() => { setChildPage(newPage, newOff); setChildFlipping(false); setBusy(false); }, 500);
     return true;
   };
 
   /** Menu → Chapters & Pages: jump to the spread holding `page`. */
   const handleJumpToPage = (page: number) => {
     const plan = effectivePagePlanRef.current ?? identityPlan(selectedBookId, currentBook.pages.length, pageMode);
-    const k = spreadIndexOf(plan, Math.max(1, Math.min(page, currentBook.pages.length)));
-    const target = plan.starts[k] ?? page;
-    if (target === nanaPageRef.current) {
+    const k = spreadIndexOf(plan, Math.max(1, Math.min(page, currentBook.pages.length)), 0);
+    const target = spreadStart(plan, k);
+    if (k === spreadIndexOf(plan, nanaPageRef.current, nanaOffRef.current)) {
       if (pageSideRef.current !== "L") {
+        nanaPageRef.current = target.page;
+        setNanaPage(target.page, target.off);
         setPageSide("L");
-        if (connectionId) api.sessions.publishEvent(connectionId, "page_change", { page: target, side: "L" }).catch(() => {});
+        if (connectionId) api.sessions.publishEvent(connectionId, "page_change", { page: target.page, off: target.off, side: "L" }).catch(() => {});
       }
       return;
     }
     lastPageChangeRef.current = 0;
-    changePage(target, { skipChapterEndDetection: true });
+    changePage(target.page, { off: target.off, skipChapterEndDetection: true });
   };
 
   /** Nana taps "Next Chapter" on the chapter-end card. Dismisses the
@@ -17696,7 +17922,7 @@ export default function App() {
   const sessionSummary = (() => {
     // Same count as the end-of-visit card: display pages under the shared
     // plan. Only Nana's iPad knows where the visit started.
-    const startPos = readingPosition(currentBook, displayPagePlan, sessionStartPageRef.current, "L", pageMode);
+    const startPos = readingPosition(currentBook, displayPagePlan, sessionStartPageRef.current, 0, "L", pageMode);
     const pagesRead = deviceView === "perry" ? 0 : Math.max(0, nanaReadingPos.pageNum - startPos.pageNum);
     const chapInfo = isChapterBook(currentBook)
       ? getChapterForPage(currentBook, nanaPage)
@@ -17816,6 +18042,7 @@ export default function App() {
         mode,
         ...(goingToLibrary ? {} : { bookId: phaseSelectedBookRef.current }),
         page: phasePageRef.current,
+        off: nanaOffRef.current,
       }).catch(() => {});
     }
     prevModeRef.current = mode;
@@ -18688,7 +18915,7 @@ export default function App() {
   const endVisit = (reason: "endcall" | "goodbye" | "childhangup") => {
     if (deviceView === "perry") return;
     if (visitEndCardRef.current) return; // already ended
-    const startPos = readingPosition(currentBook, displayPagePlan, sessionStartPageRef.current, "L", pageMode);
+    const startPos = readingPosition(currentBook, displayPagePlan, sessionStartPageRef.current, 0, "L", pageMode);
     const pagesRead = Math.max(0, nanaReadingPos.pageNum - startPos.pageNum);
     const childLabel = (activeChild?.name || dashboardPerryName || "").trim() || getRoleLabel("child");
     const accepted = scheduleProposal && nanaScheduleAccepted && perryScheduleAccepted
@@ -19534,6 +19761,7 @@ export default function App() {
           label={deviceView === "both" ? "NANA'S iPAD" : ""}
           isNana={true}
           displayPage={nanaPage}
+          displayOff={nanaOff}
           flipping={false}
           flipFromPage={nanaPage}
           flipToPage={nanaPage}
@@ -19716,9 +19944,11 @@ export default function App() {
           isNana={false}
           onSwitchDevice={handleSwitchDevice}
           displayPage={childPage}
+          displayOff={childOff}
           flipping={childFlipping}
           flipFromPage={flipFromPage}
           flipToPage={flipToPage}
+          flipToOff={flipToOff}
           flipDirection={flipDirection}
           mode={perryAuthenticated ? mode : "onboarding"}
           promptIndex={promptIndex}

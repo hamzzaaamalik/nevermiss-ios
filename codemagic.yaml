@@ -90,7 +90,9 @@ workflows:
 
       - name: Build the SPA for production
         script: |
-          pnpm build
+          # Settings and feedback reports show the same build number as
+          # TestFlight (the Xcode step below uses the same $BUILD_NUMBER).
+          VITE_APP_BUILD="$BUILD_NUMBER" pnpm build
 
       - name: Copy SPA into the iOS project
         script: |

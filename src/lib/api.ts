@@ -200,8 +200,10 @@ export const api = {
       const tail = qs.toString();
       return `${BASE}/sessions/${connectionId}/stream${tail ? `?${tail}` : ""}`;
     },
-    /** Polling fallback for environments that buffer SSE (Cloudflare Quick Tunnels). */
-    getState: (connectionId: string) =>
+    /** Polling fallback for environments that buffer SSE (Cloudflare Quick Tunnels).
+     *  `planSig`: the page plan this iPad already has (see planSignature);
+     *  the server leaves an unchanged plan out of the reply. */
+    getState: (connectionId: string, planSig?: string) =>
       req<{
         mode?: string;
         bookId?: string;
@@ -221,6 +223,9 @@ export const api = {
          *  mode. "L" or "R". Travels with `page` on page_change events
          *  so Perry's view shows the exact page Nana is on. */
         pageSide?: "L" | "R";
+        /** Word on `page` the reader is on (pages are cut from measured
+         *  text, so a spread can begin partway through a source page). */
+        pageOff?: number;
         /** Nana's font cycle (1 / 1.25 / 1.5). */
         fontScale?: number;
         /** Toggle on Nana's icebreaker view for showing Perry's prompts. */
@@ -239,7 +244,7 @@ export const api = {
         /** Each iPad's measured reading box, for the shared page plan. */
         layoutProfiles?: Partial<Record<"nana" | "perry", Record<string, unknown> & { ts: number }>>;
         /** Nana's merged page plan both iPads follow. */
-        pagePlan?: { bookId: string; key: string; mode: "single" | "double"; starts: number[]; splits: number[]; ts: number };
+        pagePlan?: { bookId: string; key: string; mode: "single" | "double"; starts: number[]; offs?: number[]; splits: number[]; stage?: { w: number; h: number }; ts: number };
         lastSillyFilterNana?: string;
         lastSillyFilterPerry?: string;
         /** `host` identifies who initiated the current round so receivers
@@ -275,7 +280,7 @@ export const api = {
          *  client even when the 1.5s anti-clobber guard on the plain
          *  state.bookId path would skip the apply. Same purpose as
          *  lastScheduleReset for the schedule flow. */
-        lastBookChange?: { bookId: string; page?: number; ts: number };
+        lastBookChange?: { bookId: string; page?: number; off?: number; ts: number };
         /** Which sibling Nana / Perry's PIN-login currently has active.
          *  Drives the per-child progress + session-log filters. Set
          *  server-side by the `active_child_change` SSE event AND by
@@ -286,7 +291,7 @@ export const api = {
          *  server-anchored timestamps (countdown startAt, holding
          *  endsAt) convert accurately to each iPad's local clock. */
         serverTs?: number;
-      }>("GET", `/sessions/${connectionId}/state`),
+      }>("GET", `/sessions/${connectionId}/state${planSig ? `?plan=${encodeURIComponent(planSig)}` : ""}`),
   },
   video: {
     getCredentials: (connectionId: string, role: "nana" | "perry") =>
