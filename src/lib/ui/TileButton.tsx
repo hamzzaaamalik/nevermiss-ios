@@ -25,6 +25,9 @@ interface TileButtonProps {
   ariaLabel?: string;
   /** Optional override style (rare — mostly for full-width grid items). */
   style?: CSSProperties;
+  /** Large label that fills a wide tile (a tile stretched across a grid
+   *  looked empty with 12px text — Rick's Build 36 #7). */
+  bigText?: boolean;
 }
 
 const TONES: Record<TileTone, { bg: string; bgActive: string; text: string; border: string; shadow: string }> = {
@@ -101,11 +104,13 @@ export function TileButton({
   active = false,
   ariaLabel,
   style,
+  bigText = false,
 }: TileButtonProps) {
   const px = TILE[size];
   const height = shape === "portrait" ? Math.round(px * 1.33) : px;
   const palette = TONES[tone];
-  const fontSize = size === "lg" ? FONT.md : size === "md" ? FONT.sm : FONT.xs + 1;
+  const fontSize: number | string = bigText ? "clamp(17px, 2.2vw, 24px)" : size === "lg" ? FONT.md : size === "md" ? FONT.sm : FONT.xs + 1;
+  const subFontSize: number | string = bigText ? "clamp(14px, 1.7vw, 19px)" : (fontSize as number) - 1;
 
   return (
     <button
@@ -148,7 +153,7 @@ export function TileButton({
         <span
           aria-hidden
           style={{
-            fontSize: size === "lg" ? 32 : size === "md" ? 26 : 20,
+            fontSize: bigText ? 34 : size === "lg" ? 32 : size === "md" ? 26 : 20,
             lineHeight: 1,
           }}
         >
@@ -161,7 +166,7 @@ export function TileButton({
           style={{
             display: "block",
             fontWeight: FONT.semibold,
-            fontSize: fontSize - 1,
+            fontSize: subFontSize,
             opacity: 0.8,
           }}
         >

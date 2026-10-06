@@ -94,9 +94,16 @@ export function MenuDrawer({
   onEndCall?: () => void;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
-  const [panel, setPanel] = useState<MenuPanel | null>(null);
+  // Remember which panel is open, not a copy of it: the panel is drawn
+  // from the current entries, so a choice lights up the moment it's
+  // tapped (Rick's Build 36 #4) and live values like the page stay fresh.
+  const [panelKey, setPanelKey] = useState<string | null>(null);
+  const panel: MenuPanel | null = panelKey
+    ? entries.find((en): en is MenuItem => !("divider" in en) && en.key === panelKey)?.panel ?? null
+    : null;
+  const setPanel = (p: { key: string } | null) => setPanelKey(p ? p.key : null);
   useIdleAutoClose(open, onClose, autoCloseMs, panelRef);
-  useEffect(() => { if (!open) setPanel(null); }, [open]);
+  useEffect(() => { if (!open) setPanelKey(null); }, [open]);
   if (!open) return null;
   return (
     <>
@@ -185,7 +192,7 @@ export function MenuDrawer({
                     key={entry.key}
                     entry={entry}
                     onActivate={() => {
-                      if (entry.panel) { setPanel(entry.panel); return; }
+                      if (entry.panel) { setPanel(entry); return; }
                       entry.onClick?.();
                       onClose();
                     }}

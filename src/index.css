@@ -278,6 +278,11 @@
   body {
     @apply font-sans antialiased bg-background text-foreground;
   }
+  /* --background is an unfinished placeholder (an invalid color), so the
+     page behind the app was see-through and showed white. */
+  html, body {
+    background-color: #0b172e;
+  }
 }
 
 /**

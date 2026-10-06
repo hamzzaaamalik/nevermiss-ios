@@ -46,6 +46,10 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
+	<key>UIStatusBarHidden</key>
+	<true/>
+	<key>UIRequiresFullScreen</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>NeverMiss uses your iPad camera so you can see your grandchild during reading sessions. Your video is only shared with the family member you are connected to and is not recorded by default.</string>

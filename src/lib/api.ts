@@ -211,6 +211,8 @@ export const api = {
         scheduleProposal?: { date: string; time: string; proposedBy: "nana" | "perry" };
         scheduleAccepted?: { nana: boolean; perry: boolean };
         goodbyeStartTime?: number;
+        /** Nana has let the child hang up (ms timestamp). */
+        goodbyeHangupAllowed?: number;
         goodbyePhase?: number;
         readingTheme?: string;
         /** Set by Nana's layout switcher; polled by Perry so layout choice
@@ -313,6 +315,8 @@ export const api = {
         childId?: string | null;
         bookId: string;
         currentPage: number;
+        /** Word on that page where they stopped (paginated books). */
+        currentOff?: number;
         /** 0-based chapter index for chapter books; null for picture books
          *  and flat books that don't use chapters. */
         chapterIndex?: number | null;
@@ -334,7 +338,7 @@ export const api = {
      *  it for chapter books, omits for flat books. `childId` is the
      *  active sibling (defaults server-side to state.activeChildId,
      *  then to children[0]). */
-    save: (connectionId: string, body: { bookId: string; startPage: number; endPage: number; chapterIndex?: number; childId?: string }) =>
+    save: (connectionId: string, body: { bookId: string; startPage: number; endPage: number; endOff?: number; chapterIndex?: number; childId?: string }) =>
       req<{ session: ReadingSession }>("POST", `/session-log/${connectionId}`, body),
     /** Delete a single reading-session row. Privacy Policy v3 §8
      *  (user's right to delete specific Memory Vault items). */

@@ -26,7 +26,15 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
-        // Restart any tasks that were paused (or not yet started) while the application was inactive. If the application was previously in the background, optionally refresh the user interface.
+        // Back from another app (a calendar link, for one), the web view
+        // could keep the size it had in another orientation and draw the
+        // app on half the screen until the iPad was rotated (Rick's
+        // Build 36 #10). Fit it to the screen again.
+        if let bridge = window?.rootViewController as? CAPBridgeViewController, let webView = bridge.webView {
+            webView.frame = bridge.view.bounds
+            webView.setNeedsLayout()
+            webView.layoutIfNeeded()
+        }
     }
 
     func applicationWillTerminate(_ application: UIApplication) {

@@ -21,24 +21,33 @@ interface Resolved {
 }
 
 /** Where `m` points inside `area`, re-measured every frame so it follows
- *  this iPad's own layout. */
-function resolve(area: HTMLElement, m: PointerMsg): Resolved {
+ *  this iPad's own layout. Null when its word isn't on this screen (the
+ *  other iPad is mid page turn): nothing is drawn rather than a guess. */
+function resolve(area: HTMLElement, m: PointerMsg): Resolved | null {
   const a = area.getBoundingClientRect();
   if (m.wid) {
     const el = area.querySelector<HTMLElement>(`[data-wid="${escapeAttr(m.wid)}"]`);
-    if (el) {
-      const r = el.getBoundingClientRect();
-      if (r.width > 0 && r.height > 0) {
-        let col = (el.closest(".book-body, .nm-book-body") as HTMLElement | null)?.getBoundingClientRect() ?? null;
-        if (!col || col.width < 60) col = (el.closest(".nm-book-page") as HTMLElement | null)?.getBoundingClientRect() ?? null;
-        const left = col ? col.left - a.left : r.left - a.left;
-        const width = col ? col.width : r.width;
-        return {
-          tipX: r.left - a.left + (m.ox ?? 0.5) * r.width,
-          tipY: r.top - a.top + (m.oy ?? 0.5) * r.height,
-          line: { top: r.top - a.top, height: r.height, left, width },
-        };
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) {
+      const colEl = el.closest(".book-body, .nm-book-body") as HTMLElement | null;
+      let col = colEl?.getBoundingClientRect() ?? null;
+      if (!col || col.width < 60) col = (el.closest(".nm-book-page") as HTMLElement | null)?.getBoundingClientRect() ?? null;
+      const left = col ? col.left - a.left : r.left - a.left;
+      const width = col ? col.width : r.width;
+      // The band is exactly one line tall (the line's share of the
+      // leading included), so it never spills onto the next line.
+      let pitch = r.height * 1.5;
+      if (colEl && colEl.offsetHeight > 0) {
+        const lh = parseFloat(getComputedStyle(colEl).lineHeight);
+        if (Number.isFinite(lh)) pitch = lh * (colEl.getBoundingClientRect().height / colEl.offsetHeight);
       }
+      const mid = r.top - a.top + r.height / 2;
+      return {
+        tipX: r.left - a.left + (m.ox ?? 0.5) * r.width,
+        tipY: r.top - a.top + (m.oy ?? 0.5) * r.height,
+        line: { top: mid - pitch / 2, height: pitch, left, width },
+      };
     }
   }
   return { tipX: m.x * a.width, tipY: m.y * a.height, line: null };
@@ -69,7 +78,9 @@ export function ReadingPointerLayer({ areaRef, source, suppressed, page }: {
   useEffect(() => {
     const on = (m: PointerMsg) => {
       // An update from before a page turn points at words that are gone.
-      if (m.page !== pageRef.current && m.phase === "move") return;
+      // One anchored to a word is checked against the screen instead (the
+      // two iPads can briefly disagree about which spread is up).
+      if (m.page !== pageRef.current && m.phase === "move" && !m.wid) return;
       msgRef.current = m;
       setStyle(m.style);
       if (fadeRef.current !== null) { window.clearTimeout(fadeRef.current); fadeRef.current = null; }
@@ -92,8 +103,10 @@ export function ReadingPointerLayer({ areaRef, source, suppressed, page }: {
     const tick = () => {
       const area = areaRef.current;
       const m = msgRef.current;
-      if (area && m) {
-        const r = resolve(area, m);
+      const r = area && m ? resolve(area, m) : null;
+      if (handRef.current) handRef.current.style.visibility = r ? "visible" : "hidden";
+      if (bandRef.current && !r) bandRef.current.style.opacity = "0";
+      if (area && m && r) {
         const k = source === "remote" ? 0.35 : 1;
         const cur = curRef.current ?? { x: r.tipX, y: r.tipY };
         cur.x += (r.tipX - cur.x) * k;
@@ -107,8 +120,8 @@ export function ReadingPointerLayer({ areaRef, source, suppressed, page }: {
           if (r.line) {
             b.left = `${r.line.left - 8}px`;
             b.width = `${r.line.width + 16}px`;
-            b.top = `${r.line.top - 5}px`;
-            b.height = `${r.line.height + 10}px`;
+            b.top = `${r.line.top}px`;
+            b.height = `${r.line.height}px`;
           } else {
             // Between lines or in the margin: no band (it snaps to lines).
             b.width = "0px";
@@ -127,8 +140,10 @@ export function ReadingPointerLayer({ areaRef, source, suppressed, page }: {
   return (
     <div aria-hidden data-testid={`reading-pointer-${source}`} data-visible={show ? "1" : "0"} data-style={style}
       style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 25, opacity: show ? 1 : 0, transition: "opacity 260ms ease", overflow: "hidden" }}>
+      {/* Separate keys: the band and the arrow must never share an element,
+          or one keeps the other's position when Nana switches styles. */}
       {style === "ruler" ? (
-        <div ref={bandRef} style={{
+        <div key="band" ref={bandRef} style={{
           position: "absolute", left: 0, top: 0, width: 0, height: 0,
           borderRadius: 8,
           background: "rgba(201,146,42,0.10)",
@@ -138,7 +153,7 @@ export function ReadingPointerLayer({ areaRef, source, suppressed, page }: {
           transition: source === "remote" ? "top 120ms ease, height 120ms ease, left 120ms ease, width 120ms ease" : undefined,
         }} />
       ) : (
-        <div ref={handRef} style={{ position: "absolute", left: 0, top: 0, willChange: "transform" }}>
+        <div key="hand" ref={handRef} style={{ position: "absolute", left: 0, top: 0, willChange: "transform" }}>
           {/* Bold dark arrow; its tip sits exactly on the point. */}
           <svg width="44" height="56" viewBox="0 0 20 26" style={{ display: "block", filter: "drop-shadow(0 3px 6px rgba(0,0,0,0.45))" }}>
             <path d="M1 1 L1 20.5 L6 15.8 L9.6 24.4 L13.2 22.9 L9.7 14.5 L16.4 14.5 Z" fill="#1B2B4B" stroke="#ffffff" strokeWidth="1.7" strokeLinejoin="round" />

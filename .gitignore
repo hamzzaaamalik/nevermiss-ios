@@ -4,6 +4,8 @@ node_modules/
 
 # Build output (Codemagic builds it fresh on every run)
 dist/
+# Copied from node_modules at build time (scripts/copy-mediapipe.mjs)
+public/mediapipe/tasks-vision/
 
 # Capacitor — keep ios/ folder source, but skip generated build artifacts
 ios/App/build/

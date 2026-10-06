@@ -11,6 +11,9 @@ const config: CapacitorConfig = {
   ios: {
     contentInset: 'always',
     allowsLinkPreview: false,
+    // Navy, not white, behind anything the app doesn't paint (the strip
+    // under the status bar, a moment of resizing).
+    backgroundColor: '#0b172e',
   },
   // Enable CapacitorHttp: intercepts every fetch()/XMLHttpRequest call
   // from the SPA and runs it through native iOS NSURLSession instead

@@ -59,7 +59,7 @@ import {
 } from "./lib/video";
 import { ThemeSwitcher } from "./lib/reading/ReadingChrome";
 import { NEXT_THEME, READING_THEMES, READING_THEME_LABEL, isReadingTheme, type ReadingTheme } from "./lib/reading/themes";
-import { tokenizeHalf, type WordTok } from "./lib/reading/words";
+import { PARA_INDENT_EM, tokenizeHalf, type WordTok } from "./lib/reading/words";
 import { APP_BUILD } from "./lib/build";
 import { pointerBus, type PointerMsg } from "./lib/reading/pointerBus";
 import { ReadingPointerLayer, localPointer } from "./lib/reading/ReadingPointer";
@@ -90,6 +90,7 @@ import {
   spreadStart,
   spreadStop,
   widPos,
+  segBreak,
   type ColumnSegment,
   type PagePlan,
   type PageProfile,
@@ -365,9 +366,12 @@ const childIcebreakerPrompts = [
 // clears whatever's currently on your partner's face. STICKERS itself
 // deliberately omits this entry (it's not a sticker, it's the absence
 // of one) so FaceTrackedOverlay's lookup naturally short-circuits.
+// Face-covering filters only: the head-top ones (crowns, hats, bunny and
+// cat ears, halo) are out of the picker (Rick's Build 36 #6). They stay
+// in the catalog so one sent by an iPad on an older build still draws.
 const sillyFilters = [
   { id: "none", label: "Normal", emoji: "😊" },
-  ...STICKERS.map(s => ({ id: s.id, label: s.label, emoji: s.emoji })),
+  ...STICKERS.filter(s => s.kind !== "head").map(s => ({ id: s.id, label: s.label, emoji: s.emoji })),
 ];
 
 export function FilterOverlay({ filter }: { filter: string }) {
@@ -517,6 +521,10 @@ interface BookPage {
    *  from the source EPUB. Ordered as they appear in the chapter text;
    *  the reader interleaves them between paragraphs on that page. */
   images?: string[];
+  /** The half's first word starts a paragraph (books imported with
+   *  paragraphs; breaks inside a half are blank lines in its text). */
+  leftPara?: boolean;
+  rightPara?: boolean;
 }
 
 /** A chapter in a chapter book — multi-session reads where each chapter
@@ -597,6 +605,9 @@ interface Book {
    *  is treated as a single-session read (picture books, starter readers,
    *  Aubree's House image book). */
   chapters?: BookChapter[];
+  /** Came from the server catalog (imported or written in the admin),
+   *  not the bundled hand-made stories. */
+  fromCatalog?: boolean;
 }
 
 /** Build a Book from an array of chapters. The flat `pages` array is
@@ -687,6 +698,25 @@ function isChapterBook(book: Book): boolean {
   return !!book.chapters && book.chapters.length > 0;
 }
 
+/** Books whose pages are cut from measured text (Rick's Pagination
+ *  Spec): chapter books and every text book from the catalog. Picture
+ *  books and the bundled hand-made stories keep their designed pages. */
+function isPaginatedBook(book: Book): boolean {
+  const pictures = book.pages.filter(p => !!p.imageUrl).length;
+  if (pictures > 0 && pictures * 2 >= book.pages.length) return false;
+  return isChapterBook(book) || !!book.fromCatalog;
+}
+
+/** Where a saved place is, for lists outside the reader. A paginated
+ *  book's pages depend on text size and screen, so it says chapter and
+ *  how far through, never a stored page number. */
+function bookPlaceLabel(book: Book, page: number): string {
+  if (!isPaginatedBook(book)) return `Page ${page} of ${book.pages.length}`;
+  const pct = Math.round(Math.max(0, Math.min(1, (page - 1) / Math.max(1, book.pages.length - 1))) * 100);
+  const info = getChapterForPage(book, page);
+  return info ? `Chapter ${info.chapterIndex + 1} of ${book.chapters!.length} · ${pct}%` : `${pct}% read`;
+}
+
 /** Pages a reader turns through per spread in one-page mode (1 or 2),
  *  cached per plan object. */
 const sideCountCache = new WeakMap<PagePlan, number[]>();
@@ -708,7 +738,7 @@ function readingPosition(
   off: number,
   side: "L" | "R",
   pageMode: "single" | "double",
-): { pageNum: number; pageTotal: number; atStart: boolean; atEnd: boolean; chapterLabel: string | null } {
+): { pageNum: number; pageTotal: number; estimating: boolean; atStart: boolean; atEnd: boolean; chapterLabel: string | null } {
   const pages = book.pages;
   const k = spreadIndexOf(plan, page, off);
   const K = plan.starts.length;
@@ -737,7 +767,11 @@ function readingPosition(
     const info = getChapterForPage(book, plan.starts[k] ?? page);
     if (info) chapterLabel = `Chapter ${info.chapterIndex + 1} of ${book.chapters!.length}`;
   }
-  return { pageNum, pageTotal, atStart, atEnd, chapterLabel };
+  // While later chapters are still being laid out the total is only a
+  // guess: show it as "…" rather than a number that changes a moment later.
+  // A paginated book's count is unknown until its first plan exists.
+  const estimating = !!plan.estimatedTotal || (plan.key.startsWith("identity|") && isPaginatedBook(book));
+  return { pageNum, pageTotal, estimating, atStart, atEnd, chapterLabel };
 }
 
 // Used when no page in the spread carries an AI or hand-written prompt,
@@ -1513,6 +1547,8 @@ function mergeServerCatalog(serverBooks: unknown[]): void {
           imageUrl:       typeof pp.imageUrl === "string" ? pp.imageUrl : undefined,
           signOff:        !!pp.signOff,
           images:         Array.isArray(pp.images) ? pp.images.filter((u): u is string => typeof u === "string") : undefined,
+          ...(pp.leftPara === true ? { leftPara: true } : {}),
+          ...(pp.rightPara === true ? { rightPara: true } : {}),
         };
       });
 
@@ -1560,6 +1596,8 @@ function mergeServerCatalog(serverBooks: unknown[]): void {
                   imageUrl:      typeof pp.imageUrl === "string" ? pp.imageUrl : undefined,
                   signOff:       !!pp.signOff,
                   images:        Array.isArray(pp.images) ? pp.images.filter((u): u is string => typeof u === "string") : undefined,
+                  ...(pp.leftPara === true ? { leftPara: true } : {}),
+                  ...(pp.rightPara === true ? { rightPara: true } : {}),
                 };
               }),
           };
@@ -1621,6 +1659,7 @@ function mergeServerCatalog(serverBooks: unknown[]): void {
       readingLevel: (existing?.readingLevel && existing.readingLevel.length > 0) ? existing.readingLevel : derivedReadingLevel,
       pages,
       chapters,
+      fromCatalog: true,
     };
   }
 }
@@ -1684,44 +1723,51 @@ function resolveWid(bookPages: BookPage[], wid: string): { word: string; sentenc
 function WordWrapped({
   segments,
   highlightWid,
+  noIndentFirst = false,
 }: {
   segments: ColumnSegment[];
   highlightWid: string | null;
+  /** The column opens a chapter: its first paragraph has no indent. */
+  noIndentFirst?: boolean;
 }) {
+  // Line and paragraph breaks use the same markup as the page planner's
+  // measurer (lib/reading/pagePlan), so the planned pages fit exactly.
   const nodes: React.ReactNode[] = [];
-  segments.forEach((seg, si) => {
-    seg.toks.forEach((tok, ti) => {
-      const wid = `${seg.key}.${seg.start + ti}`;
-      const active = highlightWid === wid;
-      nodes.push(
-        <span
-          key={wid}
-          data-wid={wid}
-          style={{
-            backgroundColor: active ? "rgba(255,201,80,0.85)" : "transparent",
-            color: active ? "#1B2B4B" : undefined,
-            // The highlight reaches past the letters with shadows, not side
-            // padding, and a word never breaks inside itself (Safari may
-            // break before an em dash): either could leave part of a page's
-            // last word on a line of its own, which the planner can't see.
-            boxShadow: active ? "0 0 0 3px rgba(255,201,80,0.85), 0 0 0 5px rgba(201,146,42,0.55)" : undefined,
-            whiteSpace: "nowrap",
-            borderRadius: 4,
-            // Tall padding with matching negative margin so neighbouring
-            // lines' tap targets meet in the middle of the leading.
-            padding: "7px 0",
-            margin: "-5px 0",
-            transition: "background-color 180ms ease, color 180ms ease",
-            boxDecorationBreak: "clone",
-            WebkitBoxDecorationBreak: "clone",
-          }}
-        >
-          {tok.text}
-        </span>,
-      );
-      const last = si === segments.length - 1 && ti === seg.toks.length - 1;
-      if (!tok.glue && !last) nodes.push(" ");
-    });
+  const flat: Array<{ seg: ColumnSegment; ti: number }> = [];
+  segments.forEach(seg => seg.toks.forEach((_, ti) => flat.push({ seg, ti })));
+  flat.forEach(({ seg, ti }, i) => {
+    const tok = seg.toks[ti];
+    const wid = `${seg.key}.${seg.start + ti}`;
+    const active = highlightWid === wid;
+    const brk = segBreak(seg, ti);
+    if (i > 0 && brk) nodes.push(<br key={`b${wid}`} />);
+    if (brk === 2 && !(i === 0 && noIndentFirst)) {
+      nodes.push(<span key={`i${wid}`} aria-hidden style={{ display: "inline-block", width: `${PARA_INDENT_EM}em` }} />);
+    }
+    nodes.push(
+      <span
+        key={wid}
+        data-wid={wid}
+        style={{
+          backgroundColor: active ? "rgba(255,201,80,0.85)" : "transparent",
+          color: active ? "#1B2B4B" : undefined,
+          // The highlight reaches past the letters with shadows, not side
+          // padding, and a word never breaks inside itself (Safari may
+          // break before an em dash): either could leave part of a page's
+          // last word on a line of its own, which the planner can't see.
+          boxShadow: active ? "0 0 0 3px rgba(255,201,80,0.85), 0 0 0 5px rgba(201,146,42,0.55)" : undefined,
+          whiteSpace: "nowrap",
+          borderRadius: 4,
+          transition: "background-color 180ms ease, color 180ms ease",
+          boxDecorationBreak: "clone",
+          WebkitBoxDecorationBreak: "clone",
+        }}
+      >
+        {tok.text}
+      </span>,
+    );
+    const next = flat[i + 1];
+    if (next && !tok.glue && !segBreak(next.seg, next.ti)) nodes.push(" ");
   });
   return <>{nodes}</>;
 }
@@ -2026,9 +2072,13 @@ function BookContent({
     const containers = parents();
     requestAnimationFrame(() => {
       let currentPct = targetFontPct;
-      const minPct = Math.round(targetFontPct * 0.85);
+      // A book never scrolls (Rick's Pagination Spec): measured pages
+      // always fit, so this only ever runs on a hand-made page or for a
+      // moment before a new plan arrives, and shrinking the text a little
+      // beats a "Scroll for more".
+      const minPct = Math.round(targetFontPct * 0.6);
       let iterations = 0;
-      while (iterations++ < 6) {
+      while (iterations++ < 20) {
         const overflows = containers.some(c => c.scrollHeight > c.clientHeight + 4);
         if (!overflows || currentPct <= minPct) break;
         // A measured spread should always fit; this means the planner and
@@ -2039,15 +2089,11 @@ function BookContent({
         currentPct = Math.max(minPct, currentPct - 5);
         apply(currentPct);
       }
-      // Fallback: if content still doesn't fit after the shrink cap,
-      // allow scroll + apply the fade-out cue so the user knows more
-      // text is below. Also inject a visible "↓ MORE BELOW" pill so
-      // the affordance is obvious (Rick's Build 32 A-3 root cause was
-      // that the subtle fade was invisible on iPad).
-      // Last resort only: the page plan sizes spreads to fit, so this
-      // runs when a single source page is longer than the whole page.
-      // The cue sits on the page (not inside the faded scroller, where it
-      // covered the last line) and hides once the reader reaches the end.
+      // Last resort, if even the smallest size doesn't fit: let the column
+      // scroll rather than hide words, with a visible cue (Rick's Build 32
+      // A-3: a subtle fade alone went unnoticed). Measured pages never get
+      // here. The cue sits on the page (not inside the faded scroller,
+      // where it covered the last line) and hides at the end.
       containers.forEach(c => {
         const overflows = c.scrollHeight > c.clientHeight + 4;
         c.style.overflowY = overflows ? "auto" : "hidden";
@@ -2124,8 +2170,11 @@ function BookContent({
       // Width with its fraction: a rounded width can move a line break.
       const colWidth = parseFloat(cs.width) || ref.clientWidth;
       if (capLeftPlainPx <= 0 || capRightPx <= 0 || colWidth <= 0) return;
-      const stageW = root.clientWidth;
-      const stageH = root.clientHeight;
+      // With their fractions, like the column width: the planner works out
+      // other sizes from these, and a rounded box was a fraction off.
+      const rootStyle = getComputedStyle(root);
+      const stageW = parseFloat(rootStyle.width) || root.clientWidth;
+      const stageH = parseFloat(rootStyle.height) || root.clientHeight;
       const own = areaRef.current;
       const text: Record<string, string> = {};
       for (const k of TEXT_STYLE_PROPS) {
@@ -2243,7 +2292,7 @@ function BookContent({
     color: themeColors.muted, fontFamily: "Merriweather, serif", fontSize: "9px", fontStyle: "italic", letterSpacing: "0.14em", textTransform: "uppercase",
   };
   return (
-    <div ref={rootRef} style={{
+    <div ref={rootRef} data-spread={`${textKey}@${targetFontPct}${pageMode[0]}`} style={{
       display: "flex", width: "100%", height: "100%",
       justifyContent: "center",
       boxShadow: "0 8px 32px rgba(0,0,0,0.55), 0 1px 4px rgba(0,0,0,0.3)",
@@ -2504,7 +2553,7 @@ function BookContent({
             // above — this fixes Rick's "font only changes right page".
             fontSize: `${targetFontPct}%`,
           }}>
-            <WordWrapped segments={leftSegs} highlightWid={highlightWid} />
+            <WordWrapped segments={leftSegs} highlightWid={highlightWid} noIndentFirst={!!heading && !imagesOnly} />
           </p>
           {/* End-of-section fleuron — small printed-book ornament that
               fills the empty space when body doesn't reach the gutter.
@@ -2604,7 +2653,7 @@ function BookContent({
                 // Match LEFT — see leftRef paragraph above.
                 fontSize: `${targetFontPct}%`,
               }}>
-                <WordWrapped segments={rightSegs} highlightWid={highlightWid} />
+                <WordWrapped segments={rightSegs} highlightWid={highlightWid} noIndentFirst={!!heading && imagesOnly} />
               </p>
               {/* End ornament — same fleuron when there's empty space below body */}
               <div ref={rightFleuronRef} aria-hidden style={{
@@ -2703,7 +2752,7 @@ function ProminentHomePill({
         borderRadius: 999,
         padding: "11px 20px",
         fontFamily: "DM Sans, sans-serif",
-        fontSize: "clamp(13px, 1.55vw, 15px)",
+        fontSize: "clamp(15px, 1.8vw, 18px)",
         fontWeight: 800,
         letterSpacing: "0.04em",
         cursor: "pointer",
@@ -2908,6 +2957,8 @@ function GreetingView({
   onGoHome,
   onPerryPickBook,
   onPerryAskNana,
+  continueTitle = null,
+  onPickDifferent,
 }: {
   isNana: boolean;
   childName: string;
@@ -2916,6 +2967,10 @@ function GreetingView({
    *  directly to reading if a pre-selected book is set from the home
    *  dashboard). Perry never calls this — she follows via phase_change. */
   onReady: () => void;
+  /** A bookmark is queued: the primary button continues this book and
+   *  `onPickDifferent` offers the library instead (Rick's Build 36 #5). */
+  continueTitle?: string | null;
+  onPickDifferent?: () => void;
   /** Optional secondary path that drops into the icebreaker view with
    *  rotating conversation prompts. Preserves the warm-up feature for
    *  pairs that want it; not a forced step. */
@@ -3042,9 +3097,32 @@ function GreetingView({
               }}
             >
               <span style={{ fontSize: 17 }}>📚</span>
-              <span>Pick a Book</span>
+              <span>{continueTitle ? `Continue ${continueTitle}` : "Pick a Book"}</span>
               <span style={{ fontSize: 17 }}>→</span>
             </button>
+            {continueTitle && onPickDifferent && (
+              <button
+                onClick={onPickDifferent}
+                data-testid="greeting-pick-different"
+                style={{
+                  background: "rgba(255,255,255,0.06)",
+                  color: CREAM,
+                  border: "1px solid rgba(255,255,255,0.18)",
+                  borderRadius: 999,
+                  padding: "11px 18px",
+                  fontFamily: "DM Sans, sans-serif",
+                  fontSize: "clamp(13px, 1.6vw, 15px)",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  display: "inline-flex", alignItems: "center", gap: 8,
+                  touchAction: "manipulation",
+                  minHeight: 44,
+                }}
+              >
+                <span style={{ fontSize: 15 }}>📖</span>
+                <span>Pick a different book</span>
+              </button>
+            )}
           </>
         ) : (
           // Perry side — friendly waiting text + two request pills so
@@ -3519,6 +3597,7 @@ function ShowAndTellView({
               sublabel="prompt"
               tone="purple"
               size="md"
+              bigText
               onClick={onNextShowAndTellPrompt}
             />
             <TileButton
@@ -3527,6 +3606,7 @@ function ShowAndTellView({
               sublabel="to book"
               tone="info"
               size="md"
+              bigText
               onClick={onBackToReading}
             />
             <TileButton
@@ -3535,6 +3615,7 @@ function ShowAndTellView({
               sublabel="next"
               tone="success"
               size="md"
+              bigText
               onClick={onStartParentCheck}
             />
             <TileButton
@@ -3543,6 +3624,7 @@ function ShowAndTellView({
               sublabel="Faces"
               tone="purple"
               size="md"
+              bigText
               onClick={onStartSillyFaces}
             />
           </TileGrid>
@@ -3710,7 +3792,10 @@ function BookSpread({
     return () => ro?.disconnect();
   }, []);
   const stage = pagePlan?.stage ?? null;
-  const stageScale = stage && area ? Math.min(area.w / stage.w, area.h / stage.h) : 1;
+  // A box within 1% of this iPad's area is drawn at its true size, not
+  // scaled by a hair (a tiny scale can soften the text).
+  const rawScale = stage && area ? Math.min(area.w / stage.w, area.h / stage.h) : 1;
+  const stageScale = rawScale >= 1 && rawScale < 1.01 ? 1 : rawScale;
   const stageStyle: React.CSSProperties = stage && area
     ? {
         position: "absolute",
@@ -3735,38 +3820,76 @@ function BookSpread({
   const pointerDownRef = useRef<{ x: number; y: number; id: number; t: number; dragging: boolean } | null>(null);
   const lastPtrSendRef = useRef(0);
   const pointerOn = isNana && pointerMode !== "off";
-  const POINTER_LIFT = pointerMode === "ruler" ? 22 : 34; // draw above the fingertip
 
-  const findWordAt = (target: HTMLElement | null, x: number, y: number): HTMLElement | null => {
+  // The words on screen grouped into lines, measured once per gesture
+  // (nothing moves while a finger is down: the book never scrolls).
+  type WordBox = { el: HTMLElement; left: number; right: number };
+  type LineBox = { top: number; bottom: number; mid: number; colLeft: number; colRight: number; words: WordBox[] };
+  const linesRef = useRef<{ lines: LineBox[]; pitch: number } | null>(null);
+  const readLines = (): { lines: LineBox[]; pitch: number } => {
     const area = bookAreaRef.current;
-    if (!area) return null;
-    const direct = target?.closest?.("[data-wid]") as HTMLElement | null;
-    if (direct && area.contains(direct)) return direct;
-    if (typeof document.elementsFromPoint === "function") {
-      for (const n of document.elementsFromPoint(x, y)) {
-        const el = n as HTMLElement;
-        if (el.closest?.("[data-nm-no-book-tap]")) return null;
-        const w = el.closest?.("[data-wid]") as HTMLElement | null;
-        if (w && area.contains(w)) return w;
+    const lines: LineBox[] = [];
+    if (area) {
+      for (const col of Array.from(area.querySelectorAll<HTMLElement>("p.book-body"))) {
+        const cr = col.getBoundingClientRect();
+        if (cr.width === 0 || cr.height === 0) continue;
+        const colLines: LineBox[] = [];
+        for (const el of Array.from(col.querySelectorAll<HTMLElement>("[data-wid]"))) {
+          const r = el.getBoundingClientRect();
+          if (r.width === 0 || r.height === 0) continue;
+          const mid = r.top + r.height / 2;
+          let line = colLines.find(l => Math.abs(l.mid - mid) < r.height * 0.4);
+          if (!line) { line = { top: r.top, bottom: r.bottom, mid, colLeft: cr.left, colRight: cr.right, words: [] }; colLines.push(line); }
+          line.top = Math.min(line.top, r.top);
+          line.bottom = Math.max(line.bottom, r.bottom);
+          line.words.push({ el, left: r.left, right: r.right });
+        }
+        lines.push(...colLines);
       }
     }
-    // Taps in the leading between lines: nearest word, vertical distance
-    // weighted double so the line under the finger wins.
-    const spans = area.querySelectorAll<HTMLElement>("[data-wid]");
-    let best: HTMLElement | null = null;
-    let bestD = Infinity;
-    for (let i = 0; i < spans.length; i++) {
-      const r = spans[i].getBoundingClientRect();
-      if (r.width === 0 || r.height === 0) continue;
-      const d = Math.hypot(r.left + r.width / 2 - x, (r.top + r.height / 2 - y) * 2);
-      if (d < bestD && d < 60) { bestD = d; best = spans[i]; }
+    // Line pitch: the most common gap between lines of one column.
+    const mids = lines.map(l => l.mid).sort((a, b) => a - b);
+    const gaps = mids.slice(1).map((m, i) => m - mids[i]).filter(g => g > 4).sort((a, b) => a - b);
+    const pitch = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 32;
+    return { lines, pitch };
+  };
+  // Where the finger lands vs. where Nana aims: the iPad reports the
+  // middle of the contact patch, a little below the point she means.
+  const TAP_AIM_UP = 4;
+
+  /** The word at a point: the line the point falls in (each line owns
+   *  half the gap above and below it), then the nearest word on that
+   *  line. Rick's Build 36 #2: taps highlighted the line below. */
+  const findWordAt = (x: number, y: number, cached = false): HTMLElement | null => {
+    const area = bookAreaRef.current;
+    if (!area) return null;
+    if (typeof document.elementsFromPoint === "function") {
+      for (const n of document.elementsFromPoint(x, y)) {
+        if ((n as HTMLElement).closest?.("[data-nm-no-book-tap]")) return null;
+      }
     }
-    return best;
+    const { lines, pitch } = cached && linesRef.current ? linesRef.current : readLines();
+    let line: LineBox | null = null;
+    let lineD = Infinity;
+    for (const l of lines) {
+      const d = y < l.top ? l.top - y : y > l.bottom ? y - l.bottom : 0;
+      // Only lines of the column under the finger.
+      const sideways = x < l.colLeft - 30 || x > l.colRight + 30;
+      if (!sideways && d < lineD) { lineD = d; line = l; }
+    }
+    if (!line || lineD > pitch * 0.6) return null;
+    let best: WordBox | null = null;
+    let bestD = Infinity;
+    for (const w of line.words) {
+      const d = x < w.left ? w.left - x : x > w.right ? x - w.right : 0;
+      if (d < bestD) { bestD = d; best = w; }
+    }
+    return best && bestD < 60 ? best.el : null;
   };
 
-  const selectAt = (target: HTMLElement | null, x: number, y: number, allowToggleOff: boolean): boolean => {
+  const selectAt = (x: number, y: number, allowToggleOff: boolean): boolean => {
     if (!onSelectWord) return false;
-    const wid = findWordAt(target, x, y)?.dataset.wid;
+    const wid = findWordAt(x, y - TAP_AIM_UP)?.dataset.wid;
     if (!wid) return false;
     if (wordSelection?.wid === wid) {
       if (allowToggleOff) onSelectWord(null);
@@ -3783,9 +3906,14 @@ function BookSpread({
     const area = bookAreaRef.current;
     if (!area) return null;
     const a = area.getBoundingClientRect();
+    // Point clearly above the fingertip so Nana sees the words she points
+    // at (Rick's Build 36 #3). The line lands on the line just above her
+    // finger whatever the text size.
+    const pitch = linesRef.current?.pitch ?? 32;
+    const lift = pointerMode === "ruler" ? Math.max(30, pitch * 0.5 + 24) : Math.max(56, pitch + 24);
     const px = clientX;
-    const py = clientY - POINTER_LIFT;
-    const w = findWordAt(null, px, py);
+    const py = clientY - lift;
+    const w = findWordAt(px, py, true);
     const msg: PointerMsg = {
       t: "ptr", ts: Date.now(), phase,
       style: pointerMode === "ruler" ? "ruler" : "finger",
@@ -3819,6 +3947,7 @@ function BookSpread({
     const target = e.target as HTMLElement | null;
     if (target?.closest?.("[data-nm-no-book-tap]")) { pointerDownRef.current = null; return; }
     pointerDownRef.current = { x: e.clientX, y: e.clientY, id: e.pointerId, t: Date.now(), dragging: false };
+    linesRef.current = readLines();
   };
 
   const handleBookPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -3827,6 +3956,9 @@ function BookSpread({
     if (!d.dragging && (Math.abs(e.clientX - d.x) > TAP_SLOP || Math.abs(e.clientY - d.y) > TAP_SLOP)) {
       if (!pointerOn || pointerSuppressed) { pointerDownRef.current = null; return; }
       d.dragging = true;
+      // Pointing takes over from a highlighted word (its menu would
+      // otherwise hide the pointer).
+      if (wordSelection && onSelectWord) onSelectWord(null);
     }
     if (d.dragging) {
       const m = pointerMsgAt(e.clientX, e.clientY, "move");
@@ -3853,7 +3985,8 @@ function BookSpread({
     if (Math.abs(e.clientX - d.x) > TAP_SLOP || Math.abs(e.clientY - d.y) > TAP_SLOP) return;
     if (justSwipedRef.current) return;
     const target = e.target as HTMLElement | null;
-    if (selectAt(target, e.clientX, e.clientY, true)) return;
+    // Where the finger first touched: a finger rolls as it lifts.
+    if (selectAt(d.x, d.y, true)) return;
     if (wordSelection && onSelectWord) onSelectWord(null);
     // Nana tapping an illustration or margin drops a "look here" ring on
     // both iPads.
@@ -3969,7 +4102,7 @@ function BookSpread({
         <ReadingPointerLayer
           areaRef={bookAreaRef}
           source={isNana ? "local" : "remote"}
-          suppressed={!!wordSelection || pointerSuppressed}
+          suppressed={pointerSuppressed}
           page={spreadKey}
         />
 
@@ -4151,8 +4284,8 @@ function LibraryView({
 }: {
   selectedBookId: string;
   onSelectBook: (id: string) => void;
-  onConfirmBook: (startPage: number) => void;
-  progress?: Array<{ bookId: string; currentPage: number; lastReadAt: string }>;
+  onConfirmBook: (startPage: number, startOff?: number) => void;
+  progress?: Array<{ bookId: string; currentPage: number; currentOff?: number; lastReadAt: string }>;
   onCancel?: () => void;
   /** Perry's mirrored view. Rick: "Perry's screen mirrored the library
    *  view (read-only) while Nana scrolls through books. Perry should
@@ -4455,12 +4588,12 @@ function LibraryView({
           const chapterInfo = getChapterForPage(b, top.currentPage);
           const chapterLabel = chapterInfo
             ? `Chapter ${chapterInfo.chapterIndex + 1} of ${b.chapters!.length}`
-            : `Page ${top.currentPage} of ${b.pages.length}`;
+            : bookPlaceLabel(b, top.currentPage);
           return (
             <button
               onClick={() => {
                 onSelectBook(b.id);
-                onConfirmBook(top.currentPage);
+                onConfirmBook(top.currentPage, top.currentOff ?? 0);
               }}
               aria-label={`Continue reading ${b.title}, ${chapterLabel}`}
               style={{
@@ -4613,7 +4746,7 @@ function LibraryView({
             ? "Finished"
             : cardChapterInfo
               ? `Chapter ${cardChapterInfo.chapterIndex + 1} of ${book.chapters!.length}`
-              : `Page ${cardPage} of ${cardTotal}`;
+              : isPaginatedBook(book) ? bookPlaceLabel(book, cardPage) : `Page ${cardPage} of ${cardTotal}`;
           return (
             <button
               key={book.id}
@@ -4879,7 +5012,7 @@ function LibraryView({
               </div>
             )}
             <button
-              onClick={() => onConfirmBook(hasProgress ? savedPage : 1)}
+              onClick={() => (hasProgress ? onConfirmBook(savedPage, saved?.currentOff ?? 0) : onConfirmBook(1))}
               style={{
                 // Hero-tier CTA — Rick (recurring): "the Continue
                 // Reading button is a bit small, could use some
@@ -4903,7 +5036,9 @@ function LibraryView({
               }}
             >
               {hasProgress
-                ? `Continue reading · ${chapterRef}, page ${savedPage} of ${pagesTotal} →`
+                ? (isPaginatedBook(book)
+                  ? `Continue reading · ${chapterRef} →`
+                  : `Continue reading · ${chapterRef}, page ${savedPage} of ${pagesTotal} →`)
                 : "Start Reading →"}
             </button>
             {hasProgress && (
@@ -4977,7 +5112,7 @@ function OnboardingView({
   onPerryCodeSubmit: (code: string) => void;
   onChildProfileConfirm: (name: string, birthday: string | null, pin: string) => void;
   onBeginSession: () => void;
-  onBeginWithBook?: (bookId: string, startPage: number) => void;
+  onBeginWithBook?: (bookId: string, startPage: number, startOff?: number) => void;
   onSkip: () => void;
   onBack?: () => void;
   perryPinMode?: boolean;
@@ -4991,7 +5126,7 @@ function OnboardingView({
   onAddSibling?: () => void;
   dashboardLoading?: boolean;
   dashboardPerryName?: string;
-  dashboardProgress?: Array<{ bookId: string; currentPage: number; lastReadAt: string }>;
+  dashboardProgress?: Array<{ bookId: string; currentPage: number; currentOff?: number; lastReadAt: string }>;
   /** Explicit escape hatch from any unauthenticated onboarding screen
    *  back to the splash. Rick: "Trapped on Nana login screen with no
    *  way out." The tiny `⇄ switch` header pill was too easy to miss. */
@@ -5003,7 +5138,7 @@ function OnboardingView({
   pinScreenExpectedChild?: Child | null;
 }) {
   const [authMode, setAuthMode] = useState<"register" | "login">("register");
-  const [dashSelectedBook, setDashSelectedBook] = useState<{ bookId: string; startPage: number } | null>(null);
+  const [dashSelectedBook, setDashSelectedBook] = useState<{ bookId: string; startPage: number; startOff?: number } | null>(null);
   const [displayName, setDisplayName] = useState(nanaDisplayName);
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -5673,7 +5808,7 @@ function OnboardingView({
                   return (
                     <div
                       key={p.bookId}
-                      onClick={() => setDashSelectedBook(isSelected ? null : { bookId: p.bookId, startPage })}
+                      onClick={() => setDashSelectedBook(isSelected ? null : { bookId: p.bookId, startPage, startOff: p.currentOff ?? 0 })}
                       style={{
                         backgroundColor: isSelected ? "rgba(201,146,42,0.10)" : "rgba(247,240,227,0.04)",
                         border: isSelected ? `1px solid ${AMBER}` : "1px solid rgba(247,240,227,0.08)",
@@ -5688,7 +5823,7 @@ function OnboardingView({
                           <div style={{ color: "rgba(247,240,227,0.35)", fontFamily: "DM Sans, sans-serif", fontSize: "11px" }}>
                             {isFinished
                               ? `Finished · ${formatDate(p.lastReadAt)}`
-                              : `Page ${p.currentPage} of ${pagesTotal} · ${formatDate(p.lastReadAt)}`}
+                              : `${bookPlaceLabel(book, p.currentPage)} · ${formatDate(p.lastReadAt)}`}
                           </div>
                         </div>
                         {isFinished
@@ -5722,10 +5857,10 @@ function OnboardingView({
             const chapRef = fullChap.split(" · ")[0];
             return (
               <button
-                onClick={() => onBeginWithBook?.(dashSelectedBook.bookId, dashSelectedBook.startPage)}
+                onClick={() => onBeginWithBook?.(dashSelectedBook.bookId, dashSelectedBook.startPage, dashSelectedBook.startOff ?? 0)}
                 style={{ ...primaryBtn, marginTop: "auto", fontSize: "11px" }}
               >
-                Continue {db?.title ?? "reading"} · {chapRef}, page {dashSelectedBook.startPage} →
+                Continue {db?.title ?? "reading"} · {chapRef}{db && isPaginatedBook(db) ? "" : `, page ${dashSelectedBook.startPage}`} →
               </button>
             );
           })() : (
@@ -8927,6 +9062,8 @@ function GoodbyeView({
   onGoHome,
   onBackToSillyFaces,
   onChildHangUp,
+  hangUpAllowed = false,
+  onAllowHangUp,
 }: {
   isNana: boolean;
   goodbyePhase: number;
@@ -8957,6 +9094,11 @@ function GoodbyeView({
   /** Child only (Master Plan §11): runs after the hang-up celebration.
    *  Tells Nana's iPad and leaves the call. */
   onChildHangUp?: () => void;
+  /** Nana has let the child hang up; until then the child's red button
+   *  stays hidden (Rick's Build 36 #9). */
+  hangUpAllowed?: boolean;
+  /** Nana only: lets the child hang up. */
+  onAllowHangUp?: () => void;
 }) {
   // Child's "Bye Nana! Tap to Hang Up!" → short celebration → hang up.
   const [celebrating, setCelebrating] = useState(false);
@@ -9206,16 +9348,21 @@ function GoodbyeView({
             <div style={{ color: "rgba(255,255,255,0.75)", fontFamily: "Playfair Display, serif", fontSize: 15, fontStyle: "italic", textShadow: "0 1px 8px rgba(0,0,0,0.95)", marginTop: "10px", lineHeight: 1.5 }}>
               Reading is the vehicle.<br/>The relationship is the destination.
             </div>
-            {isNana && (
+            {isNana && hangUpAllowed && (
               <div style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 17, fontWeight: 700, textShadow: "0 1px 8px rgba(0,0,0,0.95)", marginTop: 14 }}>
                 {childLabel} can tap to hang up 👋
+              </div>
+            )}
+            {!isNana && !hangUpAllowed && (
+              <div data-testid="child-hangup-waiting" style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 18, fontWeight: 700, textShadow: "0 1px 8px rgba(0,0,0,0.95)", marginTop: 14 }}>
+                Wave bye to {nanaLabel}! 👋
               </div>
             )}
           </div>
         )}
 
         {/* === Child's hang-up target (Master Plan §11) === */}
-        {isGoodbye && !isNana && onChildHangUp && !celebrating && (
+        {isGoodbye && hangUpAllowed && !isNana && onChildHangUp && !celebrating && (
           <button
             data-testid="child-hangup"
             onClick={() => setCelebrating(true)}
@@ -9302,6 +9449,26 @@ function GoodbyeView({
             </button>
           ) : (
             <div style={{ display: "inline-flex", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
+              {onAllowHangUp && !hangUpAllowed && (
+                <button
+                  data-testid="allow-child-hangup"
+                  onClick={onAllowHangUp}
+                  style={{
+                    background: "linear-gradient(135deg, #fb7185 0%, #f43f5e 50%, #e11d48 100%)",
+                    color: "#fff", border: "none", borderRadius: 999,
+                    padding: "14px 24px",
+                    fontFamily: "DM Sans, sans-serif", fontSize: "clamp(16px, 1.9vw, 19px)", fontWeight: 800,
+                    cursor: "pointer",
+                    boxShadow: "0 6px 22px rgba(244,63,94,0.45)",
+                    display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 10,
+                    minHeight: 56, minWidth: 230,
+                    touchAction: "manipulation",
+                  }}
+                >
+                  <span style={{ fontSize: 20 }}>👋</span>
+                  Let {childLabel} hang up
+                </button>
+              )}
               {FEATURES.familyJournal && (
               <button
                 onClick={onEndSession}
@@ -9629,6 +9796,7 @@ function SillyFacesView({
                 sublabel="Again"
                 tone="purple"
                 size="sm"
+                bigText
                 onClick={onStartChallenge}
               />
               <TileButton
@@ -9637,6 +9805,7 @@ function SillyFacesView({
                 sublabel="Faces"
                 tone="ghost"
                 size="sm"
+                bigText
                 onClick={onEndChallenge}
               />
               <TileButton
@@ -9645,6 +9814,7 @@ function SillyFacesView({
                 sublabel="Countdown"
                 tone="primary"
                 size="sm"
+                bigText
                 onClick={onStartGoodbye}
               />
             </TileGrid>
@@ -9932,15 +10102,15 @@ function SillyFacesView({
               border: "1px solid rgba(34,197,94,0.55)",
               borderRadius: 999,
               padding: "10px 12px",
-              fontSize: 12,
-              fontFamily: "DM Sans, sans-serif", fontWeight: 700,
+              fontSize: "clamp(15px, 1.9vw, 19px)",
+              fontFamily: "DM Sans, sans-serif", fontWeight: 800,
               cursor: "pointer", letterSpacing: "0.02em",
               display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
               touchAction: "manipulation",
               boxShadow: "0 4px 14px rgba(34,197,94,0.18)",
             }}
           >
-            <span style={{ fontSize: 14 }}>📅</span>
+            <span style={{ fontSize: 20 }}>📅</span>
             Schedule
           </button>
           <button
@@ -9953,7 +10123,7 @@ function SillyFacesView({
               border: "1px solid rgba(192,132,252,0.65)",
               borderRadius: 999,
               padding: "10px 14px",
-              fontSize: 13,
+              fontSize: "clamp(16px, 2vw, 20px)",
               fontFamily: "DM Sans, sans-serif", fontWeight: 800,
               cursor: "pointer", letterSpacing: "0.02em",
               display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
@@ -9961,7 +10131,7 @@ function SillyFacesView({
               boxShadow: "0 4px 14px rgba(167,139,250,0.22)",
             }}
           >
-            <span style={{ fontSize: 14 }}>👋</span>
+            <span style={{ fontSize: 20 }}>👋</span>
             Goodbye →
           </button>
         </div>
@@ -10907,6 +11077,8 @@ function DeviceFrame({
   onStartChat,
   onStartReading,
   onGreetingReady,
+  greetingContinueTitle = null,
+  onGreetingPickDifferent,
   onGreetingShowPrompts,
   onNextPrompt,
   onNextChildPrompt,
@@ -10924,6 +11096,8 @@ function DeviceFrame({
   onEndSession,
   onHangUp,
   onChildHangUp,
+  goodbyeHangupAllowed = false,
+  onAllowChildHangUp,
   showConsentOverlay,
   recordingOn,
   onToggleRecording,
@@ -11092,6 +11266,9 @@ function DeviceFrame({
   /** Greeting → Icebreaker handoff. Fires when Nana taps "We're ready"
    *  or the auto-advance countdown completes. Nana side only. */
   onGreetingReady?: () => void;
+  /** A bookmark is queued for this visit: its title, and the way out. */
+  greetingContinueTitle?: string | null;
+  onGreetingPickDifferent?: () => void;
   /** Greeting → IcebreakerView handoff. Optional secondary action so
    *  Nana can access conversation prompts on demand without it being
    *  forced on every session. */
@@ -11115,6 +11292,9 @@ function DeviceFrame({
   onHangUp?: () => void;
   /** Child's iPad: "Bye Nana! Tap to Hang Up!" at the end of Goodbye. */
   onChildHangUp?: () => void;
+  /** Goodbye: Nana has let the child hang up; and her way to do it. */
+  goodbyeHangupAllowed?: boolean;
+  onAllowChildHangUp?: () => void;
   showConsentOverlay: boolean;
   recordingOn: boolean;
   onToggleRecording: () => void;
@@ -11135,7 +11315,7 @@ function DeviceFrame({
   partnerRequestedReschedule?: "nana" | "perry" | null;
   selectedBookId: string;
   onSelectBook: (id: string) => void;
-  onConfirmBook: (startPage: number) => void;
+  onConfirmBook: (startPage: number, startOff?: number) => void;
   bookPages: BookPage[];
   onOpenVault: () => void;
   onCloseVault: () => void;
@@ -11183,7 +11363,7 @@ function DeviceFrame({
   onPerryCodeSubmit: (code: string) => void;
   onChildProfileConfirm: (name: string, birthday: string | null, pin: string) => void;
   onBeginSession: () => void;
-  onBeginWithBook?: (bookId: string, startPage: number) => void;
+  onBeginWithBook?: (bookId: string, startPage: number, startOff?: number) => void;
   onSkipOnboarding: () => void;
   onOnboardingBack?: () => void;
   phaseIntro: Mode | null;
@@ -11203,7 +11383,7 @@ function DeviceFrame({
   onToggleChildIcebreakerPrompts?: () => void;
   dashboardLoading?: boolean;
   dashboardPerryName?: string;
-  dashboardProgress?: Array<{ bookId: string; currentPage: number; lastReadAt: string }>;
+  dashboardProgress?: Array<{ bookId: string; currentPage: number; currentOff?: number; lastReadAt: string }>;
   vaultConnectionId?: string;
   onSwipePrev?: () => void;
   onSwipeNext?: () => void;
@@ -11274,7 +11454,7 @@ function DeviceFrame({
    *  server-side, and returns the device to the splash screen. */
   onSignOut?: () => void;
   /** Where this iPad is in the book (the nav pill and Chapters & Pages). */
-  readingPos?: { pageNum: number; pageTotal: number; atStart: boolean; atEnd: boolean; chapterLabel: string | null } | null;
+  readingPos?: { pageNum: number; pageTotal: number; estimating?: boolean; atStart: boolean; atEnd: boolean; chapterLabel: string | null } | null;
   /** Nana's phonics card is up: the reading pointer steps aside. */
   phonicsCardOpen?: boolean;
   /** Home (Build 38): who is on the child's iPad, the next saved visit,
@@ -11419,7 +11599,7 @@ function DeviceFrame({
       const pageTotal = readingPos?.pageTotal ?? bookPages.length;
       const sub = chapterEntries.length > 1 && currentChapterIdx >= 0
         ? `Ch ${currentChapterIdx + 1} · p ${pageNum}`
-        : `Page ${pageNum} of ${pageTotal}`;
+        : readingPos?.estimating ? `Page ${pageNum}` : `Page ${pageNum} of ${pageTotal}`;
       es.push({
         key: "chapters", label: "Chapters & Pages", sublabel: sub,
         icon: <ListOrdered size={18} strokeWidth={2} aria-hidden />,
@@ -11823,6 +12003,8 @@ function DeviceFrame({
             onGoHome={isNana ? onGoHome : undefined}
             onPerryPickBook={!isNana ? onPerryPickBook : undefined}
             onPerryAskNana={!isNana ? onPerryAskNana : undefined}
+            continueTitle={isNana ? greetingContinueTitle : null}
+            onPickDifferent={isNana ? onGreetingPickDifferent : undefined}
           />
         ) : isIcebreaker ? (
           <IcebreakerView
@@ -11932,6 +12114,8 @@ function DeviceFrame({
             onGoHome={isNana ? onGoHome : undefined}
             onBackToSillyFaces={isNana ? onStartSillyFaces : undefined}
             onChildHangUp={!isNana ? onChildHangUp : undefined}
+            hangUpAllowed={goodbyeHangupAllowed}
+            onAllowHangUp={isNana ? onAllowChildHangUp : undefined}
           />
         ) : isChatMode ? (
           <ChatModeView
@@ -12178,7 +12362,7 @@ function FullPageReading({
   onLetsTalk?: () => void;
   /** Nana starts Show & Tell; the child sends a request. */
   onShowAndTell?: () => void;
-  readingPos: { pageNum: number; pageTotal: number; atStart: boolean; atEnd: boolean } | null;
+  readingPos: { pageNum: number; pageTotal: number; estimating?: boolean; atStart: boolean; atEnd: boolean } | null;
   onPrev?: () => void;
   onNext?: () => void;
 }) {
@@ -12251,7 +12435,7 @@ function FullPageReading({
             }}>
               <button type="button" className="nm-fp-nav" onClick={onPrev} disabled={pos.atStart} aria-label="Previous page" style={navBtnStyle(pos.atStart)}>←</button>
               <span data-testid="page-pill-label" style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 19, fontWeight: 800, padding: "0 10px", minWidth: 84, textAlign: "center", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
-                {pos.pageNum} <span style={{ opacity: 0.55, fontWeight: 700 }}>/ {pos.pageTotal}</span>
+                {pos.pageNum} <span style={{ opacity: 0.55, fontWeight: 700 }}>/ {pos.estimating ? "…" : pos.pageTotal}</span>
               </span>
               <button type="button" className="nm-fp-nav" onClick={onNext} disabled={pos.atEnd} aria-label="Next page" style={navBtnStyle(pos.atEnd)}>→</button>
             </div>
@@ -12282,7 +12466,10 @@ function FullPageReading({
             borderRadius={16}
           />
         </div>
-        {onShowAndTell && (
+        {/* Nana only: the child asks from the Menu, and their videos take
+            the room (Rick's Build 36 notes: bigger video on the child's
+            iPad). */}
+        {onShowAndTell && isNana && (
           <button
             type="button"
             data-testid="show-and-tell-btn"
@@ -14782,11 +14969,25 @@ export default function App() {
       }
     };
     setVh();
-    const onVisibility = () => { if (document.visibilityState === "visible") setVh(); };
+    // Back from another app, WKWebView can keep the width it had in the
+    // other orientation (Rick's Build 36 #10: the app filled half the
+    // screen until he rotated). Re-applying the viewport tag makes it
+    // measure the screen again.
+    const refit = () => {
+      const meta = document.querySelector('meta[name="viewport"]');
+      const content = meta?.getAttribute("content");
+      if (meta && content) {
+        meta.setAttribute("content", `${content}, shrink-to-fit=no`);
+        requestAnimationFrame(() => meta.setAttribute("content", content));
+      }
+      window.scrollTo(0, 0);
+      setVh();
+    };
+    const onVisibility = () => { if (document.visibilityState === "visible") refit(); };
     window.addEventListener("resize", setVh);
     window.addEventListener("orientationchange", setVh);
-    window.addEventListener("focus", setVh);
-    window.addEventListener("pageshow", setVh);
+    window.addEventListener("focus", refit);
+    window.addEventListener("pageshow", refit);
     document.addEventListener("visibilitychange", onVisibility);
     const vv = window.visualViewport;
     vv?.addEventListener("resize", setVh);
@@ -14799,8 +15000,8 @@ export default function App() {
     return () => {
       window.removeEventListener("resize", setVh);
       window.removeEventListener("orientationchange", setVh);
-      window.removeEventListener("focus", setVh);
-      window.removeEventListener("pageshow", setVh);
+      window.removeEventListener("focus", refit);
+      window.removeEventListener("pageshow", refit);
       document.removeEventListener("visibilitychange", onVisibility);
       vv?.removeEventListener("resize", setVh);
       window.clearInterval(heartbeat);
@@ -15233,7 +15434,10 @@ export default function App() {
         // Goodbye — Perry computes phase locally from startTime so even if
         // every single goodbye_phase event is buffered, the countdown still
         // ticks accurately on her side.
-        if (state.goodbyeStartTime != null && isPerry) {
+        if (isPerry && state.mode === "goodbye") {
+          setGoodbyeHangupAllowed(!!state.goodbyeHangupAllowed);
+        }
+        if (state.goodbyeStartTime != null && isPerry && state.mode === "goodbye") {
           // goodbyeStartTime is stored in SERVER clock — convert to
           // local via the EMA offset before scheduling. Without this
           // conversion, polling-fallback recovery would re-introduce
@@ -15830,6 +16034,7 @@ export default function App() {
           if (msg.payload.mode === "goodbye") {
             setGoodbyePhase(0);
             setGoodbyeStartTime(null);
+            setGoodbyeHangupAllowed(false);
           }
           // Apply subMode for familystories so Perry doesn't see a stale
           // "Nana is writing a memory" panel when Nana actually opened
@@ -16129,7 +16334,11 @@ export default function App() {
           const localStart = typeof startAt === "number" ? serverToLocal(startAt) : Date.now();
           setGoodbyeStartTime((prev) => (prev !== null ? prev : localStart));
           setGoodbyePhase(0);
+          setGoodbyeHangupAllowed(false);
           setMode("goodbye");
+        } else if (msg.type === "goodbye_allow_hangup") {
+          // Nana said the child may hang up: the red button appears.
+          setGoodbyeHangupAllowed(true);
         } else if (msg.type === "goodbye_phase") {
           // Monotonic guard — see polling handler above. Phase 0
           // (explicit reset) and 7 (terminal skip) both go through; the
@@ -16202,6 +16411,7 @@ export default function App() {
           if (msg.payload.mode === "goodbye") {
             setGoodbyePhase(0);
             setGoodbyeStartTime(null);
+            setGoodbyeHangupAllowed(false);
           }
           setMode(msg.payload.mode as Mode);
         } else if (msg.type === "pointer_highlight") {
@@ -16387,7 +16597,7 @@ export default function App() {
           // serverTs is stamped after the server records lastChildHangup,
           // so the poll backstop won't fire a second time.
           lastAppliedChildHangupTsRef.current = msg.serverTs ?? Date.now() + serverOffsetMsRef.current;
-          endVisitRef.current?.("childhangup");
+          if (modeRef.current === "goodbye") endVisitRef.current?.("childhangup");
         } else if (msg.type === "active_child_change") {
           const nextId = msg.payload?.childId as string | undefined;
           if (nextId) {
@@ -16408,7 +16618,11 @@ export default function App() {
           const localStart = typeof startAt === "number" ? serverToLocal(startAt) : Date.now();
           setGoodbyeStartTime((prev) => (prev !== null ? prev : localStart));
           setGoodbyePhase(0);
+          setGoodbyeHangupAllowed(false);
           setMode("goodbye");
+        } else if (msg.type === "goodbye_allow_hangup") {
+          // Nana said the child may hang up: the red button appears.
+          setGoodbyeHangupAllowed(true);
         } else if (msg.type === "goodbye_phase") {
           // Mirror the Perry-side handler — both iPads guard against
           // backward writes from late-arriving SSE events.
@@ -16818,9 +17032,12 @@ export default function App() {
       // First-load: filter the unscoped progress by the resolved child
       // so the dashboard doesn't briefly flash with rows belonging to
       // other siblings while the scoped re-fetch below is in flight.
+      // One row per book: the child's own row wins over a legacy one
+      // with no child (Rick's Build 36 #11, books listed twice).
       setDashboardProgress(
         next
-          ? progressRes.progress.filter((p) => p.childId === next.id || p.childId == null)
+          ? progressRes.progress.filter((p) => p.childId === next.id
+              || (p.childId == null && !progressRes.progress.some(q => q.childId === next.id && q.bookId === p.bookId)))
           : progressRes.progress,
       );
     }).catch(() => {}).finally(() => setDashboardLoading(false));
@@ -16881,6 +17098,15 @@ export default function App() {
       setMode("home");
     }
   };
+  // Once a visit is under way, load Silly Faces' face tracking in a quiet
+  // moment on both iPads, so it responds the moment it opens (Rick's
+  // Build 36 #8). Loading once per app run.
+  useEffect(() => {
+    if (mode === "onboarding" || mode === "home" || !connectionId) return;
+    if (deviceView === "perry" && !perryAuthenticated) return;
+    FaceTracker.preload();
+  }, [mode, connectionId, deviceView, perryAuthenticated]);
+
   // Fire the actual reading-session start — published `session_started`
   // is what tells Perry's iPad to transition from her "Waiting for
   // Nana" screen into the icebreaker. This is now triggered by the
@@ -16934,8 +17160,8 @@ export default function App() {
   const handleGreetingShowPrompts = () => {
     setMode("icebreaker");
   };
-  const handleBeginWithBook = (bookId: string, startPage: number) => {
-    setPreSelectedBook({ bookId, startPage });
+  const handleBeginWithBook = (bookId: string, startPage: number, startOff = 0) => {
+    setPreSelectedBook({ bookId, startPage, startOff });
     handleStartReadingSession();
   };
   // Rick's Build 33: tapping Cooper after a session goes straight into
@@ -16944,20 +17170,23 @@ export default function App() {
   // shows "It's Cooper's turn" on the PIN screen, then joins.
   const handleReadWithChild = async (childId: string) => {
     if (childId !== activeChildId) handleSelectChild(childId);
-    let resume: { bookId: string; page: number } | null = null;
+    let resume: { bookId: string; page: number; off: number } | null = null;
     if (connectionId) {
       try {
+        // Same rows as Home's "Continue …" label: the server already
+        // scopes bookmarks saved before siblings existed to the first
+        // child (Rick's Build 36 #5: Cooper and Perry started differently).
         const { progress } = await api.progress.all(connectionId, childId);
         const latest = progress
-          .filter(r => r.childId === childId && booksLibrary[r.bookId]
+          .filter(r => (r.childId === childId || r.childId == null) && booksLibrary[r.bookId]
             && r.currentPage > 1 && r.currentPage < booksLibrary[r.bookId].pages.length)
           .sort((a, b) => Date.parse(b.lastReadAt) - Date.parse(a.lastReadAt))[0];
-        if (latest) resume = { bookId: latest.bookId, page: latest.currentPage };
+        if (latest) resume = { bookId: latest.bookId, page: latest.currentPage, off: latest.currentOff ?? 0 };
       } catch {}
     }
     setPostEndCall(false);
     setChapterEndOverlay(null);
-    if (resume) handleBeginWithBook(resume.bookId, resume.page);
+    if (resume) handleBeginWithBook(resume.bookId, resume.page, resume.off);
     else handleStartReadingSession();
   };
   const handleSkipOnboarding = () => setMode("home");
@@ -17071,7 +17300,7 @@ export default function App() {
     ? (booksLibrary[selectedBookId] ?? Object.values(booksLibrary)[0])
     : Object.values(booksLibrary)[0];
   const sessionStartPageRef = useRef(1);
-  const [preSelectedBook, setPreSelectedBook] = useState<{ bookId: string; startPage: number } | null>(null);
+  const [preSelectedBook, setPreSelectedBook] = useState<{ bookId: string; startPage: number; startOff?: number } | null>(null);
 
   // Library scroll sync — bidirectional, with per-client origin ID for
   // robust echo detection. Rick's Build 27 asked for scroll to travel
@@ -17503,24 +17732,44 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, [localProfiles, connectionId]);
 
-  const planIsChapterBook = isChapterBook(currentBook);
+  const planIsChapterBook = isPaginatedBook(currentBook);
 
   // The box both iPads draw the book in (Rick's Pagination Spec): the
   // smaller of the two book areas. The larger iPad scales it up, so both
   // show the same words on full pages.
+  // Remembered per family on Nana's iPad, with the child's book area, so
+  // a book keeps one page count per text size and layout from visit to
+  // visit, even before the child's iPad reports in (Rick's Build 36 #1).
   const [planStage, setPlanStage] = useState<StageSize | null>(null);
+  const stageKey = connectionId ? `nm_stage:${connectionId}` : null;
+  useEffect(() => {
+    if (!isPagePlanner || !stageKey) return;
+    try {
+      const v = JSON.parse(localStorage.getItem(stageKey) ?? "null") as { stage?: StageSize } | null;
+      if (v?.stage && v.stage.w > 80 && v.stage.h > 80) setPlanStage(cur => cur ?? v.stage!);
+    } catch {}
+  }, [isPagePlanner, stageKey]);
   useEffect(() => {
     if (!isPagePlanner) return;
     const areas: StageSize[] = [];
     const n = localProfiles.nana;
     if (n) areas.push({ w: n.areaW, h: n.areaH });
-    const c = localProfiles.perry ?? remoteProfiles.perry;
-    if (c) areas.push({ w: c.areaW, h: c.areaH });
+    let c: StageSize | null = null;
+    const cp = localProfiles.perry ?? remoteProfiles.perry;
+    if (cp) c = { w: cp.areaW, h: cp.areaH };
+    else if (stageKey) {
+      try { c = (JSON.parse(localStorage.getItem(stageKey) ?? "null") as { child?: StageSize } | null)?.child ?? null; } catch {}
+    }
+    if (c) areas.push(c);
     setPlanStage(cur => {
       const next = chooseStage(areas, cur);
-      return next && cur && next.w === cur.w && next.h === cur.h ? cur : next;
+      const same = next && cur && next.w === cur.w && next.h === cur.h;
+      if (next && stageKey) {
+        try { localStorage.setItem(stageKey, JSON.stringify({ stage: next, ...(c ? { child: c } : {}) })); } catch {}
+      }
+      return same ? cur : next;
     });
-  }, [isPagePlanner, localProfiles, remoteProfiles]);
+  }, [isPagePlanner, localProfiles, remoteProfiles, stageKey]);
 
   // Nana's own measured box plans for both iPads: at the shared stage the
   // child's iPad lays the book out identically. Any measurement will do:
@@ -18440,13 +18689,20 @@ export default function App() {
     if (preSelectedBook) {
       setSelectedBookId(preSelectedBook.bookId);
       sessionStartPageRef.current = preSelectedBook.startPage;
-      setNanaPage(preSelectedBook.startPage);
-      setChildPage(preSelectedBook.startPage);
+      const off = preSelectedBook.startOff ?? 0;
+      nanaPageRef.current = preSelectedBook.startPage;
+      setNanaPage(preSelectedBook.startPage, off);
+      setChildPage(preSelectedBook.startPage, off);
       setPreSelectedBook(null);
       setMode("reading");
     } else {
       setMode("library");
     }
+  };
+  /** Greeting's "Pick a different book": drop the queued bookmark. */
+  const handlePickDifferentBook = () => {
+    setPreSelectedBook(null);
+    handleOpenLibrary();
   };
   const handleSelectBook = (id: string) => {
     setSelectedBookId(id);
@@ -18475,13 +18731,18 @@ export default function App() {
       .catch(() => {});
   };
   const handleOpenLibrary = () => {
+    // A book picked in the library replaces any queued bookmark, so it
+    // can't take over a later "Pick a Book".
+    setPreSelectedBook(null);
     refreshProgress();
     setMode("library");
   };
-  const handleConfirmBook = async (startPage: number = 1) => {
+  const handleConfirmBook = async (startPage: number = 1, startOff = 0) => {
+    setPreSelectedBook(null);
     sessionStartPageRef.current = startPage;
-    setNanaPage(startPage);
-    setChildPage(startPage);
+    nanaPageRef.current = startPage;
+    setNanaPage(startPage, startOff);
+    setChildPage(startPage, startOff);
     // Shared "Beginning your reading time…" beat on both iPads. Fires
     // locally on Nana's side BEFORE the publishes go out so the overlay
     // appears at the moment she taps Start, not after a network round
@@ -18510,8 +18771,8 @@ export default function App() {
         try { await api.sessions.publishEvent(connectionId, "session_started", {}); } catch {}
         api.sessions.publishEvent(connectionId, "font_change", { scale: nanaFontScaleRef.current }).catch(() => {});
       }
-      api.sessions.publishEvent(connectionId, "book_change", { bookId: selectedBookId, page: startPage }).catch(() => {});
-      api.sessions.publishEvent(connectionId, "phase_change", { mode: "reading", bookId: selectedBookId, page: startPage }).catch(() => {});
+      api.sessions.publishEvent(connectionId, "book_change", { bookId: selectedBookId, page: startPage, off: startOff }).catch(() => {});
+      api.sessions.publishEvent(connectionId, "phase_change", { mode: "reading", bookId: selectedBookId, page: startPage, off: startOff }).catch(() => {});
     }
     setMode("reading");
   };
@@ -18683,6 +18944,8 @@ export default function App() {
 
   // Nana drives the countdown locally and publishes each phase change to Perry via SSE.
   const [goodbyeStartTime, setGoodbyeStartTime] = useState<number | null>(null);
+  // The child's red hang-up button waits for Nana (Rick's Build 36 #9).
+  const [goodbyeHangupAllowed, setGoodbyeHangupAllowed] = useState(false);
 
   useEffect(() => {
     if (mode !== "goodbye" || goodbyeStartTime === null) return;
@@ -18755,6 +19018,7 @@ export default function App() {
   const handleStartGoodbye = () => {
     setGoodbyeStartTime(null);
     setGoodbyePhase(0);
+    setGoodbyeHangupAllowed(false);
     setMode("goodbye");
     // The mode-change effect will publish a phase_change(mode:"goodbye")
     // SSE event so Perry's screen also lands in the Ready stage. We do
@@ -18784,10 +19048,17 @@ export default function App() {
     const localStart = Date.now() + 1200;
     setGoodbyeStartTime(localStart);
     setGoodbyePhase(0);
+    setGoodbyeHangupAllowed(false);
     if (connectionId) {
       const startAt = Math.round(localStart + serverOffsetMsRef.current);
       api.sessions.publishEvent(connectionId, "goodbye_start", { delayMs: 1200, startAt }).catch(() => {});
     }
+  };
+  /** Nana lets the child hang up (Rick's Build 36 #9: the child's red
+   *  button waits for her, so a call can't end early). */
+  const handleAllowChildHangUp = () => {
+    setGoodbyeHangupAllowed(true);
+    if (connectionId) api.sessions.publishEvent(connectionId, "goodbye_allow_hangup", {}).catch(() => {});
   };
   const handleSkipToGoodbye  = () => {
     setGoodbyeStartTime(null);
@@ -18804,7 +19075,7 @@ export default function App() {
   // map gets refreshed on the server side. Side effect: a session record
   // is appended to the log on each call. That's acceptable for v1; if it
   // gets noisy we can split into a progress-only endpoint later.
-  const lastBookmarkRef = useRef<{ bookId: string; page: number; ts: number } | null>(null);
+  const lastBookmarkRef = useRef<{ bookId: string; page: number; off: number; ts: number } | null>(null);
   const saveProgressBookmark = () => {
     if (!connectionId) return;
     if (!selectedBookId) return;
@@ -18814,13 +19085,15 @@ export default function App() {
     // De-dupe: skip if we just saved the same (book, page) within 30s
     // (rapid mode changes, double-fired visibilitychange events on iOS).
     const last = lastBookmarkRef.current;
-    if (last && last.bookId === selectedBookId && last.page === pg && Date.now() - last.ts < 30_000) return;
-    lastBookmarkRef.current = { bookId: selectedBookId, page: pg, ts: Date.now() };
+    const off = nanaOffRef.current;
+    if (last && last.bookId === selectedBookId && last.page === pg && last.off === off && Date.now() - last.ts < 30_000) return;
+    lastBookmarkRef.current = { bookId: selectedBookId, page: pg, off, ts: Date.now() };
     const chapterIdx = getChapterForPage(currentBook, pg)?.chapterIndex;
     api.sessionLog.save(connectionId, {
       bookId: selectedBookId,
       startPage: sessionStartPageRef.current,
       endPage: pg,
+      endOff: off,
       ...(chapterIdx != null ? { chapterIndex: chapterIdx } : {}),
       ...(activeChildId ? { childId: activeChildId } : {}),
     }).then(() => {
@@ -18887,6 +19160,7 @@ export default function App() {
         bookId: selectedBookId,
         startPage: sessionStartPageRef.current,
         endPage: nanaPage,
+        endOff: nanaOffRef.current,
         ...(chapterIdx != null ? { chapterIndex: chapterIdx } : {}),
         ...(activeChildId ? { childId: activeChildId } : {}),
       }).catch(() => {});
@@ -19782,6 +20056,8 @@ export default function App() {
           onStartChat={handleStartChat}
           onStartReading={handleStartReading}
           onGreetingReady={handleGreetingReady}
+          greetingContinueTitle={preSelectedBook ? (booksLibrary[preSelectedBook.bookId]?.title ?? null) : null}
+          onGreetingPickDifferent={handlePickDifferentBook}
           onGreetingShowPrompts={handleGreetingShowPrompts}
           onNextPrompt={handleNextPrompt}
           onNextChildPrompt={handleNextChildPrompt}
@@ -19798,6 +20074,7 @@ export default function App() {
           onSkipToGoodbye={handleSkipToGoodbye}
           onEndSession={handleEndSession}
           onHangUp={handleHangUp}
+          onAllowChildHangUp={handleAllowChildHangUp}
           showConsentOverlay={!nanaConsentSeen}
           recordingOn={nanaRecordingOn}
           onToggleRecording={() => setNanaRecordingOn(v => !v)}
@@ -19966,6 +20243,8 @@ export default function App() {
           onStartChat={handleStartChat}
           onStartReading={handleStartReading}
           onGreetingReady={handleGreetingReady}
+          greetingContinueTitle={preSelectedBook ? (booksLibrary[preSelectedBook.bookId]?.title ?? null) : null}
+          onGreetingPickDifferent={handlePickDifferentBook}
           onGreetingShowPrompts={handleGreetingShowPrompts}
           onNextPrompt={handleNextPrompt}
           onNextChildPrompt={handleNextChildPrompt}
@@ -19985,7 +20264,9 @@ export default function App() {
           onSkipToGoodbye={handleSkipToGoodbye}
           onEndSession={handleEndSession}
           onHangUp={handleHangUp}
+          onAllowChildHangUp={handleAllowChildHangUp}
           onChildHangUp={handleChildHangUp}
+          goodbyeHangupAllowed={goodbyeHangupAllowed}
           showConsentOverlay={!childConsentSeen}
           recordingOn={childRecordingOn}
           onToggleRecording={() => setChildRecordingOn(v => !v)}

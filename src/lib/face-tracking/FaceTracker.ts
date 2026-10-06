@@ -17,15 +17,13 @@ const CHEEK_L = 454;
 const EYE_R = 33;
 const EYE_L = 263;
 
-const MODEL_URL =
-  "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
-const WASM_BASE = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm";
-
-// 10s — model + WASM bundle can be slow to download first time on a
-// flaky/cellular iPad. 5s was too aggressive: a transient first-load
-// blip permanently disabled face tracking for the whole session
-// (Rick: mask filters showed nothing on Perry's side).
-const INIT_TIMEOUT_MS = 10000;
+// Bundled with the app (scripts/copy-mediapipe.mjs copies the WebAssembly
+// at the exact library version; the model is committed): nothing to
+// download from a CDN, which made Silly Faces take 8 to 10 seconds to
+// respond (Rick's Build 36 #8).
+const ASSET_BASE = `${(import.meta.env.BASE_URL || "/").replace(/\/?$/, "/")}mediapipe`;
+const MODEL_URL = `${ASSET_BASE}/face_landmarker.task`;
+const WASM_BASE = `${ASSET_BASE}/tasks-vision`;
 
 class FaceTracker {
   private landmarker: FaceLandmarker | null = null;
@@ -128,36 +126,30 @@ class FaceTracker {
 let instance: FaceTracker | null = null;
 let initPromise: Promise<FaceTracker | null> | null = null;
 
+/** The shared tracker once loaded (null if loading failed). A load in
+ *  progress is shared, never restarted: callers that grow impatient show
+ *  a static sticker meanwhile and switch over when this resolves. After a
+ *  failure the next call tries again with a fresh tracker. */
 export function getInstance(): Promise<FaceTracker | null> {
   if (initPromise) return initPromise;
-
-  initPromise = (async () => {
-    // Always reach for a FRESH FaceTracker after a prior failure. The old
-    // instance had `failed=true` baked into it which made `detect()`
-    // return null forever even if a later attempt would have succeeded.
-    const tracker = instance && !instance.isFailed() ? instance : new FaceTracker();
-    instance = tracker;
-
-    const timeout = new Promise<never>((_, reject) => {
-      window.setTimeout(() => reject(new Error("FaceTracker init timeout")), INIT_TIMEOUT_MS);
-    });
-
-    try {
-      await Promise.race([tracker.init(), timeout]);
-      return tracker;
-    } catch {
-      tracker.markFailed();
-      // CRITICAL: reset the cached promise so the NEXT getInstance()
-      // call gets a fresh attempt. Without this a single transient
-      // first-load blip permanently disabled tracking for the whole
-      // page session (Rick: mask filters never appeared on Perry's
-      // side after a slow first load).
-      initPromise = null;
-      return null;
-    }
-  })();
-
+  const tracker = new FaceTracker();
+  initPromise = tracker.init().then(
+    () => { instance = tracker; return tracker; },
+    () => { tracker.markFailed(); initPromise = null; return null; },
+  );
   return initPromise;
+}
+
+/** Start loading quietly when a visit begins, so Silly Faces is ready the
+ *  moment it opens. Waits for an idle moment; loading compiles about 11MB
+ *  of WebAssembly. */
+export function preload(delayMs = 2500): void {
+  if (initPromise || instance) return;
+  window.setTimeout(() => {
+    const go = () => { void getInstance(); };
+    const ric = (window as unknown as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => void }).requestIdleCallback;
+    if (ric) ric(go, { timeout: 4000 }); else go();
+  }, delayMs);
 }
 
 export function dispose(): void {

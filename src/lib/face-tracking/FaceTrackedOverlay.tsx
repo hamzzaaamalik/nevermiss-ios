@@ -178,7 +178,11 @@ function TrackedCanvas({
     window.addEventListener("resize", resize);
 
     let tracker: Awaited<ReturnType<typeof FaceTracker.getInstance>> = null;
+    // Still loading after a few seconds: show the static sticker until
+    // the tracker is ready (the load carries on and switches over).
+    const slow = window.setTimeout(() => { if (!cancelled && !tracker) setInitFailed(true); }, 4000);
     FaceTracker.getInstance().then(t => {
+      window.clearTimeout(slow);
       if (cancelled) return;
       tracker = t;
       // Reflect the latest attempt's outcome BOTH ways. A previous
@@ -307,6 +311,7 @@ function TrackedCanvas({
 
     return () => {
       cancelled = true;
+      window.clearTimeout(slow);
       activeTrackerCount = Math.max(0, activeTrackerCount - 1);
       ro.disconnect();
       window.removeEventListener("resize", resize);

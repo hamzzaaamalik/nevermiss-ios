@@ -1,4 +1,4 @@
-import { tokenizeHalf, type WordTok } from "./words";
+import { PARA_INDENT_EM, tokenizeHalf, type WordTok } from "./words";
 
 /**
  * Measured pagination (Rick's Pagination Spec, Oct 2026).
@@ -30,6 +30,10 @@ export interface PlanPage {
   imageUrl?: string;
   signOff?: boolean;
   images?: string[];
+  /** The half's first word starts a paragraph (books imported with
+   *  paragraphs; breaks inside a half are blank lines in its text). */
+  leftPara?: boolean;
+  rightPara?: boolean;
 }
 
 /** A word: 1-based source page + index among that page's words (left
@@ -311,6 +315,14 @@ export interface ColumnSegment {
   toks: WordTok[];
   /** Index of toks[0] within its half. */
   start: number;
+  /** toks[0] is the half's first word and starts a paragraph. */
+  para?: boolean;
+}
+
+/** Break before word i of a segment: 2 = new paragraph, 1 = new line. */
+export function segBreak(seg: ColumnSegment, i: number): 0 | 1 | 2 {
+  if (i === 0 && seg.start === 0) return seg.para ? 2 : 0;
+  return seg.toks[i].brk ?? 0;
 }
 
 export function composeSpread(
@@ -331,10 +343,10 @@ export function composeSpread(
     if (to <= from) continue;
     const lFrom = Math.min(from, L.length);
     const lTo = Math.min(to, L.length);
-    if (lTo > lFrom) halves.push({ key: `${src}.L`, toks: lFrom === 0 && lTo === L.length ? L : L.slice(lFrom, lTo), start: lFrom });
+    if (lTo > lFrom) halves.push({ key: `${src}.L`, toks: lFrom === 0 && lTo === L.length ? L : L.slice(lFrom, lTo), start: lFrom, para: lFrom === 0 && !!p.leftPara });
     const rFrom = Math.max(from - L.length, 0);
     const rTo = Math.max(to - L.length, 0);
-    if (rTo > rFrom) halves.push({ key: `${src}.R`, toks: rFrom === 0 && rTo === R.length ? R : R.slice(rFrom, rTo), start: rFrom });
+    if (rTo > rFrom) halves.push({ key: `${src}.R`, toks: rFrom === 0 && rTo === R.length ? R : R.slice(rFrom, rTo), start: rFrom, para: rFrom === 0 && !!p.rightPara });
   }
   if (split < 0) {
     const count = stop.page - start.page + (stop.off > 0 ? 1 : 0);
@@ -355,7 +367,7 @@ export function composeSpread(
       leftSegs.push(h);
       remaining -= h.toks.length;
     } else if (remaining > 0) {
-      leftSegs.push({ key: h.key, toks: h.toks.slice(0, remaining), start: h.start });
+      leftSegs.push({ key: h.key, toks: h.toks.slice(0, remaining), start: h.start, para: h.para });
       rightSegs.push({ key: h.key, toks: h.toks.slice(remaining), start: h.start + remaining });
       remaining = 0;
     } else {
@@ -435,8 +447,16 @@ export function profilesClose(a: PageProfile, b: PageProfile): boolean {
 /** A page's width in a `stageW` box: two pages share it evenly beside a
  *  4px spine; one page takes it up to the one-page line cap. */
 function pageWidth(p: PageProfile, stageW: number, mode: "single" | "double", fontPct: number): number {
-  if (mode === "double") return (stageW - 4) / 2;
-  return Math.min(stageW, singlePageMaxEm(fontPct) * p.parentPx + p.pagePadX);
+  const w = mode === "double" ? (stageW - 4) / 2 : Math.min(stageW, singlePageMaxEm(fontPct) * p.parentPx + p.pagePadX);
+  return layoutUnit(w);
+}
+
+/** WebKit lays boxes out in 1/64px steps, cutting off the rest: a width
+ *  worked out here must land on the same step as the real page, or a line
+ *  that just fits on screen wraps in the planner and the page ends a line
+ *  early. */
+function layoutUnit(px: number): number {
+  return Math.floor(px * 64 + 1e-6) / 64;
 }
 
 /** The reading box for a page mode, text size and box size, from what was
@@ -445,8 +465,13 @@ function pageWidth(p: PageProfile, stageW: number, mode: "single" | "double", fo
 export function boxFor(p: PageProfile, stage: StageSize, mode: "single" | "double", fontPct: number): ReadingBox {
   const fontPx = p.parentPx * fontPct / 100;
   const dh = stage.h - p.stageH;
+  // A box measured before the book had its shared stage has a fractional
+  // size, and the page split can round either way: err a step narrow
+  // (a line may end early, never a word too many). Once the book is drawn
+  // on the stage it is measured exactly and planned again.
+  const exact = Number.isInteger(p.stageW) && Number.isInteger(p.stageH);
   return {
-    colWidth: p.colWidth + pageWidth(p, stage.w, mode, fontPct) - pageWidth(p, p.stageW, p.mode, p.fontPct),
+    colWidth: layoutUnit(p.colWidth + pageWidth(p, stage.w, mode, fontPct) - pageWidth(p, p.stageW, p.mode, p.fontPct)) - (exact ? 0 : 1 / 64),
     fontPx,
     lineHeightPx: p.lhFactor * fontPx,
     letterSpacingEm: p.letterSpacingEm,
@@ -475,13 +500,13 @@ function round(n: number, step = 1): number {
 
 export function boxSignature(b: ReadingBox): string {
   return [
-    round(b.colWidth, 0.25), round(b.fontPx, 0.05), round(b.lineHeightPx, 0.05),
+    b.colWidth, round(b.fontPx, 0.05), round(b.lineHeightPx, 0.05),
     round(b.capLeftPlainPx), round(b.capRightPx), round(b.headNameFontPx),
     (b.text["font-family"] ?? "").length,
   ].join(":");
 }
 
-const PLAN_VERSION = "w3";
+const PLAN_VERSION = "w5";
 
 export function planKey(bookId: string, mode: "single" | "double", fontPct: number, stage: StageSize, boxes: ReadingBox[], contentHash: string): string {
   return [PLAN_VERSION, bookId, mode, fontPct, `${stage.w}x${stage.h}`, contentHash, ...boxes.map(boxSignature).sort()].join("|");
@@ -498,7 +523,7 @@ export function contentHash(pages: PlanPage[]): string {
   };
   for (const p of pages) {
     mix(p.leftBody); mix(p.rightBody); mix(p.leftChapter ?? ""); mix(p.leftEmoji ?? "");
-    h = Math.imul(h ^ (isSoloPage(p) ? 1 : 0) ^ (hasImages(p) ? 2 : 0), 16777619) >>> 0;
+    h = Math.imul(h ^ (isSoloPage(p) ? 1 : 0) ^ (hasImages(p) ? 2 : 0) ^ (p.leftPara ? 4 : 0) ^ (p.rightPara ? 8 : 0), 16777619) >>> 0;
   }
   return `${pages.length}-${h.toString(36)}`;
 }
@@ -533,6 +558,7 @@ class Measurer {
     // is shared.
     const style = document.createElement("style");
     style.textContent = `.nm-plan-measure p > span { white-space: nowrap; }
+.nm-plan-measure p > span.i { display: inline-block; width: ${PARA_INDENT_EM}em; }
 .nm-plan-measure p.nm-plan-dc::first-letter { ${DROP_CAP_DECL} }`;
     this.root.appendChild(style);
     Object.assign(this.root.style, {
@@ -567,17 +593,21 @@ class Measurer {
     return el;
   }
 
-  /** Lay out words `from..` of `toks` and read back each word's line. */
-  layout(p: ReadingBox, toks: WordTok[], from: number, dropCap: boolean): Layout {
+  /** Lay out words `from..` of `toks` and read back each word's line.
+   *  `brks[i]`: line (1) or paragraph (2) break before word i; the first
+   *  word of the run skips its indent when `noIndentFirst`. Same markup
+   *  as the reader's WordWrapped. */
+  layout(p: ReadingBox, toks: WordTok[], brks: Uint8Array, from: number, dropCap: boolean, noIndentFirst: boolean): Layout {
     const el = this.para(p);
     el.classList.toggle("nm-plan-dc", dropCap);
     let html = "";
     for (let i = from; i < toks.length; i++) {
-      if (i > from && !toks[i - 1].glue) html += " ";
-      html += `<span>${escapeHtml(toks[i].text)}</span>`;
+      if (i > from) html += brks[i] ? "<br>" : toks[i - 1].glue ? "" : " ";
+      if (brks[i] === 2 && !(i === 0 && noIndentFirst)) html += `<span class="i"></span>`;
+      html += `<span class="t">${escapeHtml(toks[i].text)}</span>`;
     }
     el.innerHTML = html;
-    const spans = el.children;
+    const spans = el.getElementsByClassName("t");
     const line = new Int32Array(spans.length);
     const lh = p.lineHeightPx;
     let n = 0;
@@ -633,8 +663,8 @@ class Measurer {
  *  word only when another iPad's narrower box ended the page mid-line. */
 class RunCursor {
   private lay: Layout;
-  constructor(private m: Measurer, private p: ReadingBox, private toks: WordTok[], dropCap: boolean) {
-    this.lay = m.layout(p, toks, 0, dropCap);
+  constructor(private m: Measurer, private p: ReadingBox, private toks: WordTok[], private brks: Uint8Array, dropCap: boolean, private noIndentFirst: boolean) {
+    this.lay = m.layout(p, toks, brks, 0, dropCap, noIndentFirst);
   }
 
   private lineOf(t: number): number { return this.lay.line[t - this.lay.from]; }
@@ -646,7 +676,7 @@ class RunCursor {
     if (t >= n) return n;
     if (cap <= 0) return t;
     if (t > this.lay.from && this.lineOf(t - 1) === this.lineOf(t)) {
-      this.lay = this.m.layout(this.p, this.toks, t, false);
+      this.lay = this.m.layout(this.p, this.toks, this.brks, t, false, this.noIndentFirst);
     }
     const stopLine = this.lineOf(t) + cap;
     let lo = t, hi = n;
@@ -695,6 +725,7 @@ function planRun(m: Measurer, pages: PlanPage[], a: number, b: number, profiles:
   const first = pages[a];
   if (isSoloPage(first)) return [[a + 1, 0, -1]];
   const toks: WordTok[] = [];
+  const brkList: number[] = [];
   const posPage: number[] = [];
   const posOff: number[] = [];
   for (let i = a; i < b; i++) {
@@ -702,14 +733,16 @@ function planRun(m: Measurer, pages: PlanPage[], a: number, b: number, profiles:
     const L = tokenizeHalf(p.leftBody);
     const R = tokenizeHalf(p.rightBody);
     let off = 0;
-    for (const t of L) { toks.push(t); posPage.push(i + 1); posOff.push(off++); }
-    for (const t of R) { toks.push(t); posPage.push(i + 1); posOff.push(off++); }
+    L.forEach((t, j) => { toks.push(t); brkList.push(j === 0 ? (p.leftPara ? 2 : 0) : t.brk ?? 0); posPage.push(i + 1); posOff.push(off++); });
+    R.forEach((t, j) => { toks.push(t); brkList.push(j === 0 ? (p.rightPara ? 2 : 0) : t.brk ?? 0); posPage.push(i + 1); posOff.push(off++); });
   }
   if (toks.length === 0) return [[a + 1, 0, 0]];
+  const brks = Uint8Array.from(brkList);
   const heading = headingAt(pages, a);
   const images = hasImages(first);
   const motif = heading && first.leftEmoji ? first.leftEmoji : null;
-  const cursors = profiles.map(p => new RunCursor(m, p, toks, !!heading && !images));
+  // The chapter's first paragraph follows its heading without an indent.
+  const cursors = profiles.map(p => new RunCursor(m, p, toks, brks, !!heading && !images, !!heading));
   const lines = (p: ReadingBox, px: number) => Math.max(0, Math.floor((px + 0.5) / p.lineHeightPx));
   const capFirstL = profiles.map(p =>
     images ? 0 : lines(p, p.capLeftPlainPx - (heading ? m.headingPx(p, heading, motif) : 0)));
