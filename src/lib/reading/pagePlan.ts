@@ -171,6 +171,13 @@ function hasImages(p: PlanPage | undefined): boolean {
   return !!(p?.images && p.images.length > 0);
 }
 
+/** Two pictures and no words of their own (illustrated books, Oct 2026):
+ *  one picture on each page of a spread; the words after them start on
+ *  the next spread. */
+export function isPictureSpreadPage(p: PlanPage | undefined): boolean {
+  return !!p && (p.images?.length ?? 0) >= 2 && pageWordCount(p) === 0;
+}
+
 /** The chapter heading drawn on a spread that opens page `i` (0-based):
  *  only where the label changes, so books that repeat the chapter label
  *  on every page show it once. */
@@ -248,6 +255,8 @@ export function spreadHasRight(pages: PlanPage[], plan: PagePlan, k: number): bo
   const first = pages[s.page - 1];
   if (!first || first.imageUrl) return false;
   if (first.rightIsTitle && s.off === 0) return s.page !== 1;
+  // The second of two pictures is on the right page.
+  if (s.off === 0 && isPictureSpreadPage(first)) return true;
   const { rightSegs } = composeSpread(pages, s, spreadStop(plan, k, pages.length), plan.splits[k] ?? -1);
   return rightSegs.length > 0;
 }
@@ -506,7 +515,7 @@ export function boxSignature(b: ReadingBox): string {
   ].join(":");
 }
 
-const PLAN_VERSION = "w5";
+const PLAN_VERSION = "w6";
 
 export function planKey(bookId: string, mode: "single" | "double", fontPct: number, stage: StageSize, boxes: ReadingBox[], contentHash: string): string {
   return [PLAN_VERSION, bookId, mode, fontPct, `${stage.w}x${stage.h}`, contentHash, ...boxes.map(boxSignature).sort()].join("|");
@@ -738,6 +747,7 @@ function planRun(m: Measurer, pages: PlanPage[], a: number, b: number, profiles:
   }
   if (toks.length === 0) return [[a + 1, 0, 0]];
   const brks = Uint8Array.from(brkList);
+  const pictureSpread = isPictureSpreadPage(first);
   const heading = headingAt(pages, a);
   const images = hasImages(first);
   const motif = heading && first.leftEmoji ? first.leftEmoji : null;
@@ -749,6 +759,8 @@ function planRun(m: Measurer, pages: PlanPage[], a: number, b: number, profiles:
   const capL = profiles.map(p => lines(p, p.capLeftPlainPx));
   const capR = profiles.map(p => lines(p, p.capRightPx));
   const out: Spread[] = [];
+  // Two pictures fill the first spread; the words begin on the next.
+  if (pictureSpread) out.push([a + 1, 0, 0]);
   let t = 0;
   while (t < toks.length) {
     const firstSpread = out.length === 0;

@@ -37,7 +37,7 @@ import {
   X as XIcon,
 } from "lucide-react";
 import { Button, IconButton, InstallHint, TileButton, TileGrid } from "./lib/ui";
-import { api, ApiError, type SafeUser, type ReadingSession, type Child } from "./lib/api";
+import { api, ApiError, type SafeUser, type ReadingSession, type Child, type CatalogBook } from "./lib/api";
 import { haptic, playPageTurn, playTap } from "./lib/sound";
 import { pronounce, primeAudio, preloadPronunciation } from "./lib/pronounce";
 import { CapacitorCalendar } from "@ebarooni/capacitor-calendar";
@@ -85,6 +85,7 @@ import {
   singlePageMaxEm as singlePageMaxEmFor,
   splitChapterLabel,
   spreadHasRight,
+  isPictureSpreadPage,
   spreadIndexOf,
   spreadLastPage,
   spreadStart,
@@ -112,6 +113,7 @@ import { AddChildModal, GrandchildrenCard, HomeView } from "./lib/home/HomeView"
 import { STICKERS } from "./lib/face-tracking/stickerCatalog";
 import { FaceTrackedOverlay } from "./lib/face-tracking/FaceTrackedOverlay";
 import * as FaceTracker from "./lib/face-tracking/FaceTracker";
+import { loadCatalog, saveCatalog } from "./lib/catalogCache";
 
 const NAVY      = "#1B2B4B";
 const AMBER     = "#C9922A";
@@ -145,6 +147,20 @@ const READING_LAYOUT_META: Record<ReadingLayout, { label: string; sub: string; i
   kids:      { label: "Kids",      sub: "Playful · pastel + chunky reactions",   icon: "🎨" },
 };
 type ChallengeState = "idle" | "counting" | "flash" | "holding" | "result";
+// One Silly Faces challenge round, timed from its shared start: 3-2-1,
+// the flash, six seconds holding the face, then "Who cracked up first?".
+const CHALLENGE_FLASH_AT = 2700;
+const CHALLENGE_HOLD_AT = 3150;
+const CHALLENGE_RESULT_AT = 9150;
+// A round replayed after a reload this long after it ended is over.
+const CHALLENGE_STALE_MS = 60_000;
+function challengePhaseAt(startLocal: number, now = Date.now()): ChallengeState {
+  const t = now - startLocal;
+  if (t < CHALLENGE_FLASH_AT) return "counting";
+  if (t < CHALLENGE_HOLD_AT) return "flash";
+  if (t < CHALLENGE_RESULT_AT) return "holding";
+  return "result";
+}
 const INVITE_CODE = "NEVMIS";
 
 // Rick's Build 33 A-8, confirmed Oct 2026: no "Chapter complete" pop-up
@@ -350,9 +366,9 @@ const icebreakerPrompts = [
 ];
 
 const childIcebreakerPrompts = [
-  "Nana, what was it like to be my age when you were a little girl?",
+  "{nanaName}, what was it like to be my age when you were little?",
   "What was the most important thing happening in the world when you were young?",
-  "How did you meet Papa?",
+  "How did you meet the person you married?",
   "How old were you when you got married?",
   "What was your favorite thing to do for fun when you were a kid?",
   "Did you have a best friend growing up? What were they like?",
@@ -521,6 +537,10 @@ interface BookPage {
    *  from the source EPUB. Ordered as they appear in the chapter text;
    *  the reader interleaves them between paragraphs on that page. */
   images?: string[];
+  /** Printed captions for `images` ("" where a picture has none). */
+  imageCaptions?: string[];
+  /** Printed caption for a full-page `imageUrl` picture. */
+  imageCaption?: string;
   /** The half's first word starts a paragraph (books imported with
    *  paragraphs; breaks inside a half are blank lines in its text). */
   leftPara?: boolean;
@@ -717,14 +737,34 @@ function bookPlaceLabel(book: Book, page: number): string {
   return info ? `Chapter ${info.chapterIndex + 1} of ${book.chapters!.length} · ${pct}%` : `${pct}% read`;
 }
 
+/** A printed picture caption: small, italic, centred under the picture. */
+function pictureCaptionStyle(color: string): React.CSSProperties {
+  return {
+    color, fontFamily: "Merriweather, serif", fontStyle: "italic", fontSize: 13, lineHeight: 1.35,
+    textAlign: "center", maxWidth: "100%", overflow: "hidden", display: "-webkit-box",
+    WebkitLineClamp: 2, WebkitBoxOrient: "vertical", flexShrink: 0,
+  };
+}
+
+/** A picture book: most pages are one full-page picture, so one-page mode
+ *  steps whole spreads. A story that only opens on its cover picture is
+ *  not one (illustrated books, Oct 2026: one-page mode skipped every
+ *  right-hand page, the closing words included). */
+function isFullPagePictureBook(pages: BookPage[]): boolean {
+  const n = pages.filter(p => !!p.imageUrl).length;
+  return n > 0 && n * 2 >= pages.length;
+}
+
 /** Pages a reader turns through per spread in one-page mode (1 or 2),
  *  cached per plan object. */
 const sideCountCache = new WeakMap<PagePlan, number[]>();
 function sideCountsFor(pages: BookPage[], plan: PagePlan): number[] {
   const hit = sideCountCache.get(plan);
   if (hit) return hit;
+  // A title page (the book's title, or the closing page) is one page in
+  // one-page mode: its blank left half is never a page of its own.
   const out = plan.starts.map((start, k) =>
-    (start === 1 && pages[0]?.rightIsTitle) || !spreadHasRight(pages, plan, k) ? 1 : 2);
+    (pages[start - 1]?.rightIsTitle && (plan.offs[k] ?? 0) === 0) || !spreadHasRight(pages, plan, k) ? 1 : 2);
   sideCountCache.set(plan, out);
   return out;
 }
@@ -742,7 +782,7 @@ function readingPosition(
   const pages = book.pages;
   const k = spreadIndexOf(plan, page, off);
   const K = plan.starts.length;
-  const stepsSpreads = pageMode === "double" || pages.some(p => !!p.imageUrl);
+  const stepsSpreads = pageMode === "double" || isFullPagePictureBook(pages);
   let pageNum = k + 1;
   let pageTotal = K;
   let atStart = k === 0;
@@ -1166,6 +1206,8 @@ function mergeServerCatalog(serverBooks: unknown[]): void {
           imageUrl:       typeof pp.imageUrl === "string" ? pp.imageUrl : undefined,
           signOff:        !!pp.signOff,
           images:         Array.isArray(pp.images) ? pp.images.filter((u): u is string => typeof u === "string") : undefined,
+          ...(Array.isArray(pp.imageCaptions) ? { imageCaptions: pp.imageCaptions.map(c => (typeof c === "string" ? c : "")) } : {}),
+          ...(typeof pp.imageCaption === "string" && pp.imageCaption ? { imageCaption: pp.imageCaption } : {}),
           ...(pp.leftPara === true ? { leftPara: true } : {}),
           ...(pp.rightPara === true ? { rightPara: true } : {}),
         };
@@ -1215,6 +1257,8 @@ function mergeServerCatalog(serverBooks: unknown[]): void {
                   imageUrl:      typeof pp.imageUrl === "string" ? pp.imageUrl : undefined,
                   signOff:       !!pp.signOff,
                   images:        Array.isArray(pp.images) ? pp.images.filter((u): u is string => typeof u === "string") : undefined,
+                  ...(Array.isArray(pp.imageCaptions) ? { imageCaptions: pp.imageCaptions.map(c => (typeof c === "string" ? c : "")) } : {}),
+                  ...(typeof pp.imageCaption === "string" && pp.imageCaption ? { imageCaption: pp.imageCaption } : {}),
                   ...(pp.leftPara === true ? { leftPara: true } : {}),
                   ...(pp.rightPara === true ? { rightPara: true } : {}),
                 };
@@ -1630,6 +1674,9 @@ function BookContent({
   // Planned picture spread: the left page is the picture, the words begin
   // on the right page.
   const imagesOnly = planned && !!images;
+  // Two pictures with no words of their own: one on each page.
+  const pictureSpread = imagesOnly && isPictureSpreadPage(p);
+  const leftImages = pictureSpread && images ? images.slice(0, 1) : images;
   const motif = planned ? (heading ? p.leftEmoji || null : null) : (p.leftEmoji || null);
   const isTitleSpread = !!p.rightIsTitle && opensPage;
   const isCoverSpread = start.page === 1 && opensPage;
@@ -1901,8 +1948,13 @@ function BookContent({
   }
 
   // One-page mode on a wide iPad: cap the page at a comfortable line
-  // length instead of stretching text across the whole screen.
-  const singlePageCap: React.CSSProperties = pageMode === "single" ? { maxWidth: `calc(${singlePageMaxEm.toFixed(2)}em + 32px)` } : {};
+  // length instead of stretching text across the whole screen. Rick,
+  // Oct 2026: the capped page sat on a strip of different white with its
+  // own spine shadow, so smaller text looked like a narrow page that
+  // widened with the size. Now the whole book is one sheet of paper and
+  // the cap only sets its side margins, like a printed page.
+  const single = pageMode === "single";
+  const singlePageCap: React.CSSProperties = single ? { maxWidth: `calc(${singlePageMaxEm.toFixed(2)}em + 32px)`, boxShadow: "none" } : {};
   // Running headers are one line of fixed height, so every page's text
   // box is the same height whatever the title or author.
   const runningHeadText: React.CSSProperties = {
@@ -1914,6 +1966,7 @@ function BookContent({
     <div ref={rootRef} data-spread={`${textKey}@${targetFontPct}${pageMode[0]}`} style={{
       display: "flex", width: "100%", height: "100%",
       justifyContent: "center",
+      ...(single ? { backgroundColor: themeColors.page, transition: "background-color 240ms ease" } : {}),
       boxShadow: "0 8px 32px rgba(0,0,0,0.55), 0 1px 4px rgba(0,0,0,0.3)",
       position: "relative",
     }}>
@@ -1988,6 +2041,10 @@ function BookContent({
           background: linear-gradient(to left, transparent 70%, rgba(92,58,30,0.05) 100%) !important;
         }
         .nm-book-page-night::after { display: none !important; }
+        /* One page: no spine, and the page is one sheet with the paper
+           beside it, so no grain or spine shading that would mark its
+           edges. */
+        .nm-book-page-single::before, .nm-book-page-single::after { display: none !important; }
 
         /* Drop cap — real publishing convention: first letter of the
            first paragraph on a chapter/title body is enlarged, embossed
@@ -2060,14 +2117,14 @@ function BookContent({
           (cover) special case from collapsing — there the right side is
           the title page and the left has no content, so we always show
           the right in single mode regardless of pageSide. */}
-      {!(pageMode === "single" && (pageSide === "R" || isCoverSpread)) && (
-      <div className={`nm-book-page${plainPaper ? " nm-book-page-night" : ""}`} style={{
+      {!(pageMode === "single" && (pageSide === "R" || isCoverSpread || isTitleSpread)) && (
+      <div className={`nm-book-page${plainPaper ? " nm-book-page-night" : ""}${single ? " nm-book-page-single" : ""}`} style={{
         position: "relative",
         flex: 1, backgroundColor: themeColors.page,
-        ...singlePageCap,
         display: "flex", flexDirection: "column",
         padding: "10px 14px 10px 18px",
         boxShadow: `inset -5px 0 14px ${themeColors.spineShadow}`,
+        ...singlePageCap,
         overflow: "hidden",
         transition: "background-color 240ms ease",
       }}>
@@ -2142,20 +2199,39 @@ function BookContent({
               maxHeight: imagesOnly ? "100%" : images.length === 1 ? "55%" : "45%",
               overflow: "hidden",
             }}>
-              {images.map((src, i) => (
-                <img
-                  key={i}
-                  src={src}
-                  alt=""
-                  style={{
-                    maxWidth: "100%",
-                    maxHeight: images.length === 1 ? "100%" : `${Math.floor(100 / images.length)}%`,
-                    objectFit: "contain",
-                    borderRadius: 6,
-                    boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
-                  }}
-                />
-              ))}
+              {(leftImages ?? []).map((src, i, all) => {
+                const caption = p.imageCaptions?.[i] || "";
+                const img = (
+                  <img
+                    key={i}
+                    src={src}
+                    alt=""
+                    style={{
+                      maxWidth: "100%",
+                      maxHeight: caption ? "100%" : all.length === 1 ? "100%" : `${Math.floor(100 / all.length)}%`,
+                      minHeight: 0,
+                      objectFit: "contain",
+                      borderRadius: 6,
+                      boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
+                    }}
+                  />
+                );
+                // A printed caption stays under its picture.
+                return caption ? (
+                  <figure key={i} style={{ margin: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 6, minHeight: 0, maxHeight: all.length === 1 ? "100%" : `${Math.floor(100 / all.length)}%`, maxWidth: "100%" }}>
+                    {img}
+                    <figcaption style={pictureCaptionStyle(themeColors.muted)}>{caption}</figcaption>
+                  </figure>
+                ) : img;
+              })}
+            </div>
+          )}
+          {/* The closing page: Rick's heart QR (nevermiss.family/#story) on
+              its blank left page (illustrated-book guide, Oct 2026). */}
+          {isTitleSpread && p.signOff && pageMode === "double" && (
+            <div data-testid="closing-qr" style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10 }}>
+              <img src="/nevermiss-heart-qr.png" alt="QR code for nevermiss.family" style={{ width: "min(52%, 200px)", aspectRatio: "1", imageRendering: "pixelated", borderRadius: 8 }} />
+              <span style={{ color: themeColors.muted, fontFamily: "Merriweather, serif", fontSize: 13, fontStyle: "italic", letterSpacing: "0.04em" }}>nevermiss.family</span>
             </div>
           )}
           <p ref={leftRef} className="book-body nm-book-body" style={{
@@ -2179,8 +2255,8 @@ function BookContent({
               Soft enough to feel like a real chapter break. */}
           <div ref={leftFleuronRef} aria-hidden style={{
             display: "flex", alignItems: "center", justifyContent: "center",
-            gap: 10, opacity: 0.32, marginTop: "auto", paddingTop: 12,
-            color: themeColors.muted, fontSize: 14,
+            gap: 10, opacity: 0.32, marginTop: "auto", paddingTop: 6,
+            color: themeColors.muted, fontSize: 12, lineHeight: "14px",
           }}>
             <span style={{ width: 28, height: 1, backgroundColor: themeColors.muted }} />
             ❦
@@ -2189,12 +2265,14 @@ function BookContent({
         </div>
 
         {/* Page number — centered, refined. Hidden on sign-off pages
-            per Rick's Build 32 review #B-6. */}
-        {/* Row is always laid out (hidden where there's no number) so
-            every spread has the same text box for the page planner. */}
-        <div aria-hidden style={{ textAlign: "center", marginTop: 4, position: "relative", zIndex: 1, visibility: SHOW_PAGE_FOLIOS && leftPageNum && !p.signOff ? "visible" : "hidden" }}>
-          <span style={{ color: themeColors.muted, fontFamily: "Merriweather, serif", fontSize: 9, opacity: 0.5, letterSpacing: "0.1em", fontVariantNumeric: "oldstyle-nums" }}>· {leftPageNum ?? 0} ·</span>
-        </div>
+            per Rick's Build 32 review #B-6. Folios are off (the page pill
+            is the only counter), and the row is gone with them so its
+            room goes to the text (Rick's Build 38 review #7). */}
+        {SHOW_PAGE_FOLIOS && (
+          <div aria-hidden style={{ textAlign: "center", marginTop: 4, position: "relative", zIndex: 1, visibility: leftPageNum && !p.signOff ? "visible" : "hidden" }}>
+            <span style={{ color: themeColors.muted, fontFamily: "Merriweather, serif", fontSize: 9, opacity: 0.5, letterSpacing: "0.1em", fontVariantNumeric: "oldstyle-nums" }}>· {leftPageNum ?? 0} ·</span>
+          </div>
+        )}
       </div>
       )}
 
@@ -2214,14 +2292,14 @@ function BookContent({
       {/* ── RIGHT PAGE ── hidden in single mode when pageSide==="L"
           (except on the cover page, where the right side IS the content
           and we always render it). */}
-      {!(pageMode === "single" && pageSide === "L" && !isCoverSpread) && (
-      <div className={`nm-book-page nm-book-page-right${plainPaper ? " nm-book-page-night" : ""}`} style={{
+      {!(pageMode === "single" && pageSide === "L" && !isCoverSpread && !isTitleSpread) && (
+      <div className={`nm-book-page nm-book-page-right${plainPaper ? " nm-book-page-night" : ""}${single ? " nm-book-page-single" : ""}`} style={{
         position: "relative",
         flex: 1, backgroundColor: themeColors.page,
-        ...singlePageCap,
         display: "flex", flexDirection: "column",
         padding: "10px 18px 10px 14px",
         boxShadow: `inset 5px 0 14px ${themeColors.spineShadow}`,
+        ...singlePageCap,
         overflow: "hidden",
         transition: "background-color 240ms ease",
       }}>
@@ -2255,12 +2333,26 @@ function BookContent({
                 <span style={{ color: themeColors.muted, fontSize: 9, transform: "translateY(-1px)" }}>◆</span>
                 <span style={{ width: 36, height: 1, backgroundColor: themeColors.muted }} />
               </div>
-              <p className="nm-book-body" style={{ color: themeColors.text, fontFamily: "Merriweather, serif", fontSize: bodyFs, lineHeight: 1.85, textAlign: "center", opacity: 0.92 }}>
+              {/* Line breaks as written. The closing page has more lines, so
+                  its words keep one comfortable size at every text size. */}
+              <p className="nm-book-body" style={{
+                color: themeColors.text, fontFamily: "Merriweather, serif", textAlign: "center", opacity: 0.92, whiteSpace: "pre-line",
+                ...(p.signOff ? { fontSize: "clamp(13px, 1.55vw, 17px)", lineHeight: 1.6, margin: 0 } : { fontSize: bodyFs, lineHeight: 1.85 }),
+              }}>
                 {p.rightBody}
               </p>
+              {p.signOff && pageMode === "single" && (
+                <img data-testid="closing-qr" src="/nevermiss-heart-qr.png" alt="QR code for nevermiss.family" style={{ display: "block", margin: "6px auto 0", width: 96, height: 96, imageRendering: "pixelated", borderRadius: 6 }} />
+              )}
             </>
           ) : (
             <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative", zIndex: 1 }}>
+              {pictureSpread && images?.[1] && (
+                <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6, overflow: "hidden" }}>
+                  <img src={images[1]} alt="" style={{ maxWidth: "100%", maxHeight: "100%", minHeight: 0, objectFit: "contain", borderRadius: 6, boxShadow: "0 4px 14px rgba(0,0,0,0.18)" }} />
+                  {p.imageCaptions?.[1] && <div style={pictureCaptionStyle(themeColors.muted)}>{p.imageCaptions[1]}</div>}
+                </div>
+              )}
               <p ref={rightRef} className="book-body nm-book-body" style={{
                 color: themeColors.text,
                 margin: 0,
@@ -2277,8 +2369,8 @@ function BookContent({
               {/* End ornament — same fleuron when there's empty space below body */}
               <div ref={rightFleuronRef} aria-hidden style={{
                 display: "flex", alignItems: "center", justifyContent: "center",
-                gap: 10, opacity: 0.32, marginTop: "auto", paddingTop: 12,
-                color: themeColors.muted, fontSize: 14,
+                gap: 10, opacity: 0.32, marginTop: "auto", paddingTop: 6,
+                color: themeColors.muted, fontSize: 12, lineHeight: "14px",
               }}>
                 <span style={{ width: 28, height: 1, backgroundColor: themeColors.muted }} />
                 ❦
@@ -2291,11 +2383,11 @@ function BookContent({
         {/* Page number — centered, refined. Hidden on sign-off pages
             (Rick's Build 32 review #B-6: branded closing beat should
             read as a page distinct from the story pagination). */}
-        {/* Row is always laid out (hidden where there's no number) so
-            every spread has the same text box for the page planner. */}
-        <div aria-hidden style={{ textAlign: "center", marginTop: 4, position: "relative", zIndex: 1, visibility: SHOW_PAGE_FOLIOS && rightPageNum && !p.signOff ? "visible" : "hidden" }}>
-          <span style={{ color: themeColors.muted, fontFamily: "Merriweather, serif", fontSize: 9, opacity: 0.5, letterSpacing: "0.1em", fontVariantNumeric: "oldstyle-nums" }}>· {rightPageNum ?? 0} ·</span>
-        </div>
+        {SHOW_PAGE_FOLIOS && (
+          <div aria-hidden style={{ textAlign: "center", marginTop: 4, position: "relative", zIndex: 1, visibility: rightPageNum && !p.signOff ? "visible" : "hidden" }}>
+            <span style={{ color: themeColors.muted, fontFamily: "Merriweather, serif", fontSize: 9, opacity: 0.5, letterSpacing: "0.1em", fontVariantNumeric: "oldstyle-nums" }}>· {rightPageNum ?? 0} ·</span>
+          </div>
+        )}
       </div>
       )}
 
@@ -2317,7 +2409,8 @@ function ChatModePrompt({ text, fontScale = 1 }: { text: string; fontScale?: num
   // adjustable font size option in chat mode. There's ample screen
   // real estate and larger text would significantly improve usability
   // for users who wear reading glasses.")
-  const baseSize = 15 * fontScale;
+  // Rick's Build 38 review #2: readable at a glance (was 15).
+  const baseSize = 21 * fontScale;
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "14px", overflow: "auto" }}>
       {prefix && (
@@ -2542,10 +2635,10 @@ function ChatModeView({
           }}>
             <span style={{ fontSize: 26 * Math.max(1, fontScale), textAlign: "center" }}>👂</span>
             <p style={{ color: "rgba(134,239,172,0.95)", fontFamily: "Merriweather, serif", fontSize: 15 * Math.max(1, fontScale), fontWeight: 700, lineHeight: 1.5, margin: 0, textAlign: "center" }}>
-              Nana has a question about the story!
+              {nanaName || getRoleLabel("nana")} has a question about the story!
             </p>
             <p style={{ color: "rgba(255,255,255,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 11 * Math.max(1, fontScale), margin: 0, textAlign: "center", lineHeight: 1.4 }}>
-              Listen carefully and tell her what you think.
+              Listen carefully and say what you think.
             </p>
           </div>
         )}
@@ -2755,7 +2848,7 @@ function GreetingView({
               textAlign: "center",
               lineHeight: 1.4,
             }}>
-              👋 {otherName} is here — she'll pick a book when you're ready!
+              👋 {otherName} is here and will pick a book when you're ready!
             </div>
             {(onPerryPickBook || onPerryAskNana) && (
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center" }}>
@@ -2880,12 +2973,13 @@ function IcebreakerView({
             borderRadius: "10px",
             padding: "10px 12px",
           }}>
-            <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700, letterSpacing: "0.08em", marginBottom: "4px" }}>
+            <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: "12px", fontWeight: 800, letterSpacing: "0.08em", marginBottom: "6px" }}>
               💬 CONVERSATION STARTER
             </div>
-            <p style={{
-              color: CREAM, fontFamily: "Merriweather, serif", fontSize: "12px",
-              fontWeight: 700, lineHeight: 1.5, margin: 0,
+            {/* Rick's Build 38 review #2: was 12px. */}
+            <p data-testid="conversation-starter" style={{
+              color: CREAM, fontFamily: "Merriweather, serif", fontSize: "21px",
+              fontWeight: 700, lineHeight: 1.45, margin: 0,
             }}>
               {fill(icebreakerPrompts[promptIndex], { childName, nanaName })}
             </p>
@@ -2992,14 +3086,14 @@ function IcebreakerView({
                 borderRadius: "10px",
                 padding: "10px 12px",
               }}>
-                <div style={{ color: "#63b3ed", fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700, letterSpacing: "0.08em", marginBottom: "4px" }}>
-                  🌟 ASK NANA
+                <div style={{ color: "#63b3ed", fontFamily: "DM Sans, sans-serif", fontSize: "12px", fontWeight: 800, letterSpacing: "0.08em", marginBottom: "6px" }}>
+                  🌟 ASK {(nanaName || getRoleLabel("nana")).toUpperCase()}
                 </div>
                 <p style={{
-                  color: CREAM, fontFamily: "Merriweather, serif", fontSize: "12px",
-                  fontWeight: 700, lineHeight: 1.5, margin: 0,
+                  color: CREAM, fontFamily: "Merriweather, serif", fontSize: "21px",
+                  fontWeight: 700, lineHeight: 1.45, margin: 0,
                 }}>
-                  {childIcebreakerPrompts[childPromptIndex]}
+                  {fill(childIcebreakerPrompts[childPromptIndex], { nanaName: nanaName || getRoleLabel("nana"), childName })}
                 </p>
               </div>
               <div style={{ display: "flex", gap: "8px" }}>
@@ -3035,7 +3129,7 @@ function IcebreakerView({
               color: "rgba(247,240,227,0.32)", fontFamily: "DM Sans, sans-serif",
               fontSize: "10px", textAlign: "center", margin: 0, lineHeight: 1.6,
             }}>
-              Chat with Nana! She'll start reading soon.
+              Chat with {nanaName || getRoleLabel("nana")}! Reading starts soon.
             </p>
           )}
         </div>
@@ -3075,8 +3169,13 @@ function ShowAndTellView({
   const selfName  = isNana ? (nanaName  || getRoleLabel("nana"))  : (childName || getRoleLabel("child"));
   const totalPrompts = showAndTellPrompts.length;
   // Master Plan §8: flip to the back camera to show a pet, a project or
-  // the room. Leaving Show & Tell puts the front camera back.
-  const { canFlipCamera, flipCamera, resetCamera, isCameraFlipped } = useVideoSession();
+  // the room. Leaving Show & Tell puts the front camera back. Rick's
+  // Build 38 review #5: Nana can turn the child's camera around from her
+  // iPad (the child doesn't have to find the button); the child's iPad
+  // keeps its own Flip camera button.
+  const { status: videoStatus, canFlipCamera, flipCamera, resetCamera, isCameraFlipped, flipPartnerCamera, partnerCameraFlipped } = useVideoSession();
+  const showFlip = isNana ? videoStatus === "connected" : canFlipCamera;
+  const flipOn = isNana ? partnerCameraFlipped : isCameraFlipped;
   const resetCameraRef = useRef(resetCamera);
   resetCameraRef.current = resetCamera;
   useEffect(() => () => resetCameraRef.current(), []);
@@ -3111,17 +3210,17 @@ function ShowAndTellView({
             pipWidth={140}
             pipHeight={186}
           />
-          {canFlipCamera && (
+          {showFlip && (
             <button
               type="button"
               data-testid="sat-flip-camera"
-              onClick={flipCamera}
+              onClick={isNana ? flipPartnerCamera : flipCamera}
               style={{
                 position: "absolute", right: 14, bottom: 14, zIndex: 12,
                 minHeight: 56, padding: "0 20px", borderRadius: 999,
-                background: isCameraFlipped ? AMBER : "rgba(11,23,46,0.82)",
-                color: isCameraFlipped ? NAVY : CREAM,
-                border: `1.5px solid ${isCameraFlipped ? AMBER : "rgba(255,255,255,0.35)"}`,
+                background: flipOn ? AMBER : "rgba(11,23,46,0.82)",
+                color: flipOn ? NAVY : CREAM,
+                border: `1.5px solid ${flipOn ? AMBER : "rgba(255,255,255,0.35)"}`,
                 fontFamily: "DM Sans, sans-serif", fontSize: 17, fontWeight: 800,
                 display: "inline-flex", alignItems: "center", gap: 8,
                 backdropFilter: "blur(6px)", cursor: "pointer", touchAction: "manipulation",
@@ -3129,7 +3228,9 @@ function ShowAndTellView({
               }}
             >
               <span aria-hidden style={{ fontSize: 20 }}>🔄</span>
-              {isCameraFlipped ? "Front camera" : "Flip camera"}
+              {isNana
+                ? (flipOn ? `${otherName}'s front camera` : `Flip ${otherName}'s camera`)
+                : (flipOn ? "Front camera" : "Flip camera")}
             </button>
           )}
           {/* Tiny floating mode badge on the video so users always know
@@ -3300,6 +3401,8 @@ function BookSpread({
   isNana,
   flipping,
   flipFromPage,
+  flipFromOff = 0,
+  flipFromSide = "L",
   flipToPage,
   flipToOff = 0,
   flipDirection,
@@ -3338,6 +3441,8 @@ function BookSpread({
   isNana: boolean;
   flipping: boolean;
   flipFromPage: number;
+  flipFromOff?: number;
+  flipFromSide?: "L" | "R";
   flipToPage: number;
   flipToOff?: number;
   flipDirection?: "forward" | "backward";
@@ -3800,7 +3905,7 @@ function BookSpread({
                   data-bk-image-page
                   style={{
                     width: "100%", height: "100%",
-                    display: "flex", alignItems: "center", justifyContent: "center",
+                    display: "flex", flexDirection: imagePage.imageCaption ? "column" : undefined, alignItems: "center", justifyContent: "center",
                     backgroundColor: READING_THEMES[readingTheme].page,
                     overflow: "hidden",
                   }}
@@ -3813,7 +3918,9 @@ function BookSpread({
                       // Fill the whole page box (scaling small art up),
                       // never crop (Master Plan §6).
                       width: "100%",
-                      height: "100%",
+                      height: imagePage.imageCaption ? "auto" : "100%",
+                      flex: imagePage.imageCaption ? "1 1 0" : undefined,
+                      minHeight: 0,
                       objectFit: "contain",
                       display: "block",
                       userSelect: "none",
@@ -3822,6 +3929,9 @@ function BookSpread({
                       pointerEvents: "none",
                     }}
                   />
+                  {imagePage.imageCaption && (
+                    <div style={{ ...pictureCaptionStyle(READING_THEMES[readingTheme].muted ?? "#6b5a45"), padding: "6px 16px 10px" }}>{imagePage.imageCaption}</div>
+                  )}
                 </div>
               );
             }
@@ -3845,39 +3955,62 @@ function BookSpread({
               </div>
             );
           })()}
-        </div>
 
-        {/* Page-flip overlay (child only) */}
-        {!isNana && flipping && (() => {
-          const back = flipDirection === "backward";
-          return (
-            <div style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden" }}>
-              <div style={{
-                position: "absolute", top: 0,
-                left: back ? "0" : "50%",
-                width: "50%", height: "100%",
-                transformOrigin: back ? "right center" : "left center",
-                backgroundColor: READING_THEMES[readingTheme].page,
-                borderTop: `3px solid ${READING_THEMES[readingTheme].spine}`,
-                borderBottom: `3px solid ${READING_THEMES[readingTheme].spine}`,
-                ...(back
-                  ? { borderLeft: `3px solid ${LEATHER}` }
-                  : { borderRight: `3px solid ${LEATHER}` }),
-                animation: `${back ? "page-flip-back" : "page-flip"} 0.5s cubic-bezier(0.32, 0.72, 0, 1) forwards`,
-                willChange: "transform",
-                overflow: "hidden", zIndex: 20,
-              }}>
+          {/* Page turn on the child's iPad: the old page lifts off the new
+              one, which is already drawn underneath, and is gone by the
+              time it stands upright. Rick's Build 38 review #4: the old turn was a
+              blank sheet under a dark gradient, so a grey half-page
+              covered the book for half a second. */}
+          {!isNana && flipping && (() => {
+            const back = flipDirection === "backward";
+            const single = pageMode === "single";
+            const oldPage = Math.max(1, Math.min(flipFromPage, bookPages.length));
+            const oldImage = bookPages[oldPage - 1]?.imageUrl;
+            const oldSide: "L" | "R" = single ? flipFromSide : pageSide;
+            const fullWidth = single || !!oldImage;
+            return (
+              <div aria-hidden data-turn-leaf style={{ ...(oldImage ? { position: "absolute", inset: 0 } : stageStyle), pointerEvents: "none", zIndex: 20 }}>
                 <div style={{
-                  position: "absolute", inset: 0,
-                  background: back
-                    ? "linear-gradient(to right, rgba(0,0,0,0.04) 0%, rgba(0,0,0,0.18) 40%, rgba(0,0,0,0.35) 100%)"
-                    : "linear-gradient(to left, rgba(0,0,0,0.04) 0%, rgba(0,0,0,0.18) 60%, rgba(0,0,0,0.35) 100%)",
-                  pointerEvents: "none",
-                }} />
+                  position: "absolute", top: 0, height: "100%",
+                  left: fullWidth || back ? 0 : "50%",
+                  width: fullWidth ? "100%" : "50%",
+                  overflow: "hidden",
+                  transformOrigin: back ? "right center" : "left center",
+                  animation: `${back ? "nm-leaf-back" : "nm-leaf"} 0.42s cubic-bezier(0.45, 0, 0.55, 1) forwards`,
+                  willChange: "transform",
+                  backgroundColor: READING_THEMES[readingTheme].page,
+                }}>
+                  {oldImage ? (
+                    <img src={oldImage} alt="" draggable={false} style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
+                  ) : (
+                    <div style={{ position: "absolute", top: 0, height: "100%", display: "flex", width: fullWidth ? "100%" : "200%", left: fullWidth || back ? 0 : "-100%" }}>
+                      <BookContent
+                        page={oldPage}
+                        off={flipFromOff}
+                        bookPages={bookPages}
+                        bookTitle={bookTitle}
+                        fontScale={fontScale}
+                        highlightWid={null}
+                        theme={readingTheme}
+                        pageMode={pageMode}
+                        pageSide={oldSide}
+                        plan={pagePlan}
+                        area={area}
+                      />
+                    </div>
+                  )}
+                  {/* A light fold shadow at the spine, nothing darker. */}
+                  <div style={{
+                    position: "absolute", inset: 0, pointerEvents: "none",
+                    background: back
+                      ? "linear-gradient(to left, rgba(0,0,0,0.08) 0%, rgba(0,0,0,0) 22%)"
+                      : "linear-gradient(to right, rgba(0,0,0,0.08) 0%, rgba(0,0,0,0) 22%)",
+                  }} />
+                </div>
               </div>
-            </div>
-          );
-        })()}
+            );
+          })()}
+        </div>
 
         {/* Conversation prompt was removed from the book area. It now
             lives in the reading toolbar (PromptButton, below) so the
@@ -3890,6 +4023,14 @@ function BookSpread({
 
 /* ─── Library View ───────────────────────────────────────── */
 
+/** Nana's library search and filters, mirrored on the child's iPad
+ *  (Rick's Build 38 review #3). */
+type LibraryFilters = {
+  q: string;
+  status: "all" | "in-progress" | "not-started" | "finished";
+  age: "any" | "4-5" | "5-7" | "7-10" | "10-13";
+};
+
 function LibraryView({
   selectedBookId,
   onSelectBook,
@@ -3900,6 +4041,10 @@ function LibraryView({
   onScroll,
   scrollTop,
   onFindMoreBooks,
+  onFiltersChange,
+  mirroredFilters = null,
+  nanaName = "",
+  catalogLoading = false,
 }: {
   selectedBookId: string;
   onSelectBook: (id: string) => void;
@@ -3926,6 +4071,14 @@ function LibraryView({
   scrollTop?: number;
   /** Nana: open Request a Book searching free classics (Build 33). */
   onFindMoreBooks?: (query: string) => void;
+  /** Nana: her search and filters, sent to the child's iPad. */
+  onFiltersChange?: (f: LibraryFilters) => void;
+  /** Child: Nana's search and filters, applied here. */
+  mirroredFilters?: LibraryFilters | null;
+  nanaName?: string;
+  /** The newest books are still arriving (Rick, Oct 8: a just-added
+   *  book said "No books match" until he searched again). */
+  catalogLoading?: boolean;
 }) {
   // Ref to the bookshelf scroll container. EITHER side publishes its
   // scrollTop, and EITHER side applies the other's incoming scrollTop —
@@ -3960,6 +4113,21 @@ function LibraryView({
   // come from the /api/books catalog (ageRange like "Ages 4-5" through
   // "Ages 10-13"). "any" = show all tiers.
   const [ageFilter, setAgeFilter] = useState<"any" | "4-5" | "5-7" | "7-10" | "10-13">("any");
+  // Rick's Build 38 review #3: the child sees the same search results as
+  // Nana (the shelf scroll was already shared, so it lines up again).
+  useEffect(() => {
+    if (!mirroredFilters) return;
+    setSearchQuery(mirroredFilters.q);
+    setStatusFilter(mirroredFilters.status);
+    setAgeFilter(mirroredFilters.age);
+  }, [mirroredFilters]);
+  const onFiltersChangeRef = useRef(onFiltersChange);
+  onFiltersChangeRef.current = onFiltersChange;
+  useEffect(() => {
+    if (!onFiltersChangeRef.current) return;
+    const t = window.setTimeout(() => onFiltersChangeRef.current?.({ q: searchQuery, status: statusFilter, age: ageFilter }), 200);
+    return () => window.clearTimeout(t);
+  }, [searchQuery, statusFilter, ageFilter]);
 
   const progressByBookId = new Map(progress.map(p => [p.bookId, p]));
   const allBooks = Object.values(booksLibrary);
@@ -4035,7 +4203,7 @@ function LibraryView({
             {readOnly ? "Picking a Book Together" : "Choose Your Book"}
           </div>
           <div style={{ color: "rgba(247,240,227,0.45)", fontFamily: "Inter, DM Sans, sans-serif", fontSize: 11, marginTop: 2, letterSpacing: "0.04em" }}>
-            {readOnly ? "👀 Watching with Nana" : "Tap to select · both sides see your choice"}
+            {readOnly ? `👀 Watching with ${nanaName || getRoleLabel("nana")}` : "Tap to select · both sides see your choice"}
           </div>
         </div>
         <span />
@@ -4047,6 +4215,22 @@ function LibraryView({
           controls she can't usefully drive — they'd just confuse the
           read-only contract. Future: optionally sync Nana's filter
           state so Perry's view stays in lockstep. */}
+      {readOnly && (searchQuery.trim() || statusFilter !== "all" || ageFilter !== "any") && (
+        <div data-testid="library-mirror-filter" style={{
+          margin: "10px 12px 4px", padding: "10px 16px", borderRadius: 999, flexShrink: 0,
+          background: "rgba(201,146,42,0.10)", border: "1px solid rgba(201,146,42,0.40)",
+          color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 16, fontWeight: 700,
+          display: "flex", alignItems: "center", gap: 10,
+        }}>
+          <span aria-hidden>🔎</span>
+          <span>
+            {nanaName || getRoleLabel("nana")} is looking
+            {searchQuery.trim() ? <> for <span style={{ color: AMBER }}>“{searchQuery.trim()}”</span></> : null}
+            {ageFilter !== "any" ? <> · Ages {ageFilter.replace("-", "–")}</> : null}
+            {statusFilter !== "all" ? <> · {statusFilter === "in-progress" ? "Reading" : statusFilter === "not-started" ? "New" : "Finished"}</> : null}
+          </span>
+        </div>
+      )}
       {!readOnly && (
       <div style={{ padding: "10px 12px 8px", display: "flex", flexDirection: "column", gap: 8, flexShrink: 0 }}>
         <div style={{ position: "relative" }}>
@@ -4305,13 +4489,22 @@ function LibraryView({
             borderRadius: 14,
             background: "rgba(255,255,255,0.025)",
           }}>
-            <div style={{ fontSize: 32, marginBottom: 8 }}>🔍</div>
-            <div style={{ color: CREAM, fontSize: 14, fontWeight: 700, marginBottom: 4 }}>No books match</div>
+            <div style={{ fontSize: 32, marginBottom: 8 }}>{catalogLoading ? "📚" : "🔍"}</div>
+            <div data-testid="library-empty" style={{ color: CREAM, fontSize: 14, fontWeight: 700, marginBottom: 4 }}>
+              {catalogLoading ? "Getting the newest books…" : "No books match"}
+            </div>
+            {catalogLoading && (
+              <div style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 12 }}>
+                {q ? <>“<span style={{ color: AMBER }}>{searchQuery}</span>” may appear in a moment. No need to search again.</> : "They will appear here in a moment."}
+              </div>
+            )}
+            {!catalogLoading && (
             <div style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 12 }}>
               {q ? <>Nothing matches "<span style={{ color: AMBER }}>{searchQuery}</span>"</> : "Try a different filter"}
               {q && statusFilter !== "all" ? <> in <span style={{ color: AMBER }}>{statusFilter.replace("-", " ")}</span></> : null}
               .
             </div>
+            )}
             <button
               onClick={() => { setSearchQuery(""); setStatusFilter("all"); }}
               style={{
@@ -6349,7 +6542,7 @@ function SayHelloView({
             fontSize: 15, fontStyle: "italic",
             textAlign: "center", lineHeight: 1.5,
           }}>
-            👋 {otherName} is here — wave hello! She'll pick a book when you're ready.
+            👋 {otherName} is here. Wave hello! {otherName} will pick a book when you're ready.
           </div>
         )}
       </div>
@@ -6441,6 +6634,7 @@ function SettingsView({
   onToggleSillyChallenge,
   openWith = "home",
   onOpenWithChange,
+  onRenameNana,
 }: {
   /** Build 38: photos, names and PINs for each grandchild. */
   grandchildren?: ReactNode;
@@ -6471,6 +6665,9 @@ function SettingsView({
    *  see each other right away." Default "home". */
   openWith?: "home" | "video";
   onOpenWithChange?: (next: "home" | "video") => void;
+  /** Saves what the grandchildren call this grandparent; resolves to an
+   *  error message, or null when saved. */
+  onRenameNana?: (next: string) => Promise<string | null>;
 }) {
   // Notifications + auto-record are still UI-only stubs (the server
   // doesn't yet enforce them). Kept here so the toggles look alive.
@@ -6680,7 +6877,7 @@ function SettingsView({
 
         {/* Profile card */}
         <SettingsCard title="Profile" icon="👤" delay="0s">
-          <SettingsRow label="Name" value={nanaName || "Nana"} />
+          <GrandparentNameRow name={nanaName || "Nana"} onSave={onRenameNana} />
           <SettingsRow label="Reading with" value={childName || "Your grandchild"} />
           <SettingsRow label="Plan" value={<span style={{ color: AMBER, fontWeight: 700 }}>Founding Family</span>} />
         </SettingsCard>
@@ -7193,6 +7390,70 @@ function SettingsCard({ title, icon, children, delay = "0s", wide = false }: { t
         <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 800, letterSpacing: "0.14em" }}>{title.toUpperCase()}</span>
       </div>
       {children}
+    </div>
+  );
+}
+
+/** "Your grandchildren call you: Papa  [Change]" (Rick's Build 38 review
+ *  #1). The child's iPad uses this name: "Say hi to Papa!". */
+function GrandparentNameRow({ name, onSave }: { name: string; onSave?: (next: string) => Promise<string | null> }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(name);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  if (!onSave) return <SettingsRow label="Name" value={name} />;
+  const save = async (value: string) => {
+    const next = value.replace(/\s+/g, " ").trim();
+    if (!next) { setError("Please enter a name."); return; }
+    setSaving(true);
+    const err = await onSave(next);
+    setSaving(false);
+    if (err) { setError(err); return; }
+    setError("");
+    setEditing(false);
+  };
+  const chip: React.CSSProperties = {
+    minHeight: 44, padding: "0 16px", borderRadius: 999, cursor: "pointer", touchAction: "manipulation",
+    background: "rgba(255,255,255,0.06)", border: "1px solid rgba(201,146,42,0.45)", color: CREAM,
+    fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 700,
+  };
+  if (!editing) {
+    return (
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+        <span style={{ color: "rgba(247,240,227,0.65)", fontFamily: "DM Sans, sans-serif", fontSize: 12 }}>Your grandchildren call you</span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+          <span data-testid="grandparent-name" style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 700 }}>{name}</span>
+          <button type="button" data-testid="grandparent-name-change" onClick={() => { setDraft(name); setError(""); setEditing(true); }} style={{ ...chip, minHeight: 40, fontSize: 13, color: AMBER }}>Change</button>
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+      <span style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700 }}>What do your grandchildren call you?</span>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+        {["Nana", "Papa", "Grandma", "Grandpa"].map(n => (
+          <button key={n} type="button" disabled={saving} onClick={() => void save(n)} style={chip}>{n}</button>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <input
+          data-testid="grandparent-name-input"
+          value={draft}
+          maxLength={40}
+          onChange={ev => setDraft(ev.target.value)}
+          onKeyDown={ev => { if (ev.key === "Enter") void save(draft); }}
+          placeholder="Oma, Gigi, Pop-Pop…"
+          style={{
+            flex: 1, minWidth: 0, minHeight: 44, padding: "0 14px", borderRadius: 12,
+            background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.18)", color: CREAM,
+            fontFamily: "DM Sans, sans-serif", fontSize: 16,
+          }}
+        />
+        <button type="button" data-testid="grandparent-name-save" disabled={saving} onClick={() => void save(draft)} style={{ ...chip, background: AMBER, color: NAVY, border: "none" }}>{saving ? "Saving…" : "Save"}</button>
+        <button type="button" disabled={saving} onClick={() => setEditing(false)} style={chip}>Cancel</button>
+      </div>
+      {error && <span role="alert" style={{ color: "#fca5a5", fontFamily: "DM Sans, sans-serif", fontSize: 13 }}>{error}</span>}
     </div>
   );
 }
@@ -8082,6 +8343,7 @@ function StoriesEntryCard({ entry }: { entry: FamilyStoryEntry }) {
 
 function FamilyStoriesView({
   isNana,
+  nanaName = "",
   subMode,
   currentBookTitle,
   currentBookEmoji,
@@ -8115,6 +8377,8 @@ function FamilyStoriesView({
   onDisconnectSession,
 }: {
   isNana: boolean;
+  /** What the grandchildren call the grandparent. */
+  nanaName?: string;
   subMode: FamilyStoriesSubMode;
   currentBookTitle: string;
   currentBookEmoji: string;
@@ -8132,6 +8396,7 @@ function FamilyStoriesView({
   onReadAnotherBook?: () => void;
   onDisconnectSession?: () => void;
 }) {
+  const grandparentName = nanaName || getRoleLabel("nana");
   // Resolve the active child's name from the multi-child list so the
   // textarea placeholder and other inline child references read like
   // real text ("Tonight Cooper laughed…") instead of a hardcoded
@@ -8387,7 +8652,7 @@ function FamilyStoriesView({
           <div style={{ display: "flex", alignItems: "center", gap: "8px", backgroundColor: "rgba(201,146,42,0.07)", borderRadius: "8px", padding: "9px 10px", border: "1px solid rgba(201,146,42,0.2)" }}>
             <div style={{ fontSize: "20px", animation: "pulse-sm 2s ease-in-out infinite" }}>✍️</div>
             <div>
-              <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700 }}>Nana is writing a memory...</div>
+              <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700 }}>{grandparentName} is writing a memory...</div>
               <div style={{ color: "rgba(247,240,227,0.4)", fontFamily: "DM Sans, sans-serif", fontSize: "11px", marginTop: "1px" }}>about today's reading session</div>
             </div>
           </div>
@@ -8408,7 +8673,7 @@ function FamilyStoriesView({
               <div style={{ fontSize: 36 }}>💌</div>
               <div style={{ color: CREAM, fontSize: 13, fontWeight: 700 }}>The first memory is on its way!</div>
               <div style={{ fontSize: 11, lineHeight: 1.5, maxWidth: 220 }}>
-                Nana is writing about today right now. Once she saves it, it'll appear here.
+                {grandparentName} is writing about today right now. It will appear here once it's saved.
               </div>
             </div>
           ) : (
@@ -8490,7 +8755,7 @@ function FamilyStoriesView({
             }}>
               {isNana
                 ? `Save a note at the end of each reading session, and ${activeChildName} will be able to read it for years to come.`
-                : "When Nana finishes a session with you, she'll save a memory here. They'll be waiting whenever you want to read them again."}
+                : `When ${grandparentName} finishes a visit with you, a memory is saved here. They'll be waiting whenever you want to read them again.`}
             </div>
             <button
               onClick={onClose}
@@ -9674,10 +9939,26 @@ function SillyFacesView({
           </div>
         )}
 
-        {/* While counting/holding (not yet result) */}
+        {/* While the round runs: what's happening, and a way out on both
+            iPads (Rick's Build 38 review #6: nothing could be tapped). */}
         {challengeActive && !laughWinner && sillyChallenge !== "result" && (
-          <div style={{ textAlign: "center", color: "#c084fc", fontFamily: "DM Sans, sans-serif", fontSize: "12px", fontWeight: 700, animation: "pulse-sm 0.8s ease-in-out infinite" }}>
-            😬 Hold that face…
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 14 }}>
+            <span style={{ color: "#c084fc", fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 800, animation: "pulse-sm 0.8s ease-in-out infinite" }}>
+              😬 Hold that face…
+            </span>
+            <button
+              type="button"
+              data-testid="challenge-stop"
+              onClick={onEndChallenge}
+              style={{
+                minHeight: 44, padding: "8px 20px", borderRadius: 999,
+                background: "rgba(255,255,255,0.08)", border: "1px solid rgba(192,132,252,0.6)",
+                color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 800,
+                cursor: "pointer", touchAction: "manipulation",
+              }}
+            >
+              Stop
+            </button>
           </div>
         )}
 
@@ -10199,7 +10480,7 @@ function ParentCheckView({
                   : `${nanaLabel} asked for a different time`}
               </span>
               <span style={{ color: "rgba(247,240,227,0.7)", fontFamily: "DM Sans, sans-serif", fontSize: 12, lineHeight: 1.4 }}>
-                {isNana ? "Pick another day and time to propose." : "Hang tight — Nana will suggest a new time."}
+                {isNana ? "Pick another day and time to propose." : `Hang tight. ${nanaName || getRoleLabel("nana")} will suggest a new time.`}
               </span>
             </div>
           </div>
@@ -10373,10 +10654,10 @@ function ParentCheckView({
           <div style={{ backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "12px", padding: PANEL_PAD, display: "flex", flexDirection: "column", alignItems: "center", gap: PANEL_GAP, flexShrink: 0, textAlign: "center" }}>
             <span style={{ fontSize: "26px" }}>⏳</span>
             <span style={{ color: "rgba(247,240,227,0.65)", fontFamily: "DM Sans, sans-serif", fontSize: "13px", fontWeight: 600, lineHeight: 1.5 }}>
-              Waiting for Nana to suggest a time…
+              Waiting for {nanaName || getRoleLabel("nana")} to suggest a time…
             </span>
             <span style={{ color: "rgba(247,240,227,0.35)", fontFamily: "DM Sans, sans-serif", fontSize: "10px" }}>
-              She'll pick a day and time for your next reading.
+              A day and time for your next reading will show here.
             </span>
           </div>
         )}
@@ -10675,6 +10956,8 @@ function DeviceFrame({
   displayOff = 0,
   flipping,
   flipFromPage,
+  flipFromOff = 0,
+  flipFromSide = "L",
   flipToPage,
   flipToOff = 0,
   flipDirection,
@@ -10696,6 +10979,7 @@ function DeviceFrame({
   onToggleSillyChallenge,
   openWith,
   onOpenWithChange,
+  onRenameNana,
   onStartChat,
   onStartReading,
   onGreetingReady,
@@ -10834,6 +11118,9 @@ function DeviceFrame({
   perryAuthenticated = false,
   onLibraryScroll,
   libraryScrollTop,
+  onLibraryFilters,
+  libraryFilters = null,
+  catalogLoading = false,
   onSignOut,
   readingPos = null,
   phonicsCardOpen = false,
@@ -10858,6 +11145,8 @@ function DeviceFrame({
   displayOff?: number;
   flipping: boolean;
   flipFromPage: number;
+  flipFromOff?: number;
+  flipFromSide?: "L" | "R";
   flipToPage: number;
   flipToOff?: number;
   flipDirection?: "forward" | "backward";
@@ -10883,6 +11172,7 @@ function DeviceFrame({
    *  (default) or live video greeting stage. */
   openWith?: "home" | "video";
   onOpenWithChange?: (next: "home" | "video") => void;
+  onRenameNana?: (next: string) => Promise<string | null>;
   onStartChat: () => void;
   onStartReading: () => void;
   /** Greeting → Icebreaker handoff. Fires when Nana taps "We're ready"
@@ -11072,6 +11362,11 @@ function DeviceFrame({
    *  the latest value through libraryScrollTop and mirrors the scroll. */
   onLibraryScroll?: (top: number) => void;
   libraryScrollTop?: number;
+  /** Nana: her library search and filters changed. */
+  onLibraryFilters?: (f: LibraryFilters) => void;
+  /** Child: Nana's library search and filters. */
+  libraryFilters?: LibraryFilters | null;
+  catalogLoading?: boolean;
   /** Nana-side sign out — publishes session_reset to Perry, logs out
    *  server-side, and returns the device to the splash screen. */
   onSignOut?: () => void;
@@ -11584,10 +11879,12 @@ function DeviceFrame({
             onToggleSillyChallenge={onToggleSillyChallenge}
             openWith={openWith}
             onOpenWithChange={onOpenWithChange}
+            onRenameNana={onRenameNana}
           />
         ) : isFamilyStories ? (
           <FamilyStoriesView
             isNana={isNana}
+            nanaName={nanaName}
             subMode={familyStoriesSubMode}
             currentBookTitle={currentBookTitle}
             currentBookEmoji={currentBookEmoji}
@@ -11666,6 +11963,10 @@ function DeviceFrame({
             // simultaneously.
             onScroll={onLibraryScroll}
             scrollTop={libraryScrollTop}
+            onFiltersChange={isNana ? onLibraryFilters : undefined}
+            mirroredFilters={isNana ? null : libraryFilters}
+            nanaName={nanaName}
+            catalogLoading={catalogLoading}
             onFindMoreBooks={FEATURES.requestBook && isNana && onOpenBookRequest ? (q) => onOpenBookRequest(q) : undefined}
           />
         ) : isShowAndTell ? (
@@ -11762,6 +12063,8 @@ function DeviceFrame({
                 isNana={isNana}
                 flipping={flipping}
                 flipFromPage={flipFromPage}
+                flipFromOff={flipFromOff}
+                flipFromSide={flipFromSide}
                 flipToPage={flipToPage}
                 flipToOff={flipToOff}
                 flipDirection={flipDirection}
@@ -12000,7 +12303,7 @@ function FullPageReading({
   return (
     <div data-bk-layout="fullpage" className="nm-fp" style={{
       display: "flex", flex: 1, minHeight: 0, overflow: "hidden",
-      gap: 12, padding: "10px 12px 12px",
+      gap: 12, padding: "8px 12px 8px",
       background: "radial-gradient(900px 520px at 30% -10%, rgba(201,146,42,0.10), transparent 70%), #0b172e",
     }}>
       <style>{`
@@ -12010,7 +12313,7 @@ function FullPageReading({
       `}</style>
 
       {/* Book column */}
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 8 }}>
         <div className="nm-fp-book" style={{
           flex: 1, minHeight: 0, display: "flex", flexDirection: "column",
           borderRadius: 14, overflow: "hidden",
@@ -12018,7 +12321,9 @@ function FullPageReading({
         }}>
           {bookEl}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0, justifyContent: isNana ? "space-between" : "center" }}>
+        {/* A fixed height: a question that wraps to two lines must not
+            shrink the book (that re-cut the pages mid-book). */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0, height: isNana ? 76 : undefined, justifyContent: isNana ? "space-between" : "center" }}>
           {isNana && (
             <button
               type="button"
@@ -12026,9 +12331,9 @@ function FullPageReading({
               className="nm-fp-cta"
               onClick={onLetsTalk}
               style={{
-                flex: 1, minWidth: 0, minHeight: 58,
+                flex: 1, minWidth: 0, height: "100%",
                 display: "flex", alignItems: "center", gap: 12,
-                padding: "8px 18px 8px 10px", borderRadius: 999,
+                padding: "6px 22px 6px 10px", borderRadius: 999,
                 background: "rgba(201,146,42,0.12)",
                 border: "1.5px solid rgba(201,146,42,0.55)",
                 color: CREAM, cursor: "pointer", textAlign: "left",
@@ -12041,8 +12346,13 @@ function FullPageReading({
                 display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 20,
               }}>💬</span>
               <span style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
-                <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase" }}>Let's Talk</span>
-                <span style={{ fontFamily: "Merriweather, serif", fontSize: 15, fontStyle: "italic", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 12, lineHeight: "14px", fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase" }}>Let's Talk</span>
+                {/* Rick's Build 38 review #2: big enough to read at a
+                    glance; two lines before it shortens. */}
+                <span data-testid="lets-talk-text" style={{
+                  fontFamily: "Merriweather, serif", fontSize: 19, lineHeight: 1.22, fontStyle: "italic",
+                  display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden",
+                }}>
                   {cue || `Ask ${childLabel} about the story`}
                 </span>
               </span>
@@ -14198,6 +14508,31 @@ export default function App() {
   // Perry's SSE handler clears her perryHasJoined and re-arms the mode
   // jail (otherwise she stays in stale reading mode while Nana lands on
   // a fresh login screen). Then logout server-side and return to splash.
+  // Rick's Build 38 review #1: the grandparent renames themselves in
+  // Settings; the child's iPad hears it straight away.
+  const handleRenameNana = async (next: string): Promise<string | null> => {
+    try {
+      const { user } = await api.auth.setDisplayName(next);
+      const name = user.displayName || next;
+      setNanaDisplayName(name);
+      if (connectionId) api.sessions.publishEvent(connectionId, "nana_name", { name }).catch(() => {});
+      return null;
+    } catch (err) {
+      return err instanceof Error && err.message ? err.message : "Couldn't save that. Please try again.";
+    }
+  };
+  // A saved sign-in skips the login form, which is where the name used
+  // to be read: read it from the server instead of showing "Nana".
+  useEffect(() => {
+    if (deviceView !== "nana") return;
+    try { if (!localStorage.getItem("nm_session_token")) return; } catch { return; }
+    let alive = true;
+    api.auth.me()
+      .then(({ user }) => { if (alive) setNanaDisplayName(user.displayName || user.firstName || "Nana"); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, [deviceView]);
+
   const handleSignOut = async () => {
     if (connectionId) {
       // A live visit ends for the child too (their iPad goes back to the
@@ -15203,46 +15538,11 @@ export default function App() {
 
         if (state.lastChallenge && state.lastChallenge.ts > lastAppliedChallengeTsRef.current) {
           lastAppliedChallengeTsRef.current = state.lastChallenge.ts;
-          // Apply the same host re-derivation as the SSE handlers so polling
-          // doesn't leave a stale host ref locking out future rounds.
-          if (state.lastChallenge.host === "nana" || state.lastChallenge.host === "perry") {
-            const myRole = isPerry ? "perry" : "nana";
-            challengeHostRef.current = (state.lastChallenge.host === myRole);
-          }
-          // Holding endsAt — applies on BOTH host and non-host so a
-          // polling-only recovery still wakes the local setTimeout that
-          // ends the "first to laugh" hold and transitions to result.
-          if (state.lastChallenge.state === "holding" && typeof state.lastChallenge.endsAt === "number") {
-            sillyHoldingEndsAtLocalRef.current = serverToLocal(state.lastChallenge.endsAt);
-          }
-          // Counting anchor — same dual-side update as the SSE handler:
-          // both host and non-host refresh sillyChallengeStartTsRef
-          // from the server-stamped startAt so the rAF tick on both
-          // iPads anchors to the same wall-clock moment.
-          const startAtRaw = state.lastChallenge.startAt ?? state.lastChallenge.startTs;
-          if (state.lastChallenge.state === "counting" && typeof startAtRaw === "number") {
-            const localStartTs = state.lastChallenge.startAt != null
-              ? serverToLocal(startAtRaw)
-              : startAtRaw; // legacy fallback
-            sillyChallengeStartTsRef.current = localStartTs;
-          }
-          if (!challengeHostRef.current && state.lastChallenge.state) {
-            if (state.lastChallenge.state === "counting" && typeof startAtRaw === "number") {
-              // Non-host: transition state immediately (rAF tick is
-              // already anchored from the block above).
-              setLaughWinner(null);
-              setSillyChallenge("counting");
-              setSillyCountNum(3);
-            } else {
-              setSillyChallenge(state.lastChallenge.state as ChallengeState);
-              if (state.lastChallenge.countNum != null) setSillyCountNum(state.lastChallenge.countNum);
-            }
-          }
+          applyChallengeRef.current(state.lastChallenge);
         }
-
         if (state.lastLaughWinner && state.lastLaughWinner.ts > lastAppliedLaughTsRef.current) {
           lastAppliedLaughTsRef.current = state.lastLaughWinner.ts;
-          setLaughWinner(state.lastLaughWinner.who);
+          applyLaughWinnerRef.current(state.lastLaughWinner);
         }
 
         // Chapter-end celebration overlay — polling fallback. If a fresh
@@ -15495,6 +15795,8 @@ export default function App() {
           const forward = newPage > childPageRef.current || (newPage === childPageRef.current && newOff > childOffRef.current);
           setFlipDirection(forward ? "forward" : "backward");
           setFlipFromPage(childPageRef.current);
+          setFlipFromOff(childOffRef.current);
+          setFlipFromSide(pageSideRef.current);
           setFlipToPage(newPage);
           setFlipToOff(newOff);
           setChildFlipping(true);
@@ -15537,6 +15839,13 @@ export default function App() {
           if (typeof msg.serverTs === "number") {
             lastAppliedBookChangeTsRef.current = msg.serverTs;
           }
+        } else if (msg.type === "library_filter") {
+          const p = msg.payload as Partial<LibraryFilters>;
+          setLibraryFilters({
+            q: typeof p.q === "string" ? p.q.slice(0, 80) : "",
+            status: p.status === "in-progress" || p.status === "not-started" || p.status === "finished" ? p.status : "all",
+            age: p.age === "4-5" || p.age === "5-7" || p.age === "7-10" || p.age === "10-13" ? p.age : "any",
+          });
         } else if (msg.type === "library_scroll") {
           // Bidirectional library scroll mirror on Perry's side.
           // Own-echo skip uses per-client origin ID (see
@@ -15571,12 +15880,6 @@ export default function App() {
           const wasInSession = modeRef.current !== "onboarding" && perryActiveRef.current;
           perryActiveRef.current = false;
           setPerryHasJoined(false);
-          // Drop the silly-challenge host flag too. Otherwise the next
-          // session inherits the prior round's host assignment and the
-          // first challenge_state event collides with stale state on the
-          // non-host iPad — part of the "iPads can't talk to each other"
-          // lock Rick hit after the Three Little Pigs crash.
-          challengeHostRef.current = false;
           if (wasInSession) {
             setPartnerLeftShown(true);
             window.setTimeout(() => setPartnerLeftShown(false), 2500);
@@ -15848,60 +16151,16 @@ export default function App() {
             try { localStorage.setItem("nm_active_child_id", nextId); } catch {}
           }
         } else if (msg.type === "challenge_state") {
-          // If the publisher tagged itself as host, re-derive challengeHostRef.
-          // Without this, Perry tapping "Play Again" after a round Nana
-          // hosted leaves Nana's ref=true and her handler stops applying
-          // events for Round 2.
-          if (msg.payload.host === "nana" || msg.payload.host === "perry") {
-            const myRole = perryAuthenticated ? "perry" : "nana";
-            challengeHostRef.current = (msg.payload.host === myRole);
-          }
-          // Capture the holding endsAt for BOTH host and non-host —
-          // both sides schedule their own setTimeout to transition
-          // out of holding into result at the shared server-clock
-          // moment, instead of the non-host waiting for Nana's SSE
-          // round trip after her local 6s timeout. Stored as a
-          // local-clock target via serverToLocal so the local
-          // setTimeout fires accurately on each iPad.
-          if (msg.payload.state === "holding" && typeof msg.payload.endsAt === "number") {
-            sillyHoldingEndsAtLocalRef.current = serverToLocal(msg.payload.endsAt as number);
-          }
-          // Sync the 3-2-1 countdown anchor for BOTH host and non-host.
-          // Without this, the host's anchor was `Date.now() + 1500`
-          // (her local clock at tap) while the non-host's anchor was
-          // `serverToLocal(serverNow_at_publish + 1500)` — these
-          // differ by the publisher→server propagation time, leaving
-          // Perry's countdown ~full-RTT behind Nana's. Updating the
-          // host's ref to the server-stamped value lets both rAF
-          // ticks anchor identically and tick in lockstep. The
-          // monotonic-decreasing guard on the rAF tick keeps "3"
-          // displayed throughout the ref adjustment, so the update
-          // is invisible.
-          const startAtRaw = (msg.payload.startAt as number | undefined) ?? (msg.payload.startTs as number | undefined);
-          if (msg.payload.state === "counting" && typeof startAtRaw === "number") {
-            const localStartTs = msg.payload.startAt != null
-              ? serverToLocal(startAtRaw)
-              : startAtRaw; // legacy path — publisher clock as-is
-            sillyChallengeStartTsRef.current = localStartTs;
-          }
-          if (!challengeHostRef.current) {
-            lastAppliedChallengeTsRef.current = Date.now();
-            if (msg.payload.state === "counting" && typeof startAtRaw === "number") {
-              // Non-host: transition to counting state IMMEDIATELY so the
-              // result panel hides and the countdown overlay appears.
-              // The rAF tick (anchored to localStartTs set above)
-              // freezes at "3" until the server-stamped moment is
-              // reached, then ticks 3→2→1 in lockstep with the host.
-              setLaughWinner(null);
-              setSillyChallenge("counting");
-              setSillyCountNum(3);
-            } else {
-              // Non-counting states (flash, holding, result) are short
-              // and only published by the host — applying immediately
-              // is fine and keeps those transitions snappy.
-              setSillyChallenge(msg.payload.state as ChallengeState);
-              if (msg.payload.countNum != null) setSillyCountNum(msg.payload.countNum as number);
-            }
+          applyChallengeRef.current(msg.payload);
+        } else if (msg.type === "nana_name") {
+          // The grandparent renamed themselves in Settings.
+          const name = typeof msg.payload.name === "string" ? msg.payload.name.trim() : "";
+          if (name) {
+            setNanaDisplayName(name);
+            try {
+              const raw = localStorage.getItem("nm_perry_conn");
+              if (raw) localStorage.setItem("nm_perry_conn", JSON.stringify({ ...JSON.parse(raw), nanaName: name }));
+            } catch {}
           }
         } else if (msg.type === "silly_filter") {
           if (msg.payload.who === "nana") {
@@ -15914,11 +16173,7 @@ export default function App() {
             setPerrySillyFilter(f);
           }
         } else if (msg.type === "laugh_winner") {
-          lastAppliedLaughTsRef.current = Date.now();
-          // `who: null` is the reset signal sent by handleEndChallenge —
-          // both sides drop back to the regular Silly Faces screen.
-          const who = msg.payload.who;
-          setLaughWinner(who === "nana" || who === "perry" ? who : null);
+          applyLaughWinnerRef.current(msg.payload);
         } else if (msg.type === "chapter_end" && CHAPTER_END_POPUP_ENABLED) {
           // Nana crossed a chapter boundary — both iPads show the
           // celebratory overlay until she taps Next Chapter or End here.
@@ -16043,6 +16298,11 @@ export default function App() {
             lastAppliedPointerTsRef.current = ts;
             setPointerHighlight({ x: p.x, y: p.y, page: p.page, ts });
           }
+        } else if (msg.type === "catalog_updated") {
+          // Rick, Oct 8: a book he had just added didn't show up in
+          // search. Only the child's stream listened for this; Nana, who
+          // picks the books, now fetches the new or changed book too.
+          try { refreshCatalogRef.current?.(); } catch {}
         } else if (msg.type === "library_scroll") {
           // Bidirectional library scroll mirror on Nana's side —
           // Rick's Build 28 #2 root cause was that this handler was
@@ -16252,58 +16512,16 @@ export default function App() {
           setGoodbyePhase((prev) => (phase === 0 || phase >= prev ? phase : prev));
           if (phase === 7) setMode("goodbye");
         } else if (msg.type === "challenge_state") {
-          // Re-derive host so Round-N publisher's identity is respected
-          // (matches the Perry-side handler at line ~7948).
-          if (msg.payload.host === "nana" || msg.payload.host === "perry") {
-            const myRole = perryAuthenticated ? "perry" : "nana";
-            challengeHostRef.current = (msg.payload.host === myRole);
-          }
-          // Capture the holding endsAt for BOTH host and non-host —
-          // both sides schedule their own setTimeout to transition
-          // out of holding into result at the shared server-clock
-          // moment, instead of the non-host waiting for Nana's SSE
-          // round trip after her local 6s timeout. Stored as a
-          // local-clock target via serverToLocal so the local
-          // setTimeout fires accurately on each iPad.
-          if (msg.payload.state === "holding" && typeof msg.payload.endsAt === "number") {
-            sillyHoldingEndsAtLocalRef.current = serverToLocal(msg.payload.endsAt as number);
-          }
-          // Sync the 3-2-1 countdown anchor for BOTH host and non-host.
-          // Without this, the host's anchor was `Date.now() + 1500`
-          // (her local clock at tap) while the non-host's anchor was
-          // `serverToLocal(serverNow_at_publish + 1500)` — these
-          // differ by the publisher→server propagation time, leaving
-          // Perry's countdown ~full-RTT behind Nana's. Updating the
-          // host's ref to the server-stamped value lets both rAF
-          // ticks anchor identically and tick in lockstep. The
-          // monotonic-decreasing guard on the rAF tick keeps "3"
-          // displayed throughout the ref adjustment, so the update
-          // is invisible.
-          const startAtRaw = (msg.payload.startAt as number | undefined) ?? (msg.payload.startTs as number | undefined);
-          if (msg.payload.state === "counting" && typeof startAtRaw === "number") {
-            const localStartTs = msg.payload.startAt != null
-              ? serverToLocal(startAtRaw)
-              : startAtRaw; // legacy path — publisher clock as-is
-            sillyChallengeStartTsRef.current = localStartTs;
-          }
-          if (!challengeHostRef.current) {
-            lastAppliedChallengeTsRef.current = Date.now();
-            if (msg.payload.state === "counting" && typeof startAtRaw === "number") {
-              // Non-host: transition to counting state IMMEDIATELY so the
-              // result panel hides and the countdown overlay appears.
-              // The rAF tick (anchored to localStartTs set above)
-              // freezes at "3" until the server-stamped moment is
-              // reached, then ticks 3→2→1 in lockstep with the host.
-              setLaughWinner(null);
-              setSillyChallenge("counting");
-              setSillyCountNum(3);
-            } else {
-              // Non-counting states (flash, holding, result) are short
-              // and only published by the host — applying immediately
-              // is fine and keeps those transitions snappy.
-              setSillyChallenge(msg.payload.state as ChallengeState);
-              if (msg.payload.countNum != null) setSillyCountNum(msg.payload.countNum as number);
-            }
+          applyChallengeRef.current(msg.payload);
+        } else if (msg.type === "nana_name") {
+          // The grandparent renamed themselves in Settings.
+          const name = typeof msg.payload.name === "string" ? msg.payload.name.trim() : "";
+          if (name) {
+            setNanaDisplayName(name);
+            try {
+              const raw = localStorage.getItem("nm_perry_conn");
+              if (raw) localStorage.setItem("nm_perry_conn", JSON.stringify({ ...JSON.parse(raw), nanaName: name }));
+            } catch {}
           }
         } else if (msg.type === "silly_filter") {
           if (msg.payload.who === "nana") {
@@ -16316,11 +16534,7 @@ export default function App() {
             setPerrySillyFilter(f);
           }
         } else if (msg.type === "laugh_winner") {
-          lastAppliedLaughTsRef.current = Date.now();
-          // `who: null` is the reset signal sent by handleEndChallenge —
-          // both sides drop back to the regular Silly Faces screen.
-          const who = msg.payload.who;
-          setLaughWinner(who === "nana" || who === "perry" ? who : null);
+          applyLaughWinnerRef.current(msg.payload);
         } else if (msg.type === "chapter_end" && CHAPTER_END_POPUP_ENABLED) {
           // Nana's own publish echoes back via SSE — applying is idempotent
           // (her local state was already set by changePage interception).
@@ -16435,7 +16649,7 @@ export default function App() {
       if (err instanceof ApiError && (err.reason === "connection_gone" || err.reason === "no_child")) {
         resetPerryToInviteEntry(
           err.reason === "connection_gone"
-            ? "That invite is no longer active — please ask Nana for a fresh code."
+            ? "That invite is no longer active. Please ask your grandparent for a fresh code."
             : "No grandchild profile here yet. Use a fresh invite code to set one up."
         );
         return;
@@ -16853,6 +17067,10 @@ export default function App() {
   useEffect(() => { nanaPageRef.current = nanaPage; }, [nanaPage]);
   const [childFlipping, setChildFlipping] = useState(false);
   const [flipFromPage, setFlipFromPage] = useState(1);
+  // Where a page turn started (word and one-page side): the turning page
+  // draws the old page from here, even if a poll moves the page mid-turn.
+  const [flipFromOff, setFlipFromOff] = useState(0);
+  const [flipFromSide, setFlipFromSide] = useState<"L" | "R">("L");
   const [flipToPage, setFlipToPage] = useState(1);
   const [flipToOff, setFlipToOff] = useState(0);
   const [flipDirection, setFlipDirection] = useState<"forward" | "backward">("forward");
@@ -16873,38 +17091,70 @@ export default function App() {
   // refresh function without needing to close over it (avoids
   // "refetch uses stale state" pitfalls in the SSE listener).
   const refreshCatalogRef = useRef<() => void>(() => {});
+  // True until this launch has the server's current catalog: the library
+  // says it is getting the newest books instead of "No books match".
+  const [catalogLoading, setCatalogLoading] = useState(true);
   useEffect(() => {
     let alive = true;
+    let running = false;
+    let again = false;
+    // The old localStorage copy (too small for picture books: Build 40
+    // keeps the catalog in IndexedDB).
+    try { localStorage.removeItem("nm_catalog_v1"); } catch {}
 
-    // Instant paint from localStorage cache — the network fetch below
-    // will refresh it. Guards a Nana who opens the iPad offline: she
-    // still gets whatever books the server told her about last time.
-    try {
-      const cachedRaw = localStorage.getItem("nm_catalog_v1");
-      if (cachedRaw) {
-        const cached = JSON.parse(cachedRaw) as unknown[];
-        if (Array.isArray(cached) && cached.length > 0) {
-          mergeServerCatalog(cached);
-          setCatalogVersion(v => v + 1);
-        }
-      }
-    } catch {}
-
-    const refresh = () => {
-      api.catalog.listBooks()
-        .then(serverBooks => {
-          if (!alive) return;
-          mergeServerCatalog(serverBooks);
-          try { localStorage.setItem("nm_catalog_v1", JSON.stringify(serverBooks)); } catch {}
-          setCatalogVersion(v => v + 1);
-        })
-        .catch(() => { /* silent — hardcoded fallback still works */ });
+    const apply = (books: unknown[], removed: string[] = []) => {
+      for (const id of removed) if (booksLibrary[id]?.fromCatalog) delete booksLibrary[id];
+      mergeServerCatalog(books);
+      setCatalogVersion(v => v + 1);
     };
-    refreshCatalogRef.current = refresh;
-    refresh();
-    // Also refresh when the tab returns to foreground, so Rick's newest
-    // book shows up without a full app relaunch.
-    const onFocus = () => { if (document.visibilityState === "visible") refresh(); };
+
+    // Instant paint from the books kept on this iPad, read once per launch
+    // and kept in memory (refreshes run each time the library opens).
+    const kept = new Map<string, CatalogBook>();
+    const keptReady = loadCatalog().then(cached => {
+      for (const b of cached) kept.set(b.id, b);
+      if (alive && cached.length > 0) apply(cached);
+    });
+
+    // Ask which books exist and when each changed; download only new or
+    // changed books, a few at a time, so the library fills in quickly.
+    const refresh = async () => {
+      if (running) { again = true; return; }
+      running = true;
+      try {
+        const index = await api.catalog.index();
+        await keptReady;
+        const order = index.map(e => e.id);
+        const stale = index.filter(e => kept.get(e.id)?.updatedAt !== e.updatedAt).map(e => e.id);
+        const ordered = () => order.map(id => kept.get(id)).filter((b): b is NonNullable<typeof b> => !!b);
+        for (let i = 0; i < stale.length; i += 6) {
+          const got = await api.catalog.byIds(stale.slice(i, i + 6));
+          if (!alive) return;
+          for (const b of got) kept.set(b.id, b);
+          await saveCatalog(got, order);
+          apply(ordered());
+        }
+        const removed = [...kept.keys()].filter(id => !order.includes(id));
+        for (const id of removed) kept.delete(id);
+        if (removed.length > 0 || stale.length === 0) await saveCatalog([], order, removed);
+        if (alive) apply(ordered(), removed);
+      } catch {
+        // An older server without the index: the whole list at once.
+        try {
+          const all = await api.catalog.listBooks();
+          if (alive) apply(all);
+        } catch { /* offline: the books kept on this iPad still work */ }
+      } finally {
+        running = false;
+        if (alive) setCatalogLoading(false);
+        if (again && alive) { again = false; void refresh(); }
+      }
+    };
+    refreshCatalogRef.current = () => { void refresh(); };
+    void refresh();
+    // Also refresh when the app returns to the foreground, so Rick's newest
+    // book shows up without a relaunch (only changed books download).
+    const onFocus = () => { if (document.visibilityState === "visible") void refresh(); };
     document.addEventListener("visibilitychange", onFocus);
     window.addEventListener("focus", onFocus);
     return () => {
@@ -16934,6 +17184,16 @@ export default function App() {
   // checks `payload.origin !== myLibraryOriginRef.current` to know
   // it's a partner's event, no value comparison needed.
   const [libraryScrollTop, setLibraryScrollTop] = useState(0);
+  // Nana's library search and filters as the child's iPad last heard them.
+  const [libraryFilters, setLibraryFilters] = useState<LibraryFilters | null>(null);
+  const handleLibraryFilters = useCallback((f: LibraryFilters) => {
+    if (connectionId) api.sessions.publishEvent(connectionId, "library_filter", f).catch(() => {});
+  }, [connectionId]);
+  useEffect(() => { if (mode !== "library") setLibraryFilters(null); }, [mode]);
+  // Opening the library checks for new books (a small list of ids and
+  // dates; only new or changed books download). A book added while no
+  // visit was running used to stay hidden until the app restarted.
+  useEffect(() => { if (mode === "library") refreshCatalogRef.current(); }, [mode]);
   const libraryScrollPendingRef = useRef(false);
   const libraryScrollLatestRef = useRef(0);
   // Per-tab stable origin id — generated once on mount, included in
@@ -17363,7 +17623,9 @@ export default function App() {
   // a book keeps one page count per text size and layout from visit to
   // visit, even before the child's iPad reports in (Rick's Build 36 #1).
   const [planStage, setPlanStage] = useState<StageSize | null>(null);
-  const stageKey = connectionId ? `nm_stage:${connectionId}` : null;
+  // "2": the book got taller (Build 40), so every family picks its shared
+  // page size afresh once instead of keeping the old, shorter one.
+  const stageKey = connectionId ? `nm_stage2:${connectionId}` : null;
   useEffect(() => {
     if (!isPagePlanner || !stageKey) return;
     try {
@@ -17618,7 +17880,7 @@ export default function App() {
     };
     // Image-page picture books (e.g. Aubrees) render each spread as one
     // full-bleed illustration, so one-page mode just steps spreads.
-    const isImageBook = currentBook.pages.some(p => !!p.imageUrl);
+    const isImageBook = isFullPagePictureBook(currentBook.pages);
     if (pageMode === "double" || isImageBook) {
       goTo(k + dir);
       return;
@@ -17626,7 +17888,7 @@ export default function App() {
     const side = pageSideRef.current;
     const pages = currentBook.pages;
     // The cover is a typographic title page: one combined page.
-    const isCover = (kk: number) => plan.starts[kk] === 1 && (plan.offs[kk] ?? 0) === 0 && !!pages[0]?.rightIsTitle;
+    const isCover = (kk: number) => (plan.offs[kk] ?? 0) === 0 && !!pages[plan.starts[kk] - 1]?.rightIsTitle;
     const hasRight = (kk: number) => !isCover(kk) && spreadHasRight(pages, plan, kk);
     // In one-page mode the reader is on the first word of the page on
     // screen, so a re-plan keeps that page's words in view.
@@ -17738,6 +18000,8 @@ export default function App() {
     }
     setFlipDirection(dir);
     setFlipFromPage(childPageRef.current);
+    setFlipFromOff(childOffRef.current);
+    setFlipFromSide(pageSideRef.current);
     setFlipToPage(newPage);
     setFlipToOff(newOff);
     setChildFlipping(true);
@@ -17941,96 +18205,88 @@ export default function App() {
   const [sillyChallenge, setSillyChallenge] = useState<ChallengeState>("idle");
   const [sillyCountNum, setSillyCountNum] = useState(3);
   const [laughWinner, setLaughWinner] = useState<"nana" | "perry" | null>(null);
-  const challengeHostRef = useRef(false);
-  // When the counting phase started — shared between Nana and Perry via the
-  // `state: "counting"` event payload. Rick: "The challenge countdown lags
-  // behind Nana on Perry's iPad by approximately one second." Old design
-  // published one event per tick (3→2→1), each subject to SSE + Cloudflare
-  // buffering — typically 1s late on Perry. New design publishes the start
-  // timestamp ONCE; both iPads derive the displayed count locally from
-  // (now - startTs), so the visible number stays in lockstep regardless of
-  // network jitter.
+  // Rick's Build 38 review #6: the challenge used to be run by whichever
+  // iPad started it, and the child's iPad could mistake itself for
+  // Nana's, so the two iPads argued over the round and got stuck. Now a
+  // round is just its shared start time: both iPads step through it on
+  // their own clock, and `round` names it so a stale or overlapping
+  // event can't take over.
+  const [challengeRound, setChallengeRound] = useState("");
+  const challengeRoundRef = useRef("");
+  // Local-clock moment the 3-2-1 starts (the server's start, converted).
   const sillyChallengeStartTsRef = useRef<number>(0);
-  // Local-clock target for the holding-state transition to "result".
-  // Stored when entering the holding state (set by both SSE handlers
-  // from the server-stamped endsAt). Both iPads schedule their own
-  // setTimeout for this moment so the "Who laughed first?" reveal
-  // fires at the same wall-clock time on Nana's and Perry's screens
-  // instead of Perry waiting for Nana's SSE round trip.
-  const sillyHoldingEndsAtLocalRef = useRef<number>(0);
-  // Scheduled-start deferral mechanism removed. Previously this
-  // state + effect waited 1.5s after the publish before transitioning
-  // sillyChallenge to "counting" — the goal was to align both iPads'
-  // state transitions to the same wall-clock moment. But during the
-  // 1.5s wait, sillyChallenge was still "result" with laughWinner
-  // cleared, so the "Who cracked up first?" panel re-appeared, looking
-  // stuck. Rick: "if nana retries it stuck." Now both handlers
-  // transition immediately; the rAF tick's monotonic-decreasing guard
-  // keeps the displayed number frozen at 3 until sillyChallengeStartTsRef
-  // is reached, so the visible countdown still begins at the synced
-  // moment without the deferred-state confusion.
 
-  useEffect(() => {
-    if (sillyChallenge === "idle") { challengeHostRef.current = false; return; }
-    if (!challengeHostRef.current) return; // Non-host device: skip — driven by SSE
-    // Stamp every state-machine publish with the host role so receivers can
-    // re-derive their own challengeHostRef on each event. Without this, when
-    // Perry taps "Play Again" after a round Nana hosted, Nana's stale
-    // ref=true causes her SSE handler to skip subsequent challenge_state
-    // events and the screens desync.
-    const myRole: "nana" | "perry" = deviceView === "perry" ? "perry" : "nana";
-    const pub = (state: string) => {
-      if (connectionId) api.sessions.publishEvent(connectionId, "challenge_state", { state, host: myRole }).catch(() => {});
-    };
-    if (sillyChallenge === "counting") {
-      // Host schedules the single transition to "flash" at 2700ms from the
-      // shared startTs. The visible 3-2-1 countdown ticks locally on both
-      // sides via the rAF effect below — no per-tick network round trip.
-      const elapsed = Date.now() - sillyChallengeStartTsRef.current;
-      const remaining = Math.max(0, 2700 - elapsed);
-      const t = setTimeout(() => { setSillyChallenge("flash"); pub("flash"); }, remaining);
-      return () => clearTimeout(t);
-    }
-    if (sillyChallenge === "flash") {
-      const t = setTimeout(() => { setSillyChallenge("holding"); pub("holding"); }, 450);
-      return () => clearTimeout(t);
-    }
-    // Holding → result is no longer scheduled here. Moved to a separate
-    // effect (below) that runs on BOTH sides anchored to the server-
-    // stamped endsAt, so the reveal fires at the same wall-clock moment
-    // on Nana's and Perry's iPads instead of Perry waiting for Nana's
-    // SSE round trip after her 6-second timeout.
-    return undefined;
-  }, [sillyChallenge, connectionId]);
+  const resetChallenge = useCallback(() => {
+    challengeRoundRef.current = "";
+    setChallengeRound("");
+    sillyChallengeStartTsRef.current = 0;
+    setSillyChallenge("idle");
+    setLaughWinner(null);
+  }, []);
 
-  // Shared "holding → result" transition. Runs on BOTH iPads when the
-  // challenge enters the holding state. Each side schedules its own
-  // local setTimeout against the server-stamped endsAt converted via
-  // serverToLocal — so the reveal "Who laughed first?" appears at the
-  // same wall-clock moment on both screens regardless of RTT. Host
-  // additionally publishes the result transition so the polling
-  // backstop + late-joiners observe it.
-  useEffect(() => {
-    if (sillyChallenge !== "holding") return;
-    let endsAtLocal = sillyHoldingEndsAtLocalRef.current;
-    // Defensive fallback: if endsAt wasn't carried in the event (older
-    // server, or local-only entry into holding for the host before its
-    // own SSE echo arrived), anchor to "now + 6s" so the timer still
-    // fires roughly correctly.
-    if (!endsAtLocal || endsAtLocal <= Date.now()) {
-      endsAtLocal = Date.now() + 6000;
-      sillyHoldingEndsAtLocalRef.current = endsAtLocal;
-    }
-    const delay = Math.max(0, endsAtLocal - Date.now());
-    const t = window.setTimeout(() => {
-      setSillyChallenge((prev) => (prev === "holding" ? "result" : prev));
-      if (challengeHostRef.current && connectionId) {
-        const myRole: "nana" | "perry" = deviceView === "perry" ? "perry" : "nana";
-        api.sessions.publishEvent(connectionId, "challenge_state", { state: "result", host: myRole }).catch(() => {});
+  // A challenge_state event, or the last one the server kept (polling).
+  // The stream handlers were created when the stream opened, so they
+  // call this through a ref.
+  const applyChallenge = (p: { state?: unknown; startAt?: unknown; startTs?: unknown; round?: unknown }) => {
+    const startAt = typeof p.startAt === "number" ? p.startAt : typeof p.startTs === "number" ? p.startTs : null;
+    const round = typeof p.round === "string" && p.round ? p.round : startAt != null ? `t${startAt}` : "";
+    if (p.state === "counting" && startAt != null) {
+      const startLocal = serverToLocal(startAt);
+      if (round === challengeRoundRef.current) {
+        // Our own start coming back (or the poll repeating it): only
+        // line the countdown up with the server's start time.
+        sillyChallengeStartTsRef.current = startLocal;
+        return;
       }
-    }, delay);
+      if (Date.now() > startLocal + CHALLENGE_RESULT_AT + CHALLENGE_STALE_MS) return;
+      challengeRoundRef.current = round;
+      setChallengeRound(round);
+      sillyChallengeStartTsRef.current = startLocal;
+      setLaughWinner(null);
+      setSillyCountNum(3);
+      setSillyChallenge(challengePhaseAt(startLocal));
+    } else if (p.state === "idle") {
+      // Ending an older round never cancels a newer one.
+      if (round && challengeRoundRef.current && round !== challengeRoundRef.current) return;
+      resetChallenge();
+    }
+  };
+  const applyChallengeRef = useRef(applyChallenge);
+  applyChallengeRef.current = applyChallenge;
+  const applyLaughWinner = (p: { who?: unknown; round?: unknown }) => {
+    const round = typeof p.round === "string" ? p.round : "";
+    // Only for the round on screen (a reload must not bring back an old
+    // round's winner).
+    if (round && round !== challengeRoundRef.current) return;
+    setLaughWinner(p.who === "nana" || p.who === "perry" ? p.who : null);
+  };
+  const applyLaughWinnerRef = useRef(applyLaughWinner);
+  applyLaughWinnerRef.current = applyLaughWinner;
+
+  // Both iPads step through the round from the shared start time.
+  useEffect(() => {
+    if (sillyChallenge === "idle" || sillyChallenge === "result") return;
+    let t = 0;
+    const step = () => {
+      const start = sillyChallengeStartTsRef.current;
+      if (!start) return;
+      const phase = challengePhaseAt(start);
+      if (phase !== sillyChallenge) {
+        setSillyChallenge(prev => (prev === "idle" || prev === "result" ? prev : phase));
+        return;
+      }
+      const next = phase === "counting" ? CHALLENGE_FLASH_AT : phase === "flash" ? CHALLENGE_HOLD_AT : CHALLENGE_RESULT_AT;
+      // Re-checked when it fires: the start can move a little when the
+      // server's time for it arrives.
+      t = window.setTimeout(step, Math.max(16, start + next - Date.now()));
+    };
+    step();
     return () => window.clearTimeout(t);
-  }, [sillyChallenge, connectionId, deviceView]);
+  }, [sillyChallenge, challengeRound]);
+
+  // A round never outlives Silly Faces or the child it was played with.
+  useEffect(() => { if (mode !== "sillyfaces") resetChallenge(); }, [mode, resetChallenge]);
+  useEffect(() => { resetChallenge(); }, [activeChildId, resetChallenge]);
 
   // Local countdown ticker — runs on BOTH iPads while `state === "counting"`.
   // Reads the shared startTs and recomputes the displayed countNum every
@@ -18408,7 +18664,7 @@ export default function App() {
     if (readThisVisitRef.current) setMode("reading");
     else handleStartReading();
   };
-  const handleStartParentCheck = () => { setNanaSillyFilter("none"); setPerrySillyFilter("none"); setSillyChallenge("idle"); setLaughWinner(null); setMode("parentcheck"); };
+  const handleStartParentCheck = () => { setNanaSillyFilter("none"); setPerrySillyFilter("none"); resetChallenge(); setMode("parentcheck"); };
   const handleStartSillyFaces  = () => setMode("sillyfaces");
   const handleSetNanaFilter = (f: string) => {
     setNanaSillyFilter(f);
@@ -18427,56 +18683,30 @@ export default function App() {
     if (connectionId) api.sessions.publishEvent(connectionId, "filter_clear_all", {}).catch(() => {});
   };
   const handleStartChallenge = () => {
-    // Debounce: ignore re-tap if a transition is already scheduled
-    // within the next 2s. Prevents the "both tap Try Again
-    // simultaneously" race where each side becomes host of its own
-    // event, then both downgrade to non-host on receiving each other's
-    // event → no one drives the state machine and both stuck.
-    const pending = sillyChallengeStartTsRef.current;
-    if (pending && Date.now() < pending && pending - Date.now() < 2000) return;
-
-    challengeHostRef.current = true;
-    // Transition to counting state IMMEDIATELY on tap. The rAF tick
-    // anchors to sillyChallengeStartTsRef.current (set 1500ms in the
-    // future) and its monotonic-decreasing guard keeps the display at
-    // "3" until that anchor is reached — so the countdown number
-    // doesn't flash forward, the rAF just renders "3" then ticks
-    // 3→2→1 starting exactly at the anchor.
-    //
-    // Previously this set `scheduledStartTs` and waited 1.5s before
-    // transitioning sillyChallenge. During that wait, sillyChallenge
-    // was still "result" with laughWinner cleared — which made the
-    // "Who cracked up first?" panel re-appear for 1.5s, looking
-    // stuck. Rick: "if nana retries it stuck."
-    //
-    // Server still stamps a canonical startAt for Perry to convert
-    // via her server-clock offset, so the tick anchors match within
-    // ~RTT/2 on both iPads.
+    // Both iPads tapping at once: the server passes both starts on in the
+    // same order to both iPads, so both end on the later round.
     const startTs = Date.now() + 1500;
+    const round = `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    challengeRoundRef.current = round;
+    setChallengeRound(round);
     sillyChallengeStartTsRef.current = startTs;
     setLaughWinner(null);
-    setSillyChallenge("counting");
     setSillyCountNum(3);
-    const myRole: "nana" | "perry" = deviceView === "perry" ? "perry" : "nana";
+    setSillyChallenge("counting");
     if (connectionId) {
       const startAt = Math.round(startTs + serverOffsetMsRef.current);
-      api.sessions.publishEvent(connectionId, "challenge_state", { state: "counting", delayMs: 1500, startAt, host: myRole }).catch(() => {});
+      api.sessions.publishEvent(connectionId, "challenge_state", { state: "counting", delayMs: 1500, startAt, round }).catch(() => {});
     }
   };
   const handleLaughedFirst = (who: "nana" | "perry") => {
     setLaughWinner(who);
-    if (connectionId) api.sessions.publishEvent(connectionId, "laugh_winner", { who }).catch(() => {});
+    if (connectionId) api.sessions.publishEvent(connectionId, "laugh_winner", { who, round: challengeRoundRef.current }).catch(() => {});
   };
-  // Reset the challenge state machine so the user is no longer locked
-  // on the result/winner screen. Both sides converge to the regular
-  // Silly Faces screen (filters + Challenge button).
+  // Stop or finish the round: both iPads go back to the Silly Faces screen.
   const handleEndChallenge = () => {
-    setSillyChallenge("idle");
-    setLaughWinner(null);
-    if (connectionId) {
-      api.sessions.publishEvent(connectionId, "challenge_state", { state: "idle" }).catch(() => {});
-      api.sessions.publishEvent(connectionId, "laugh_winner", { who: null }).catch(() => {});
-    }
+    const round = challengeRoundRef.current;
+    resetChallenge();
+    if (connectionId) api.sessions.publishEvent(connectionId, "challenge_state", { state: "idle", round }).catch(() => {});
   };
   const handleBackFromSillyFaces = () => { setGoodbyePhase(0); setMode("goodbye"); };
 
@@ -19527,19 +19757,19 @@ export default function App() {
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=Merriweather:ital,wght@0,400;0,700;1,400&family=DM+Sans:wght@400;500;700&display=swap');
 
-        @keyframes page-flip {
-          0%   { transform: perspective(1200px) rotateY(0deg);    box-shadow:  2px 0 14px rgba(0,0,0,0.25); }
-          40%  { transform: perspective(1200px) rotateY(-90deg);  box-shadow: -6px 0 22px rgba(0,0,0,0.45); }
-          100% { transform: perspective(1200px) rotateY(-180deg); box-shadow:  0px 0 0px rgba(0,0,0,0); }
+        /* Page turn (child's iPad): the old page lifts at the spine and
+           is gone by the time it stands upright, so its back (which
+           WebKit would draw mirrored over the new page) never shows.
+           Forward turns lift the right page, backward the left. */
+        @keyframes nm-leaf {
+          0%   { transform: perspective(1600px) rotateY(0deg);   opacity: 1; }
+          80%  { opacity: 1; }
+          100% { transform: perspective(1600px) rotateY(-90deg); opacity: 0; }
         }
-        /* Rick's Build 30 review #11: backward page-turn keyframe was
-           missing entirely — animation: page-flip-back resolved to no
-           animation and the "page flew right" effect was lost when
-           going Prev. Restored as the mirror of page-flip. */
-        @keyframes page-flip-back {
-          0%   { transform: perspective(1200px) rotateY(-180deg); box-shadow:  0px 0 0px rgba(0,0,0,0); }
-          60%  { transform: perspective(1200px) rotateY(-90deg);  box-shadow:  6px 0 22px rgba(0,0,0,0.45); }
-          100% { transform: perspective(1200px) rotateY(0deg);    box-shadow: -2px 0 14px rgba(0,0,0,0.25); }
+        @keyframes nm-leaf-back {
+          0%   { transform: perspective(1600px) rotateY(0deg);  opacity: 1; }
+          80%  { opacity: 1; }
+          100% { transform: perspective(1600px) rotateY(90deg); opacity: 0; }
         }
 
         /* ── Filter emoji animations ── */
@@ -19768,6 +19998,7 @@ export default function App() {
           onToggleSillyChallenge={toggleSillyChallenge}
           openWith={openWith}
           onOpenWithChange={setOpenWith}
+          onRenameNana={handleRenameNana}
           dashboardLoading={dashboardLoading}
           dashboardPerryName={dashboardPerryName}
           dashboardProgress={dashboardProgress}
@@ -19811,6 +20042,9 @@ export default function App() {
           perryAuthenticated={perryAuthenticated}
           onLibraryScroll={handleLibraryScroll}
           libraryScrollTop={libraryScrollTop}
+          onLibraryFilters={handleLibraryFilters}
+          libraryFilters={libraryFilters}
+          catalogLoading={catalogLoading}
           onSignOut={handleSignOut}
           readingPos={nanaReadingPos}
           phonicsCardOpen={!!selPhonicsCard}
@@ -19846,6 +20080,8 @@ export default function App() {
           displayOff={childOff}
           flipping={childFlipping}
           flipFromPage={flipFromPage}
+          flipFromOff={flipFromOff}
+          flipFromSide={flipFromSide}
           flipToPage={flipToPage}
           flipToOff={flipToOff}
           flipDirection={flipDirection}
@@ -19994,6 +20230,9 @@ export default function App() {
           perryAuthenticated={perryAuthenticated}
           onLibraryScroll={handleLibraryScroll}
           libraryScrollTop={libraryScrollTop}
+          onLibraryFilters={handleLibraryFilters}
+          libraryFilters={libraryFilters}
+          catalogLoading={catalogLoading}
           onSignOut={handleSignOut}
           readingPos={childReadingPos}
           onNavBack={mode === "learnedwords" ? handleCloseLearnedWords : undefined}

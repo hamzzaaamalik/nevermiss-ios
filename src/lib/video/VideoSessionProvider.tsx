@@ -128,6 +128,11 @@ interface VideoSessionContextValue {
   /** Back to the camera the call started with. No-op when not flipped. */
   resetCamera: () => void;
   isCameraFlipped: boolean;
+  /** Ask the other iPad to switch its camera (Nana turns the child's
+   *  camera around in Show & Tell). Needs the call to be connected. */
+  flipPartnerCamera: () => void;
+  /** The other iPad is on its other (back) camera. */
+  partnerCameraFlipped: boolean;
   /** Current local video problem, if any (drives the help card). */
   problem: VideoProblem | null;
 }
@@ -145,6 +150,8 @@ const VideoSessionContext = createContext<VideoSessionContextValue>({
   flipCamera: () => {},
   resetCamera: () => {},
   isCameraFlipped: false,
+  flipPartnerCamera: () => {},
+  partnerCameraFlipped: false,
   problem: null,
 });
 
@@ -260,6 +267,8 @@ export function VideoSessionProvider({
           flipCamera: () => {},
           resetCamera: () => {},
           isCameraFlipped: false,
+          flipPartnerCamera: () => {},
+          partnerCameraFlipped: false,
           problem: enabled ? preProblem : null,
         }}
       >
@@ -317,6 +326,7 @@ function SessionController({
   const [helpDismissed, setHelpDismissed] = useState(false);
   const [canFlipCamera, setCanFlipCamera] = useState(false);
   const [isCameraFlipped, setIsCameraFlipped] = useState(false);
+  const [partnerCameraFlipped, setPartnerCameraFlipped] = useState(false);
   const originalCameraIdRef = useRef<string | null>(null);
 
   const cancelledRef = useRef(false);
@@ -514,26 +524,43 @@ function SessionController({
     return () => pointerBus.setDailySender(null);
   }, [daily, status]);
   useDailyEvent("app-message", (ev) => {
-    if (isPointerMsg(ev?.data)) pointerBus.receive(ev.data);
+    const data = ev?.data as unknown;
+    if (isPointerMsg(data)) { pointerBus.receive(data); return; }
+    // Camera messages (Show & Tell): the other iPad asks this one to
+    // turn its camera around, or says which camera it is on.
+    const cam = data as { nmCamera?: unknown; flipped?: unknown } | null;
+    if (cam?.nmCamera === "flip") flipCameraRef.current();
+    else if (cam?.nmCamera === "state") setPartnerCameraFlipped(cam.flipped === true);
   });
 
-  // How many cameras this device has (front + back on an iPad).
+  // How many cameras this device has (front + back on an iPad). Counted
+  // again once the camera is running: the call joins with the camera
+  // off, and before that iOS can list only one camera, which hid the
+  // Show & Tell flip button (Rick's Build 38 review #5). Every iPad has
+  // a back camera, so the iPad app always offers the flip.
   useEffect(() => {
     if (!daily) return;
     let cancelled = false;
+    const nativeApp = !!(window as unknown as { Capacitor?: { isNativePlatform?: () => boolean } }).Capacitor?.isNativePlatform?.();
     const count = () => {
       daily.enumerateDevices()
         .then(({ devices }) => {
           if (cancelled) return;
-          setCanFlipCamera(devices.filter(d => d.kind === "videoinput").length > 1);
+          setCanFlipCamera(nativeApp || devices.filter(d => d.kind === "videoinput").length > 1);
         })
-        .catch(() => {});
+        .catch(() => { if (!cancelled && nativeApp) setCanFlipCamera(true); });
     };
     count();
     daily.on("available-devices-updated", count);
-    return () => { cancelled = true; daily.off("available-devices-updated", count); };
+    daily.on("started-camera", count);
+    return () => {
+      cancelled = true;
+      daily.off("available-devices-updated", count);
+      daily.off("started-camera", count);
+    };
   }, [daily, status]);
 
+  const flipCameraRef = useRef<() => void>(() => {});
   const flipCamera = useCallback(() => {
     if (!daily) return;
     void (async () => {
@@ -565,6 +592,20 @@ function SessionController({
       setIsCameraFlipped(false);
     })();
   }, [daily, isCameraFlipped]);
+  flipCameraRef.current = flipCamera;
+
+  const flipPartnerCamera = useCallback(() => {
+    if (!daily || status !== "connected") return;
+    try { daily.sendAppMessage({ nmCamera: "flip" }, "*"); } catch { /* not joined */ }
+  }, [daily, status]);
+  // Tell the other iPad which camera this one is on, so Nana's button
+  // can say "Flip back" (also after the child's Show & Tell closes and
+  // its camera goes back to the front).
+  useEffect(() => {
+    if (!daily || status !== "connected") return;
+    try { daily.sendAppMessage({ nmCamera: "state", flipped: isCameraFlipped }, "*"); } catch { /* not joined */ }
+  }, [daily, status, isCameraFlipped]);
+  useEffect(() => { if (status !== "connected") setPartnerCameraFlipped(false); }, [status]);
 
   const setMicEnabled = useCallback(
     (on: boolean) => {
@@ -602,9 +643,11 @@ function SessionController({
       flipCamera,
       resetCamera,
       isCameraFlipped,
+      flipPartnerCamera,
+      partnerCameraFlipped,
       problem,
     }),
-    [status, role, connectionId, micEnabled, cameraEnabled, setMicEnabled, setCameraEnabled, canFlipCamera, flipCamera, resetCamera, isCameraFlipped, problem],
+    [status, role, connectionId, micEnabled, cameraEnabled, setMicEnabled, setCameraEnabled, canFlipCamera, flipCamera, resetCamera, isCameraFlipped, flipPartnerCamera, partnerCameraFlipped, problem],
   );
 
   return (

@@ -136,6 +136,8 @@ export interface CatalogBook {
 export const api = {
   auth: {
     me: () => req<{ user: SafeUser }>("GET", "/auth/me"),
+    /** What the grandchildren call this grandparent ("Papa", "Nana"). */
+    setDisplayName: (displayName: string) => req<{ user: SafeUser }>("PATCH", "/auth/me", { displayName }),
     register: async (body: {
       firstName: string;
       lastName: string;
@@ -255,8 +257,8 @@ export const api = {
          *  iPads via the SSE-tracked server-clock offset. `endsAt`
          *  (server clock) anchors the 6-second holding phase so both
          *  iPads schedule their own setTimeout for the result reveal. */
-        lastChallenge?: { state: string; countNum?: number; host?: "nana" | "perry"; startAt?: number; endsAt?: number; startTs?: number; ts: number };
-        lastLaughWinner?: { who: "nana" | "perry"; ts: number };
+        lastChallenge?: { state: string; round?: string; startAt?: number; startTs?: number; ts: number };
+        lastLaughWinner?: { who: "nana" | "perry" | null; round?: string; ts: number };
         /** Set when a chapter-end celebration overlay is active. Cleared on
          *  dismiss. Both iPads show the overlay until the host clears it. */
         lastChapterEnd?: {
@@ -355,6 +357,10 @@ export const api = {
    *  hardcoded booksLibrary (server id wins on conflict). */
   catalog: {
     listBooks: () => req<{ books: CatalogBook[] }>("GET", "/books").then(r => r.books),
+    /** Which books families can read and when each last changed (Build 40). */
+    index: () => req<{ books: Array<{ id: string; updatedAt: string }> }>("GET", "/books/index").then(r => r.books),
+    /** Just these books. */
+    byIds: (ids: string[]) => req<{ books: CatalogBook[] }>("GET", `/books?ids=${ids.map(encodeURIComponent).join(",")}`).then(r => r.books),
   },
 
   /** Dictionary lookup — server proxies dictionaryapi.dev with a
