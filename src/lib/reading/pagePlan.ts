@@ -515,7 +515,8 @@ export function boxSignature(b: ReadingBox): string {
   ].join(":");
 }
 
-const PLAN_VERSION = "w6";
+// w7: very long words (web addresses) may break after a slash.
+const PLAN_VERSION = "w7";
 
 export function planKey(bookId: string, mode: "single" | "double", fontPct: number, stage: StageSize, boxes: ReadingBox[], contentHash: string): string {
   return [PLAN_VERSION, bookId, mode, fontPct, `${stage.w}x${stage.h}`, contentHash, ...boxes.map(boxSignature).sort()].join("|");
@@ -611,7 +612,9 @@ class Measurer {
     el.classList.toggle("nm-plan-dc", dropCap);
     let html = "";
     for (let i = from; i < toks.length; i++) {
-      if (i > from) html += brks[i] ? "<br>" : toks[i - 1].glue ? "" : " ";
+      // Joined pieces of one word sit together, except that a web address
+      // may break after a slash (as in the reader).
+      if (i > from) html += brks[i] ? "<br>" : toks[i - 1].glue ? (toks[i - 1].text.endsWith("/") ? "<wbr>" : "") : " ";
       if (brks[i] === 2 && !(i === 0 && noIndentFirst)) html += `<span class="i"></span>`;
       html += `<span class="t">${escapeHtml(toks[i].text)}</span>`;
     }
@@ -752,7 +755,9 @@ function planRun(m: Measurer, pages: PlanPage[], a: number, b: number, profiles:
   const images = hasImages(first);
   const motif = heading && first.leftEmoji ? first.leftEmoji : null;
   // The chapter's first paragraph follows its heading without an indent.
-  const cursors = profiles.map(p => new RunCursor(m, p, toks, brks, !!heading && !images, !!heading));
+  // No big first letter on an information page (as in the reader).
+  const dropCap = !!heading && !images && !/^About this book/i.test(heading);
+  const cursors = profiles.map(p => new RunCursor(m, p, toks, brks, dropCap, !!heading));
   const lines = (p: ReadingBox, px: number) => Math.max(0, Math.floor((px + 0.5) / p.lineHeightPx));
   const capFirstL = profiles.map(p =>
     images ? 0 : lines(p, p.capLeftPlainPx - (heading ? m.headingPx(p, heading, motif) : 0)));

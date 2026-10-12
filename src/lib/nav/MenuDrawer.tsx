@@ -76,6 +76,19 @@ const headerBtn: React.CSSProperties = {
  * closes the drawer. Sub-panels open inside the drawer with "‹ Menu".
  * End Call is pinned to the bottom so Nana never scrolls to find it.
  */
+/** iPad mini height and below: Rick's Build 39 E2, Reading Setup sat
+ *  under End Call and needed a scroll. The iPad Pro (834) keeps the roomy
+ *  rows. */
+function useShortScreen(limit = 800): boolean {
+  const [short, setShort] = useState(() => typeof window !== "undefined" && window.innerHeight < limit);
+  useEffect(() => {
+    const on = () => setShort(window.innerHeight < limit);
+    window.addEventListener("resize", on);
+    return () => window.removeEventListener("resize", on);
+  }, [limit]);
+  return short;
+}
+
 export function MenuDrawer({
   open,
   onClose,
@@ -102,6 +115,7 @@ export function MenuDrawer({
     ? entries.find((en): en is MenuItem => !("divider" in en) && en.key === panelKey)?.panel ?? null
     : null;
   const setPanel = (p: { key: string } | null) => setPanelKey(p ? p.key : null);
+  const compact = useShortScreen();
   useIdleAutoClose(open, onClose, autoCloseMs, panelRef);
   useEffect(() => { if (!open) setPanelKey(null); }, [open]);
   if (!open) return null;
@@ -174,11 +188,11 @@ export function MenuDrawer({
               {panel.render(onClose)}
             </div>
           ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: compact ? 2 : 4 }}>
               {entries.map((entry) => {
                 if ("divider" in entry) {
                   return (
-                    <div key={entry.key} style={{ margin: "12px 6px 4px" }}>
+                    <div key={entry.key} style={{ margin: compact ? "7px 6px 2px" : "12px 6px 4px", lineHeight: compact ? 1.3 : undefined }}>
                       {entry.label && (
                         <span style={{ color: "rgba(201,146,42,0.85)", fontFamily: FONT, fontSize: 12, fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase" }}>
                           {entry.label}
@@ -191,6 +205,7 @@ export function MenuDrawer({
                   <MenuRow
                     key={entry.key}
                     entry={entry}
+                    compact={compact}
                     onActivate={() => {
                       if (entry.panel) { setPanel(entry); return; }
                       entry.onClick?.();
@@ -205,13 +220,13 @@ export function MenuDrawer({
 
         {/* Pinned End Call (Master Plan §4) */}
         {onEndCall && !panel && (
-          <div style={{ flexShrink: 0, padding: "10px 12px 14px", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+          <div style={{ flexShrink: 0, padding: compact ? "8px 12px 10px" : "10px 12px 14px", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
             <button
               type="button"
               data-testid="menu-end-call"
               onClick={() => { onEndCall(); onClose(); }}
               style={{
-                width: "100%", minHeight: 64,
+                width: "100%", minHeight: compact ? 58 : 64,
                 display: "flex", alignItems: "center", gap: 14,
                 padding: "10px 16px", borderRadius: 16,
                 background: "linear-gradient(135deg, #ef4444 0%, #dc2626 100%)",
@@ -240,7 +255,7 @@ export function MenuDrawer({
   );
 }
 
-function MenuRow({ entry, onActivate }: { entry: MenuItem; onActivate: () => void }) {
+function MenuRow({ entry, onActivate, compact = false }: { entry: MenuItem; onActivate: () => void; compact?: boolean }) {
   return (
     <button
       type="button"
@@ -249,7 +264,7 @@ function MenuRow({ entry, onActivate }: { entry: MenuItem; onActivate: () => voi
       onClick={onActivate}
       style={{
         display: "flex", alignItems: "center", gap: 14,
-        padding: "10px 12px", minHeight: 58,
+        padding: compact ? "6px 12px" : "10px 12px", minHeight: compact ? 52 : 58,
         borderRadius: 14,
         backgroundColor: entry.active ? "rgba(201,146,42,0.14)" : "transparent",
         border: `1px solid ${entry.active ? "rgba(201,146,42,0.45)" : "transparent"}`,
@@ -266,10 +281,10 @@ function MenuRow({ entry, onActivate }: { entry: MenuItem; onActivate: () => voi
       }}>
         {entry.icon}
       </span>
-      <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, flex: 1 }}>
-        <span style={{ fontSize: 17, fontWeight: 700 }}>{entry.label}</span>
+      <span style={{ display: "flex", flexDirection: "column", gap: compact ? 1 : 2, minWidth: 0, flex: 1 }}>
+        <span style={{ fontSize: 17, fontWeight: 700, lineHeight: compact ? 1.2 : undefined }}>{entry.label}</span>
         {entry.sublabel && (
-          <span style={{ fontSize: 13, fontWeight: 500, opacity: 0.65, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{entry.sublabel}</span>
+          <span style={{ fontSize: 13, fontWeight: 500, opacity: 0.65, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", lineHeight: compact ? 1.25 : undefined }}>{entry.sublabel}</span>
         )}
       </span>
       {entry.panel && <ChevronRight size={20} strokeWidth={2.2} aria-hidden style={{ opacity: 0.6, flexShrink: 0 }} />}
@@ -547,13 +562,15 @@ export function HelpFeedbackPanel({ onSendFeedback, close }: { onSendFeedback?: 
 }
 
 export function ChaptersPanel({
-  chapters, currentIndex, pageNum, pageTotal, onJump, close,
+  chapters, currentIndex, pageNum, pageTotal, onJump, onJumpToPageNumber, close,
 }: {
   chapters: Array<{ title: string; page: number }>;
   currentIndex: number;
   pageNum: number;
   pageTotal: number;
   onJump: (page: number) => void;
+  /** Go to page n as the reader counts them (the slider). */
+  onJumpToPageNumber?: (n: number) => void;
   close: () => void;
 }) {
   return (
@@ -581,7 +598,61 @@ export function ChaptersPanel({
           onClick={() => { onJump(1); close(); }}
         />
       )}
+      {onJumpToPageNumber && pageTotal > 2 && (
+        <PageSlider pageNum={pageNum} pageTotal={pageTotal} onGo={(n) => { onJumpToPageNumber(n); close(); }} />
+      )}
     </>
+  );
+}
+
+/** A plain page slider for long books (Rick's Build 39 G3), pinned to the
+ *  bottom of Chapters & Pages. The page number follows the thumb; the
+ *  book moves when the finger lifts. */
+function PageSlider({ pageNum, pageTotal, onGo }: { pageNum: number; pageTotal: number; onGo: (n: number) => void }) {
+  const [value, setValue] = useState(pageNum);
+  const dragging = useRef(false);
+  useEffect(() => { if (!dragging.current) setValue(pageNum); }, [pageNum]);
+  const commit = () => {
+    if (!dragging.current) return;
+    dragging.current = false;
+    if (value !== pageNum) onGo(value);
+  };
+  const pct = pageTotal > 1 ? ((value - 1) / (pageTotal - 1)) * 100 : 0;
+  return (
+    <div data-testid="page-slider" style={{
+      position: "sticky", bottom: -12, zIndex: 1,
+      margin: "4px -12px -12px", padding: "14px 18px 18px",
+      background: "linear-gradient(180deg, rgba(15,27,50,0.94) 0%, #0f1b32 30%)",
+      borderTop: "1px solid rgba(255,255,255,0.10)",
+    }}>
+      <style>{`
+        .nm-page-slider { -webkit-appearance: none; appearance: none; width: 100%; height: 40px; background: transparent; margin: 0; touch-action: none; }
+        .nm-page-slider::-webkit-slider-runnable-track { height: 8px; border-radius: 999px; background: linear-gradient(90deg, ${AMBER} 0%, ${AMBER} var(--nm-pct), rgba(255,255,255,0.18) var(--nm-pct)); }
+        .nm-page-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 34px; height: 34px; margin-top: -13px; border-radius: 50%; background: ${AMBER}; border: 3px solid ${CREAM}; box-shadow: 0 3px 10px rgba(0,0,0,0.45); }
+        .nm-page-slider::-moz-range-track { height: 8px; border-radius: 999px; background: rgba(255,255,255,0.18); }
+        .nm-page-slider::-moz-range-thumb { width: 30px; height: 30px; border-radius: 50%; background: ${AMBER}; border: 3px solid ${CREAM}; }
+      `}</style>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", fontFamily: FONT, color: CREAM, marginBottom: 2 }}>
+        <span style={{ fontSize: 15, fontWeight: 700 }}>Go to page</span>
+        <span data-testid="page-slider-value" style={{ fontSize: 18, fontWeight: 800 }}>{value} <span style={{ fontSize: 13, fontWeight: 600, opacity: 0.7 }}>of {pageTotal}</span></span>
+      </div>
+      <input
+        type="range"
+        className="nm-page-slider"
+        aria-label="Go to page"
+        min={1}
+        max={pageTotal}
+        step={1}
+        value={value}
+        style={{ ["--nm-pct" as string]: `${pct}%` } as React.CSSProperties}
+        onPointerDown={() => { dragging.current = true; }}
+        onChange={(e) => { dragging.current = true; setValue(Number((e.target as HTMLInputElement).value)); }}
+        onPointerUp={commit}
+        onTouchEnd={commit}
+        onKeyUp={commit}
+        onBlur={commit}
+      />
+    </div>
   );
 }
 

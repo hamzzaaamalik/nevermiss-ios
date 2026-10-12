@@ -75,6 +75,8 @@ export function HomeView({
   onAddChild,
   onSetPhoto,
   loading,
+  onOpenLibrary,
+  familyCode,
 }: {
   nanaName: string;
   children: Child[];
@@ -92,6 +94,10 @@ export function HomeView({
   onAddChild: () => void;
   onSetPhoto: (childId: string, dataUrl: string) => Promise<void>;
   loading?: boolean;
+  /** Before the first grandchild (Rick's Build 39 E3): a way into the
+   *  Library, and the code the child's iPad signs up with. */
+  onOpenLibrary?: () => void;
+  familyCode?: string;
 }) {
   const [photoBusy, setPhotoBusy] = useState<string | null>(null);
   const [photoError, setPhotoError] = useState("");
@@ -154,6 +160,28 @@ export function HomeView({
         <div style={{ marginTop: 36, display: "flex", flexDirection: "column", alignItems: "center", gap: 16 }}>
           <div style={{ color: CREAM, fontFamily: SERIF, fontSize: 30, fontWeight: 700, textAlign: "center" }}>Add your first grandchild</div>
           <button type="button" onClick={onAddChild} className="nm-home-cta" style={ctaStyle(true)}>+ Add a grandchild</button>
+          {onOpenLibrary && (
+            <button type="button" data-testid="home-empty-library" onClick={onOpenLibrary} className="nm-home-cta" style={{
+              minHeight: 56, padding: "12px 26px", borderRadius: 999,
+              background: "rgba(255,255,255,0.06)", border: "1.5px solid rgba(201,146,42,0.55)",
+              color: CREAM, fontFamily: FONT, fontSize: 18, fontWeight: 700,
+              cursor: "pointer", touchAction: "manipulation",
+            }}>
+              📚 Browse the Library
+            </button>
+          )}
+          {familyCode && (
+            <div data-testid="home-family-code" style={{
+              marginTop: 18, maxWidth: 460, padding: "16px 20px", borderRadius: 18,
+              background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.12)",
+              textAlign: "center", display: "flex", flexDirection: "column", gap: 8,
+            }}>
+              <div style={{ color: "rgba(247,240,227,0.8)", fontFamily: FONT, fontSize: 16, lineHeight: 1.45 }}>
+                On your grandchild's iPad, open NeverMiss, tap <strong>I'm a Grandchild</strong> and enter this family code:
+              </div>
+              <div style={{ color: AMBER, fontFamily: FONT, fontSize: 30, fontWeight: 900, letterSpacing: "0.22em" }}>{familyCode}</div>
+            </div>
+          )}
         </div>
       ) : (
         <>

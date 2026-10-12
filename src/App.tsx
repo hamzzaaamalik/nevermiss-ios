@@ -60,6 +60,8 @@ import {
 import { ThemeSwitcher } from "./lib/reading/ReadingChrome";
 import { NEXT_THEME, READING_THEMES, READING_THEME_LABEL, isReadingTheme, type ReadingTheme } from "./lib/reading/themes";
 import { PARA_INDENT_EM, tokenizeHalf, type WordTok } from "./lib/reading/words";
+import { spokenPrompt } from "./lib/reading/spokenPrompt";
+import { ClosingPage } from "./lib/reading/ClosingPage";
 import { APP_BUILD } from "./lib/build";
 import { pointerBus, type PointerMsg } from "./lib/reading/pointerBus";
 import { ReadingPointerLayer, localPointer } from "./lib/reading/ReadingPointer";
@@ -816,15 +818,16 @@ function readingPosition(
 
 // Used when no page in the spread carries an AI or hand-written prompt,
 // so Start a Conversation never goes dead (Rick's Build 33).
+// Read straight to the child (Rick's Build 39 E1), like every prompt.
 const FALLBACK_NANA_PROMPTS = [
-  "Ask: What do you think will happen next?",
-  "Ask: How do you think they are feeling right now?",
-  "Ask: What picture do you see in your head on this page?",
-  "Ask: Has anything like this ever happened to you?",
-  "Ask: Was there a new word on this page? What do you think it means?",
-  "Ask: If you were in this story, what would you do?",
-  "Ask: Who is your favorite character so far, and why?",
-  "Ask: What was the most surprising part so far?",
+  "What do you think will happen next?",
+  "How do you think they are feeling right now?",
+  "What picture do you see in your head on this page?",
+  "Has anything like this ever happened to you?",
+  "Was there a new word on this page? What do you think it means?",
+  "If you were in this story, what would you do?",
+  "Who is your favorite character so far, and why?",
+  "What was the most surprising part so far?",
 ];
 
 /** The conversation prompt for the spread holding word `off` of `page`:
@@ -833,8 +836,9 @@ const FALLBACK_NANA_PROMPTS = [
 function spreadPrompt(pages: BookPage[], plan: PagePlan, page: number, off = 0): string {
   const k = spreadIndexOf(plan, page, off);
   const last = spreadLastPage(plan, k, pages.length);
+  if (isEndOfBookPage(pages[(plan.starts[k] ?? page) - 1])) return END_OF_BOOK_PROMPTS[k % END_OF_BOOK_PROMPTS.length];
   for (let i = plan.starts[k] ?? page; i <= last; i++) {
-    const t = pages[i - 1]?.nanaPrompt?.trim();
+    const t = spokenPrompt(pages[i - 1]?.nanaPrompt);
     if (t) return t;
   }
   return FALLBACK_NANA_PROMPTS[k % FALLBACK_NANA_PROMPTS.length];
@@ -863,9 +867,26 @@ function talkQuestions(pages: BookPage[], plan: PagePlan, page: number, off = 0)
   add(spreadPrompt(pages, plan, page, off));
   const k = spreadIndexOf(plan, page, off);
   const last = spreadLastPage(plan, k, pages.length);
-  for (let i = last; i >= Math.max(1, (plan.starts[k] ?? page) - 8); i--) add(pages[i - 1]?.nanaPrompt);
+  if (isEndOfBookPage(pages[(plan.starts[k] ?? page) - 1])) {
+    for (const f of END_OF_BOOK_PROMPTS) add(f);
+    return out;
+  }
+  for (let i = last; i >= Math.max(1, (plan.starts[k] ?? page) - 8); i--) add(spokenPrompt(pages[i - 1]?.nanaPrompt));
   for (const f of FALLBACK_NANA_PROMPTS) add(f);
   return out;
+}
+
+// After the story: the publisher's pages ("About This Book", "About this
+// book · Endnotes") and the NeverMiss goodbye. No story prompts there
+// (Rick's Standard Ebooks end-page guide); questions look back instead.
+const END_OF_BOOK_PROMPTS = [
+  "What was your favorite part of the story?",
+  "Who was your favorite character, and why?",
+  "What do you think happens to them after the story ends?",
+  "Would you like to read this story again someday?",
+];
+function isEndOfBookPage(p: BookPage | undefined): boolean {
+  return !!p && (!!p.signOff || /^About this book/i.test(p.leftChapter ?? ""));
 }
 
 /** 1-based first page of every chapter. */
@@ -907,22 +928,22 @@ const booksLibrary: Record<string, Book> = {
     gutenbergUrl: "https://www.gutenberg.org/ebooks/11",
     standardEbooksUrl: "https://standardebooks.org/ebooks/lewis-carroll/alices-adventures-in-wonderland",
     pages: [
-      { leftEmoji: "🐇", leftChapter: "Alice's Adventures in Wonderland", leftBody: "A girl named Alice follows a white rabbit down a rabbit-hole — and discovers a world where the impossible happens before breakfast.", rightTitle: "Alice's Adventures in Wonderland", rightTitleSub: "by Lewis Carroll", rightBody: "A curious girl tumbles into Wonderland — a world where nothing is quite as it seems, and the most peculiar things make perfect sense.", rightIsTitle: true, cue: "If you could follow a rabbit anywhere, where would you go?", nanaPrompt: "Ask Perry: if you could fall into any magical world, what would it look like?" },
-      { leftEmoji: "🕳️", leftChapter: "Chapter 1 · Down the Rabbit-Hole", leftBody: "Alice was beginning to get very tired of sitting by her sister on the bank, when she spotted something very peculiar — a white rabbit with pink eyes running past.", rightTitle: null, rightTitleSub: null, rightBody: '"In another moment down went Alice after it, never once considering how in the world she was to get out again. The rabbit-hole went straight on like a tunnel for some way, and then dipped suddenly down — so suddenly that Alice had not a moment to think about stopping herself before she found herself falling down what seemed to be a very deep well."', rightIsTitle: false, cue: "Would you have followed the rabbit?", nanaPrompt: "Tell Perry about a time you did something without thinking it through first. Then ask her: have you ever just gone for it without knowing what would happen?" },
-      { leftEmoji: "🕳️", leftChapter: "Chapter 1 · Down the Rabbit-Hole", leftBody: "The fall went on and on. Alice had so much time on the way down that her thoughts wandered — and she began to look about her, wondering what could possibly be at the bottom.", rightTitle: null, rightTitleSub: null, rightBody: '"Either the well was very deep, or she fell very slowly, for she had plenty of time as she went down to look about her and to wonder what was going to happen next."', rightIsTitle: false, cue: "How long would the fall feel?", nanaPrompt: "Ask Perry: have you ever waited for something that felt like it took forever?" },
-      { leftEmoji: "🕳️", leftChapter: "Chapter 1 · Down the Rabbit-Hole", leftBody: "Alice peered into the dark, and as her eyes adjusted she began to make out the strangest sight — the walls of the well were not empty at all.", rightTitle: null, rightTitleSub: null, rightBody: '"First, she tried to look down and make out what she was coming to, but it was too dark to see. Then she looked at the sides of the well, and noticed that they were filled with cupboards and bookshelves: here and there she saw maps and pictures hung upon pegs."', rightIsTitle: false, cue: "What would YOU notice on the way down?", nanaPrompt: "Ask Perry: if you were falling down a magical hole, what would you want to find on the walls — what books, what pictures?" },
-      { leftEmoji: "🍰", leftChapter: "Chapter 2 · Curiouser and Curiouser!", leftBody: "Alice grew and shrank with every bite and sip. She found herself crying a great pool of tears — until she swam her way out and met a very wet collection of animals.", rightTitle: null, rightTitleSub: null, rightBody: '"Curiouser and curiouser!" cried Alice. She was so surprised that for the moment she quite forgot how to speak good English. "Now I\'m opening out like the largest telescope that ever was! Goodbye, feet!" For when she looked down at her feet, they seemed to be almost out of sight, they were getting so far off.', rightIsTitle: false, cue: "What does 'curiouser' mean? Is it a real word?", nanaPrompt: "Carroll made up 'curiouser' — ask Perry: do you have a made-up word or a silly nickname? What does it mean?" },
-      { leftEmoji: "🍰", leftChapter: "Chapter 2 · Curiouser and Curiouser!", leftBody: "Alice's feet now seemed miles away. Worried they'd feel forgotten, she began to plan how she could send presents down to her own toes — by carrier, of course.", rightTitle: null, rightTitleSub: null, rightBody: '"Oh, my poor little feet, I wonder who will put on your shoes and stockings for you now, dears? I\'m sure I shan\'t be able! I shall be a great deal too far off to trouble myself about you." And she went on planning to herself how she should manage it. "They must go by the carrier," she thought, "and how funny it\'ll seem, sending presents to one\'s own feet!"', rightIsTitle: false, cue: "Have you ever lost track of part of yourself?", nanaPrompt: "Tell Perry a silly story about getting big and small. Ask: if YOU could send a present to your own feet, what would you send?" },
-      { leftEmoji: "🐛", leftChapter: "Chapter 5 · Advice from a Caterpillar", leftBody: "Alice found a large blue caterpillar perched on top of a mushroom, smoking a hookah. He fixed her with a steady gaze and asked the one question she could not answer.", rightTitle: null, rightTitleSub: null, rightBody: '"Who are YOU?" said the Caterpillar. Alice replied rather shyly, "I — I hardly know, sir, just at present — at least I know who I was when I got up this morning, but I think I must have changed several times since then."', rightIsTitle: false, cue: "If someone asked 'Who are you?', what would you say?", nanaPrompt: "Ask Perry: if you could be someone completely different for one whole day, who would you pick and why?" },
-      { leftEmoji: "🐛", leftChapter: "Chapter 5 · Advice from a Caterpillar", leftBody: "The Caterpillar was not satisfied. He demanded an explanation — but how do you explain yourself when you keep changing size every few minutes?", rightTitle: null, rightTitleSub: null, rightBody: '"What do you mean by that?" said the Caterpillar sternly. "Explain yourself!" "I can\'t explain myself, I\'m afraid, sir," said Alice, "because I\'m not myself, you see." "I don\'t see," said the Caterpillar. "I\'m afraid I can\'t put it more clearly," Alice replied politely, "for I can\'t understand it myself, and being so many different sizes in a day is very confusing."', rightIsTitle: false, cue: "Have you ever had to explain something you didn't understand yourself?", nanaPrompt: "Ask Perry: have you ever felt confused about how you were feeling, and not been able to put words to it?" },
-      { leftEmoji: "👶", leftChapter: "Chapter 6 · Pig and Pepper", leftBody: "In the Duchess's kitchen, pepper filled every breath and everyone sneezed except the cook. A baby howled. Then, in Alice's arms, the baby slowly turned into something else entirely.", rightTitle: null, rightTitleSub: null, rightBody: '"Alice was just beginning to think that it was going to make a remarkably ugly child: but it makes rather a handsome pig," she thought. Alice gently put down the little creature and felt quite relieved to see it trot quietly into the wood.', rightIsTitle: false, cue: "Would you rather meet a baby that turns into a pig, or a pig that acts like a baby?", nanaPrompt: "Ask Perry: what's the silliest thing you can imagine happening in a kitchen?" },
-      { leftEmoji: "🐱", leftChapter: "Chapter 6 · Pig and Pepper", leftBody: "Just then Alice noticed a grin floating among the leaves of a tree. A whole cat slowly came into view around it — the famous Cheshire Cat, who had advice that wasn't really advice at all.", rightTitle: null, rightTitleSub: null, rightBody: '"Cheshire Puss," Alice began timidly, "which way ought I to go from here?" "That depends on where you want to get to," said the Cat. "I don\'t much care where —" said Alice. "Then it doesn\'t matter which way you go," said the Cat. "— so long as I get somewhere," Alice added. "Oh, you\'re sure to do that," said the Cat, "if you only walk long enough."', rightIsTitle: false, cue: "Was that helpful advice, or just clever?", nanaPrompt: "Ask Perry: if she could ask the Cheshire Cat one question, what would she ask?" },
-      { leftEmoji: "☕", leftChapter: "Chapter 7 · A Mad Tea-Party", leftBody: "Alice came upon the strangest tea party she had ever seen — the March Hare, the Mad Hatter, and a sleeping Dormouse sat crowded at one end of a very long table.", rightTitle: null, rightTitleSub: null, rightBody: '"Have some wine," the March Hare said encouragingly. Alice looked round the table but there was nothing on it but tea. "I don\'t see any wine," she remarked. "There isn\'t any," said the March Hare. "Then it wasn\'t very civil of you to offer it," said Alice angrily.', rightIsTitle: false, cue: "Why offer wine you don't have?", nanaPrompt: "Ask Perry: have you ever pretended to offer something you didn't really have, just for fun?" },
-      { leftEmoji: "🎩", leftChapter: "Chapter 7 · A Mad Tea-Party", leftBody: "The Hatter chimed in with personal remarks about Alice's hair, the March Hare scolded her for sitting without an invitation, and Alice tried to keep up with the strange manners of her new hosts.", rightTitle: null, rightTitleSub: null, rightBody: '"It wasn\'t very civil of you to sit down without being invited," said the March Hare. "I didn\'t know it was your table," said Alice. "It\'s laid for a great many more than three." "Your hair wants cutting," said the Hatter. "You should learn not to make personal remarks," Alice said with some severity. "It\'s very rude."', rightIsTitle: false, cue: "What rude thing has the Hatter just said?", nanaPrompt: "Ask Perry: what would she say if a stranger told her her hair needed cutting?" },
-      { leftEmoji: "👑", leftChapter: "Chapter 8 · The Queen's Croquet-Ground", leftBody: "The Queen of Hearts was fond of only one expression — and she used it for almost every occasion. Flamingoes were used as mallets, hedgehogs as balls, playing-card soldiers as hoops.", rightTitle: null, rightTitleSub: null, rightBody: '"Off with their heads!" the Queen shouted. Nobody paid much attention, for the soldiers were always getting up and walking off to do something else. Alice began to feel quite uneasy.', rightIsTitle: false, cue: "Would you like the Queen of Hearts as your ruler?", nanaPrompt: "Ask Perry: if you were in charge for one whole day, what's the very first rule you would make?" },
-      { leftEmoji: "🦩", leftChapter: "Chapter 8 · The Queen's Croquet-Ground", leftBody: "The croquet match was chaos — players never waited for turns, soldiers wandered off, and the Queen worked herself into a furious temper. Alice quietly began to plan her escape.", rightTitle: null, rightTitleSub: null, rightBody: 'The players all played at once without waiting for turns, quarrelling all the while, and fighting for the hedgehogs. The Queen was soon in a furious passion, shouting "Off with his head!" about once a minute. Alice felt very anxious. "How are you getting on?" said the Cat, appearing out of thin air.', rightIsTitle: false, cue: "What would you do if you were in Alice's shoes?", nanaPrompt: "Ask Perry: if she had to escape a chaotic place, what would she do first — hide, sneak, or run?" },
-      { leftEmoji: "⚖️", leftChapter: "Chapter 12 · Alice's Evidence", leftBody: "Alice found herself in the strangest courtroom ever: the King and Queen of Hearts presided, the jury was twelve nervous creatures, and she was the very last witness.", rightTitle: null, rightTitleSub: null, rightBody: '"I\'m not afraid of you!" said Alice. "Who cares for you? You\'re nothing but a pack of cards!" At this the whole pack rose up into the air and came flying down upon her; she gave a little scream, half of fright and half of anger, and tried to beat them off.', rightIsTitle: false, cue: "What gave Alice the courage to speak up?", nanaPrompt: "Ask Perry: when has she felt brave enough to stand up to something scary?" },
-      { leftEmoji: "💭", leftChapter: "Chapter 12 · Alice's Evidence", leftBody: "And then — the cards, the courtroom, all of Wonderland faded. Alice found herself back on the riverbank with her sister beside her, the leaves drifting gently down.", rightTitle: null, rightTitleSub: null, rightBody: 'Then she found herself lying on the bank, with her head in the lap of her sister, who was gently brushing dead leaves that had fluttered down upon her face. "Wake up, Alice dear!" said her sister. "Why, what a long sleep you\'ve had!" And so Alice woke up from her long strange dream — though she half wondered, for a moment, if it had been a dream at all.', rightIsTitle: false, cue: "What do you think the dream meant?", nanaPrompt: "Tell Perry about a dream you remember that felt very real. Ask her: have you ever had a dream like that — what happened in it?" },
+      { leftEmoji: "🐇", leftChapter: "Alice's Adventures in Wonderland", leftBody: "A girl named Alice follows a white rabbit down a rabbit-hole — and discovers a world where the impossible happens before breakfast.", rightTitle: "Alice's Adventures in Wonderland", rightTitleSub: "by Lewis Carroll", rightBody: "A curious girl tumbles into Wonderland — a world where nothing is quite as it seems, and the most peculiar things make perfect sense.", rightIsTitle: true, cue: "If you could follow a rabbit anywhere, where would you go?", nanaPrompt: "If you could fall into any magical world, what would it look like?" },
+      { leftEmoji: "🕳️", leftChapter: "Chapter 1 · Down the Rabbit-Hole", leftBody: "Alice was beginning to get very tired of sitting by her sister on the bank, when she spotted something very peculiar — a white rabbit with pink eyes running past.", rightTitle: null, rightTitleSub: null, rightBody: '"In another moment down went Alice after it, never once considering how in the world she was to get out again. The rabbit-hole went straight on like a tunnel for some way, and then dipped suddenly down — so suddenly that Alice had not a moment to think about stopping herself before she found herself falling down what seemed to be a very deep well."', rightIsTitle: false, cue: "Would you have followed the rabbit?", nanaPrompt: "Have you ever just gone for it without knowing what would happen?" },
+      { leftEmoji: "🕳️", leftChapter: "Chapter 1 · Down the Rabbit-Hole", leftBody: "The fall went on and on. Alice had so much time on the way down that her thoughts wandered — and she began to look about her, wondering what could possibly be at the bottom.", rightTitle: null, rightTitleSub: null, rightBody: '"Either the well was very deep, or she fell very slowly, for she had plenty of time as she went down to look about her and to wonder what was going to happen next."', rightIsTitle: false, cue: "How long would the fall feel?", nanaPrompt: "Have you ever waited for something that felt like it took forever?" },
+      { leftEmoji: "🕳️", leftChapter: "Chapter 1 · Down the Rabbit-Hole", leftBody: "Alice peered into the dark, and as her eyes adjusted she began to make out the strangest sight — the walls of the well were not empty at all.", rightTitle: null, rightTitleSub: null, rightBody: '"First, she tried to look down and make out what she was coming to, but it was too dark to see. Then she looked at the sides of the well, and noticed that they were filled with cupboards and bookshelves: here and there she saw maps and pictures hung upon pegs."', rightIsTitle: false, cue: "What would YOU notice on the way down?", nanaPrompt: "If you were falling down a magical hole, what would you want to find on the walls — what books, what pictures?" },
+      { leftEmoji: "🍰", leftChapter: "Chapter 2 · Curiouser and Curiouser!", leftBody: "Alice grew and shrank with every bite and sip. She found herself crying a great pool of tears — until she swam her way out and met a very wet collection of animals.", rightTitle: null, rightTitleSub: null, rightBody: '"Curiouser and curiouser!" cried Alice. She was so surprised that for the moment she quite forgot how to speak good English. "Now I\'m opening out like the largest telescope that ever was! Goodbye, feet!" For when she looked down at her feet, they seemed to be almost out of sight, they were getting so far off.', rightIsTitle: false, cue: "What does 'curiouser' mean? Is it a real word?", nanaPrompt: "Carroll made up 'curiouser'. Do you have a made-up word or a silly nickname? What does it mean?" },
+      { leftEmoji: "🍰", leftChapter: "Chapter 2 · Curiouser and Curiouser!", leftBody: "Alice's feet now seemed miles away. Worried they'd feel forgotten, she began to plan how she could send presents down to her own toes — by carrier, of course.", rightTitle: null, rightTitleSub: null, rightBody: '"Oh, my poor little feet, I wonder who will put on your shoes and stockings for you now, dears? I\'m sure I shan\'t be able! I shall be a great deal too far off to trouble myself about you." And she went on planning to herself how she should manage it. "They must go by the carrier," she thought, "and how funny it\'ll seem, sending presents to one\'s own feet!"', rightIsTitle: false, cue: "Have you ever lost track of part of yourself?", nanaPrompt: "If YOU could send a present to your own feet, what would you send?" },
+      { leftEmoji: "🐛", leftChapter: "Chapter 5 · Advice from a Caterpillar", leftBody: "Alice found a large blue caterpillar perched on top of a mushroom, smoking a hookah. He fixed her with a steady gaze and asked the one question she could not answer.", rightTitle: null, rightTitleSub: null, rightBody: '"Who are YOU?" said the Caterpillar. Alice replied rather shyly, "I — I hardly know, sir, just at present — at least I know who I was when I got up this morning, but I think I must have changed several times since then."', rightIsTitle: false, cue: "If someone asked 'Who are you?', what would you say?", nanaPrompt: "If you could be someone completely different for one whole day, who would you pick and why?" },
+      { leftEmoji: "🐛", leftChapter: "Chapter 5 · Advice from a Caterpillar", leftBody: "The Caterpillar was not satisfied. He demanded an explanation — but how do you explain yourself when you keep changing size every few minutes?", rightTitle: null, rightTitleSub: null, rightBody: '"What do you mean by that?" said the Caterpillar sternly. "Explain yourself!" "I can\'t explain myself, I\'m afraid, sir," said Alice, "because I\'m not myself, you see." "I don\'t see," said the Caterpillar. "I\'m afraid I can\'t put it more clearly," Alice replied politely, "for I can\'t understand it myself, and being so many different sizes in a day is very confusing."', rightIsTitle: false, cue: "Have you ever had to explain something you didn't understand yourself?", nanaPrompt: "Have you ever felt confused about how you were feeling, and not been able to put words to it?" },
+      { leftEmoji: "👶", leftChapter: "Chapter 6 · Pig and Pepper", leftBody: "In the Duchess's kitchen, pepper filled every breath and everyone sneezed except the cook. A baby howled. Then, in Alice's arms, the baby slowly turned into something else entirely.", rightTitle: null, rightTitleSub: null, rightBody: '"Alice was just beginning to think that it was going to make a remarkably ugly child: but it makes rather a handsome pig," she thought. Alice gently put down the little creature and felt quite relieved to see it trot quietly into the wood.', rightIsTitle: false, cue: "Would you rather meet a baby that turns into a pig, or a pig that acts like a baby?", nanaPrompt: "What's the silliest thing you can imagine happening in a kitchen?" },
+      { leftEmoji: "🐱", leftChapter: "Chapter 6 · Pig and Pepper", leftBody: "Just then Alice noticed a grin floating among the leaves of a tree. A whole cat slowly came into view around it — the famous Cheshire Cat, who had advice that wasn't really advice at all.", rightTitle: null, rightTitleSub: null, rightBody: '"Cheshire Puss," Alice began timidly, "which way ought I to go from here?" "That depends on where you want to get to," said the Cat. "I don\'t much care where —" said Alice. "Then it doesn\'t matter which way you go," said the Cat. "— so long as I get somewhere," Alice added. "Oh, you\'re sure to do that," said the Cat, "if you only walk long enough."', rightIsTitle: false, cue: "Was that helpful advice, or just clever?", nanaPrompt: "If you could ask the Cheshire Cat one question, what would you ask?" },
+      { leftEmoji: "☕", leftChapter: "Chapter 7 · A Mad Tea-Party", leftBody: "Alice came upon the strangest tea party she had ever seen — the March Hare, the Mad Hatter, and a sleeping Dormouse sat crowded at one end of a very long table.", rightTitle: null, rightTitleSub: null, rightBody: '"Have some wine," the March Hare said encouragingly. Alice looked round the table but there was nothing on it but tea. "I don\'t see any wine," she remarked. "There isn\'t any," said the March Hare. "Then it wasn\'t very civil of you to offer it," said Alice angrily.', rightIsTitle: false, cue: "Why offer wine you don't have?", nanaPrompt: "Have you ever pretended to offer something you didn't really have, just for fun?" },
+      { leftEmoji: "🎩", leftChapter: "Chapter 7 · A Mad Tea-Party", leftBody: "The Hatter chimed in with personal remarks about Alice's hair, the March Hare scolded her for sitting without an invitation, and Alice tried to keep up with the strange manners of her new hosts.", rightTitle: null, rightTitleSub: null, rightBody: '"It wasn\'t very civil of you to sit down without being invited," said the March Hare. "I didn\'t know it was your table," said Alice. "It\'s laid for a great many more than three." "Your hair wants cutting," said the Hatter. "You should learn not to make personal remarks," Alice said with some severity. "It\'s very rude."', rightIsTitle: false, cue: "What rude thing has the Hatter just said?", nanaPrompt: "What would you say if a stranger told you your hair needed cutting?" },
+      { leftEmoji: "👑", leftChapter: "Chapter 8 · The Queen's Croquet-Ground", leftBody: "The Queen of Hearts was fond of only one expression — and she used it for almost every occasion. Flamingoes were used as mallets, hedgehogs as balls, playing-card soldiers as hoops.", rightTitle: null, rightTitleSub: null, rightBody: '"Off with their heads!" the Queen shouted. Nobody paid much attention, for the soldiers were always getting up and walking off to do something else. Alice began to feel quite uneasy.', rightIsTitle: false, cue: "Would you like the Queen of Hearts as your ruler?", nanaPrompt: "If you were in charge for one whole day, what's the very first rule you would make?" },
+      { leftEmoji: "🦩", leftChapter: "Chapter 8 · The Queen's Croquet-Ground", leftBody: "The croquet match was chaos — players never waited for turns, soldiers wandered off, and the Queen worked herself into a furious temper. Alice quietly began to plan her escape.", rightTitle: null, rightTitleSub: null, rightBody: 'The players all played at once without waiting for turns, quarrelling all the while, and fighting for the hedgehogs. The Queen was soon in a furious passion, shouting "Off with his head!" about once a minute. Alice felt very anxious. "How are you getting on?" said the Cat, appearing out of thin air.', rightIsTitle: false, cue: "What would you do if you were in Alice's shoes?", nanaPrompt: "If you had to escape a chaotic place, what would you do first: hide, sneak, or run?" },
+      { leftEmoji: "⚖️", leftChapter: "Chapter 12 · Alice's Evidence", leftBody: "Alice found herself in the strangest courtroom ever: the King and Queen of Hearts presided, the jury was twelve nervous creatures, and she was the very last witness.", rightTitle: null, rightTitleSub: null, rightBody: '"I\'m not afraid of you!" said Alice. "Who cares for you? You\'re nothing but a pack of cards!" At this the whole pack rose up into the air and came flying down upon her; she gave a little scream, half of fright and half of anger, and tried to beat them off.', rightIsTitle: false, cue: "What gave Alice the courage to speak up?", nanaPrompt: "When have you felt brave enough to stand up to something scary?" },
+      { leftEmoji: "💭", leftChapter: "Chapter 12 · Alice's Evidence", leftBody: "And then — the cards, the courtroom, all of Wonderland faded. Alice found herself back on the riverbank with her sister beside her, the leaves drifting gently down.", rightTitle: null, rightTitleSub: null, rightBody: 'Then she found herself lying on the bank, with her head in the lap of her sister, who was gently brushing dead leaves that had fluttered down upon her face. "Wake up, Alice dear!" said her sister. "Why, what a long sleep you\'ve had!" And so Alice woke up from her long strange dream — though she half wondered, for a moment, if it had been a dream at all.', rightIsTitle: false, cue: "What do you think the dream meant?", nanaPrompt: "Have you ever had a dream like that — what happened in it?" },
     ],
   },
   aubrees: {
@@ -942,25 +963,25 @@ const booksLibrary: Record<string, Book> = {
     // original picture book. The verse and artwork are baked together in
     // each JPG; the renderer uses imageUrl and ignores the text fields.
     pages: ([
-      { src: "cover.jpg",  cue: "Ready to meet Aubree?",                                          nanaPrompt: "Ask: are you ready to read a book about a sweet girl and a sneaky little mouse?" },
-      { src: "p1.jpg",     cue: "Is your room tidy or messy right now?",                          nanaPrompt: "Ask: is your room tidy or a little messy right now? Tell her about your room when YOU were little." },
-      { src: "p2.jpg",     cue: "Plop, drop, flop — say it with me!",                             nanaPrompt: "Practice the sounds together — plop, drop, flop, FLOP. Big voice, small voice, silly voice!" },
-      { src: "p3.jpg",     cue: "Have you ever lost something in a messy pile?",                  nanaPrompt: "Ask: have you ever lost a toy in a pile of clothes? What was it?" },
-      { src: "p4.jpg",     cue: "What do cats love to jump on?",                                  nanaPrompt: "Ask: have you ever seen a cat get into a pile of clothes? What do cats love to do?" },
-      { src: "p5.jpg",     cue: "Where would you hide if you were a mouse?",                      nanaPrompt: "Ask: if YOU were a tiny mouse in this room, where would you hide?" },
-      { src: "p6.jpg",     cue: "A mouse from the skies — what a surprise!",                      nanaPrompt: "Big surprised face together! Ask: where did the mouse come from? Was he hiding up high?" },
-      { src: "p7.jpg",     cue: "Why is the mouse so quiet?",                                     nanaPrompt: "Ask: have you ever had to be super-quiet so no one would find you? What were you doing?" },
-      { src: "p8.jpg",     cue: "If you were the mouse, where would you hide?",                   nanaPrompt: "Ask: that mouse dove deep into the clothes! Where would YOU pick to hide?" },
-      { src: "p9.jpg",     cue: "Where would you look first?",                                    nanaPrompt: "Ask: if you were hunting for the mouse, where would you check first?" },
-      { src: "p10.jpg",    cue: "Have you ever lost something and never found it?",               nanaPrompt: "Tell her about a time YOU lost something and could never find it. Ask if that's ever happened to her." },
-      { src: "p11.jpg",    cue: "What snack would the mouse pick at your house?",                 nanaPrompt: "Ask: if a sneaky mouse visited YOUR kitchen, what snack would he grab?" },
-      { src: "p12.jpg",    cue: "Sniff sniff sniff — what's the mouse doing?",                    nanaPrompt: "Make the sniff and lick sounds together! Ask: what do you think the mouse is licking?" },
-      { src: "p13.jpg",    cue: "Have you ever cleaned your room and felt proud?",                nanaPrompt: "Ask: when you finish cleaning, how does it feel? Tell her about a clean-up YOU did as a kid." },
-      { src: "p14.jpg",    cue: "Sebastian is purring — why?",                                    nanaPrompt: "Ask: why is the cat so happy now? What changed?" },
-      { src: "p15.jpg",    cue: "Why is Aubree smiling so big?",                                  nanaPrompt: "Ask: why is Aubree happy? How does a clean room make YOU feel?" },
-      { src: "p16.jpg",    cue: "What's the rule about messy rooms?",                             nanaPrompt: "Recite together: 'Clean your room — don't delay… or a mouse might come in and stay!'" },
-      { src: "moral.jpg",  cue: "What's the moral of the story?",                                 nanaPrompt: "Ask: what did Aubree learn? What do YOU think the moral is in your own words?" },
-      { src: "end.jpg",    cue: "The end!",                                                       nanaPrompt: "Ask: did you like the story? What was your favourite part?" },
+      { src: "cover.jpg",  cue: "Ready to meet Aubree?",                                          nanaPrompt: "Are you ready to read a book about a sweet girl and a sneaky little mouse?" },
+      { src: "p1.jpg",     cue: "Is your room tidy or messy right now?",                          nanaPrompt: "Is your room tidy or a little messy right now?" },
+      { src: "p2.jpg",     cue: "Plop, drop, flop — say it with me!",                             nanaPrompt: "Let's make the sounds together: plop, drop, flop, FLOP. Big voice, small voice, silly voice!" },
+      { src: "p3.jpg",     cue: "Have you ever lost something in a messy pile?",                  nanaPrompt: "Have you ever lost a toy in a pile of clothes? What was it?" },
+      { src: "p4.jpg",     cue: "What do cats love to jump on?",                                  nanaPrompt: "Have you ever seen a cat get into a pile of clothes? What do cats love to do?" },
+      { src: "p5.jpg",     cue: "Where would you hide if you were a mouse?",                      nanaPrompt: "If YOU were a tiny mouse in this room, where would you hide?" },
+      { src: "p6.jpg",     cue: "A mouse from the skies — what a surprise!",                      nanaPrompt: "Big surprised face together! Where did the mouse come from? Was he hiding up high?" },
+      { src: "p7.jpg",     cue: "Why is the mouse so quiet?",                                     nanaPrompt: "Have you ever had to be super-quiet so no one would find you? What were you doing?" },
+      { src: "p8.jpg",     cue: "If you were the mouse, where would you hide?",                   nanaPrompt: "That mouse dove deep into the clothes! Where would YOU pick to hide?" },
+      { src: "p9.jpg",     cue: "Where would you look first?",                                    nanaPrompt: "If you were hunting for the mouse, where would you check first?" },
+      { src: "p10.jpg",    cue: "Have you ever lost something and never found it?",               nanaPrompt: "Have you ever lost something and never found it? What was it?" },
+      { src: "p11.jpg",    cue: "What snack would the mouse pick at your house?",                 nanaPrompt: "If a sneaky mouse visited YOUR kitchen, what snack would he grab?" },
+      { src: "p12.jpg",    cue: "Sniff sniff sniff — what's the mouse doing?",                    nanaPrompt: "Make the sniff and lick sounds together! What do you think the mouse is licking?" },
+      { src: "p13.jpg",    cue: "Have you ever cleaned your room and felt proud?",                nanaPrompt: "When you finish cleaning, how does it feel?" },
+      { src: "p14.jpg",    cue: "Sebastian is purring — why?",                                    nanaPrompt: "Why is the cat so happy now? What changed?" },
+      { src: "p15.jpg",    cue: "Why is Aubree smiling so big?",                                  nanaPrompt: "Why is Aubree happy? How does a clean room make YOU feel?" },
+      { src: "p16.jpg",    cue: "What's the rule about messy rooms?",                             nanaPrompt: "Let's say it together: 'Clean your room — don't delay… or a mouse might come in and stay!'" },
+      { src: "moral.jpg",  cue: "What's the moral of the story?",                                 nanaPrompt: "What did Aubree learn? What do YOU think the moral is in your own words?" },
+      { src: "end.jpg",    cue: "The end!",                                                       nanaPrompt: "Did you like the story? What was your favourite part?" },
     ] as Array<{ src: string; cue: string; nanaPrompt: string }>).map(({ src, cue, nanaPrompt }) => ({
       leftEmoji: "",
       leftChapter: "",
@@ -998,14 +1019,14 @@ const booksLibrary: Record<string, Book> = {
         question: "What was the most important thing Beauty's mother taught him?",
         teaser: "Coming up: a wild chase through the meadow, and a day Beauty never forgets.",
         pages: [
-          { leftEmoji: "🐴", leftChapter: "Chapter 1 · My Early Home", leftBody: "The first place I remember was a wide green meadow with a clear pond at one end. Tall trees leaned over the water, and reeds grew where it was deepest. I lived there happily with my mother.", rightTitle: "Black Beauty", rightTitleSub: "by Anna Sewell", rightBody: "A gentle horse tells his own story — from a sunny meadow childhood to the hard streets of London, and home again at last.", rightIsTitle: true, cue: "Can you picture the meadow?", nanaPrompt: "Ask Perry to close her eyes and imagine it. What color is the grass? What does the air smell like?" },
-          { leftEmoji: "🐴", leftChapter: "Chapter 1 · My Early Home", leftBody: "I drank my mother's milk when I was small. By day I trotted at her side. At night I slept close beside her. We had a warm shed for cold weather, and the trees made shade when the sun was hot.", rightTitle: null, rightTitleSub: null, rightBody: "Six other young horses lived in the meadow with us. They were older and bigger than I was. We were a little herd of friends, even when we played a bit rough.", rightIsTitle: false, cue: "Six big horses to play with!", nanaPrompt: "Ask Perry: who do you love playing with most? What's your favorite game together?" },
-          { leftEmoji: "🐎", leftChapter: "Chapter 1 · My Early Home", leftBody: "We galloped together round and round the field, as fast as we could go. The play was sometimes rough — biting and kicking, even though no one meant any harm. We were only learning.", rightTitle: null, rightTitleSub: null, rightBody: "One afternoon, after a wild gallop, my mother called me over with a soft whinny. 'I would like you to listen carefully,' she said. 'I have something important to tell you.'", rightIsTitle: false, cue: "What's she going to say?", nanaPrompt: "Lean in like a secret is coming. Ask: what does your mom say when she really needs you to listen?" },
-          { leftEmoji: "💗", leftChapter: "Chapter 1 · My Early Home", leftBody: "'The colts here are good,' said my mother, 'but they are cart-horse colts, and they have never been taught manners. You come from a fine family. Your grandfather was a famous racing horse.'", rightTitle: null, rightTitleSub: null, rightBody: "'Your grandmother had the sweetest temper of any horse I ever knew. You have never seen me bite or kick. I want you to grow up gentle and good, and never to learn any bad ways.'", rightIsTitle: false, cue: "What does 'gentle and good' mean?", nanaPrompt: "Ask Perry: when your mom or dad teaches you something important, what do they say? Share one of your own family lessons." },
-          { leftEmoji: "🌾", leftChapter: "Chapter 1 · My Early Home", leftBody: "'Lift your feet up nicely when you trot. Do your work well. Never bite or kick — not even in fun.' I never forgot what she told me that day. My mother was wise, and I tried very hard to listen.", rightTitle: null, rightTitleSub: null, rightBody: "Our master was a kind man with gentle hands. He gave us good food and warm shelter, and he spoke to us as softly as he did to his own little children. We all loved him very much.", rightIsTitle: false, cue: "What makes a good master?", nanaPrompt: "Ask Perry: how do you know when someone is being kind to you? What do they do or say?" },
-          { leftEmoji: "🦊", leftChapter: "Chapter 1 · My Early Home", leftBody: "One bright morning I heard a strange sound — first far away, then louder. It was the horn of a hunt. The other colts pricked up their ears. 'The hounds are coming!' the eldest cried, and galloped to the hedge.", rightTitle: null, rightTitleSub: null, rightBody: "We all followed and peered over the fence. In the next field we saw riders in bright red coats, and a pack of dogs running fast — noses to the ground, men galloping close behind.", rightIsTitle: false, cue: "What are they chasing?", nanaPrompt: "Ask Perry: have you ever heard dogs barking far away? What did it sound like?" },
-          { leftEmoji: "😨", leftChapter: "Chapter 1 · My Early Home", leftBody: "Suddenly a frightened hare darted across our meadow. The hounds and riders crashed in after her. Then I saw a young rider's horse stumble at the brook and fall. The rider was thrown to the ground and lay very still.", rightTitle: null, rightTitleSub: null, rightBody: "He was a tall young man — much loved in our country. There was shouting and crying all around. I could not bear to look any longer, so I turned my head away and pressed close to my mother's side.", rightIsTitle: false, cue: "Is he hurt very badly?", nanaPrompt: "Ask Perry: how do you feel when you see someone fall down? Does your tummy go funny?" },
-          { leftEmoji: "💔", leftChapter: "Chapter 1 · My Early Home", leftBody: "My mother was quiet for a long time after. She told me she had known the horse who fell. His name was Rob Roy, and he was good and brave. After that day, she would never walk to that part of the meadow again.", rightTitle: null, rightTitleSub: null, rightBody: "A few days later we heard the church bell ringing for a long, long time. A long black coach passed slowly by, with more black coaches behind it. I was very small. I did not yet understand what it meant.", rightIsTitle: false, cue: "Why so sad a day?", nanaPrompt: "Ask Perry: have you ever felt sad about something even when you didn't fully understand it?" },
+          { leftEmoji: "🐴", leftChapter: "Chapter 1 · My Early Home", leftBody: "The first place I remember was a wide green meadow with a clear pond at one end. Tall trees leaned over the water, and reeds grew where it was deepest. I lived there happily with my mother.", rightTitle: "Black Beauty", rightTitleSub: "by Anna Sewell", rightBody: "A gentle horse tells his own story — from a sunny meadow childhood to the hard streets of London, and home again at last.", rightIsTitle: true, cue: "Can you picture the meadow?", nanaPrompt: "What color is the grass? What does the air smell like?" },
+          { leftEmoji: "🐴", leftChapter: "Chapter 1 · My Early Home", leftBody: "I drank my mother's milk when I was small. By day I trotted at her side. At night I slept close beside her. We had a warm shed for cold weather, and the trees made shade when the sun was hot.", rightTitle: null, rightTitleSub: null, rightBody: "Six other young horses lived in the meadow with us. They were older and bigger than I was. We were a little herd of friends, even when we played a bit rough.", rightIsTitle: false, cue: "Six big horses to play with!", nanaPrompt: "Who do you love playing with most? What's your favorite game together?" },
+          { leftEmoji: "🐎", leftChapter: "Chapter 1 · My Early Home", leftBody: "We galloped together round and round the field, as fast as we could go. The play was sometimes rough — biting and kicking, even though no one meant any harm. We were only learning.", rightTitle: null, rightTitleSub: null, rightBody: "One afternoon, after a wild gallop, my mother called me over with a soft whinny. 'I would like you to listen carefully,' she said. 'I have something important to tell you.'", rightIsTitle: false, cue: "What's she going to say?", nanaPrompt: "What does your mom say when she really needs you to listen?" },
+          { leftEmoji: "💗", leftChapter: "Chapter 1 · My Early Home", leftBody: "'The colts here are good,' said my mother, 'but they are cart-horse colts, and they have never been taught manners. You come from a fine family. Your grandfather was a famous racing horse.'", rightTitle: null, rightTitleSub: null, rightBody: "'Your grandmother had the sweetest temper of any horse I ever knew. You have never seen me bite or kick. I want you to grow up gentle and good, and never to learn any bad ways.'", rightIsTitle: false, cue: "What does 'gentle and good' mean?", nanaPrompt: "When your mom or dad teaches you something important, what do they say?" },
+          { leftEmoji: "🌾", leftChapter: "Chapter 1 · My Early Home", leftBody: "'Lift your feet up nicely when you trot. Do your work well. Never bite or kick — not even in fun.' I never forgot what she told me that day. My mother was wise, and I tried very hard to listen.", rightTitle: null, rightTitleSub: null, rightBody: "Our master was a kind man with gentle hands. He gave us good food and warm shelter, and he spoke to us as softly as he did to his own little children. We all loved him very much.", rightIsTitle: false, cue: "What makes a good master?", nanaPrompt: "How do you know when someone is being kind to you? What do they do or say?" },
+          { leftEmoji: "🦊", leftChapter: "Chapter 1 · My Early Home", leftBody: "One bright morning I heard a strange sound — first far away, then louder. It was the horn of a hunt. The other colts pricked up their ears. 'The hounds are coming!' the eldest cried, and galloped to the hedge.", rightTitle: null, rightTitleSub: null, rightBody: "We all followed and peered over the fence. In the next field we saw riders in bright red coats, and a pack of dogs running fast — noses to the ground, men galloping close behind.", rightIsTitle: false, cue: "What are they chasing?", nanaPrompt: "Have you ever heard dogs barking far away? What did it sound like?" },
+          { leftEmoji: "😨", leftChapter: "Chapter 1 · My Early Home", leftBody: "Suddenly a frightened hare darted across our meadow. The hounds and riders crashed in after her. Then I saw a young rider's horse stumble at the brook and fall. The rider was thrown to the ground and lay very still.", rightTitle: null, rightTitleSub: null, rightBody: "He was a tall young man — much loved in our country. There was shouting and crying all around. I could not bear to look any longer, so I turned my head away and pressed close to my mother's side.", rightIsTitle: false, cue: "Is he hurt very badly?", nanaPrompt: "How do you feel when you see someone fall down? Does your tummy go funny?" },
+          { leftEmoji: "💔", leftChapter: "Chapter 1 · My Early Home", leftBody: "My mother was quiet for a long time after. She told me she had known the horse who fell. His name was Rob Roy, and he was good and brave. After that day, she would never walk to that part of the meadow again.", rightTitle: null, rightTitleSub: null, rightBody: "A few days later we heard the church bell ringing for a long, long time. A long black coach passed slowly by, with more black coaches behind it. I was very small. I did not yet understand what it meant.", rightIsTitle: false, cue: "Why so sad a day?", nanaPrompt: "Have you ever felt sad about something even when you didn't fully understand it?" },
         ],
       },
       {
@@ -1015,14 +1036,14 @@ const booksLibrary: Record<string, Book> = {
         question: "Was the colt wrong to say 'it serves him right'? What do you think?",
         teaser: "Coming up: Beauty grows up, and learns what it really means to wear a saddle.",
         pages: [
-          { leftEmoji: "📯", leftChapter: "Chapter 2 · The Hunt", leftBody: "Before I was two years old, something happened that I would never forget. It was early spring. The morning was bright. A thin silver mist hung over the small woods and meadows like a soft veil.", rightTitle: null, rightTitleSub: null, rightBody: "I and the other colts were eating grass at the lower end of the meadow. From far away we heard a sound — many dogs barking at once. The eldest colt lifted his head and pricked his ears.", rightIsTitle: false, cue: "What is that sound?", nanaPrompt: "Make a long 'awooooo' together. Ask Perry: have you ever heard a sound and wondered what it was?" },
-          { leftEmoji: "🐇", leftChapter: "Chapter 2 · The Hunt", leftBody: "Then a hare came tearing past us, wild with fear, and ran for the woods. Right behind her came the hounds. They jumped the bank, leaped the stream, and dashed across the meadow with the riders close behind.", rightTitle: null, rightTitleSub: null, rightBody: "Six or eight men jumped their horses clean over the hedge after the dogs. The hare tried to slip through the fence, but it was too thick. She turned around to make for the road — but it was already too late.", rightIsTitle: false, cue: "Can the hare get away?", nanaPrompt: "Ask Perry: who do you root for in a chase — the one running, or the ones chasing?" },
-          { leftEmoji: "🌊", leftChapter: "Chapter 2 · The Hunt", leftBody: "The dogs caught her. They were all over her at once. A huntsman rode up and pulled them off, holding her up by one leg for the others to see. The men in red coats seemed very pleased about it all.", rightTitle: null, rightTitleSub: null, rightBody: "I had been so caught up in watching that I did not see what was happening at the brook. When I did look, my heart sank. Two horses were down — one struggling in the water, the other lying still on the grass.", rightIsTitle: false, cue: "What's happening at the brook?", nanaPrompt: "Ask Perry: have you ever been so busy watching one thing that you missed something else important?" },
-          { leftEmoji: "🌿", leftChapter: "Chapter 2 · The Hunt", leftBody: "One rider was climbing out of the water, all covered in mud. The other lay on the grass and did not move. 'His neck is broken,' my mother said quietly. I shivered, even though the day was warm.", rightTitle: null, rightTitleSub: null, rightBody: "'It serves him right,' said one of the colts beside me. I thought the same — but my mother turned sharply. 'No,' she said. 'You must never be glad when anyone is hurt. It is wrong, even when it is a person.'", rightIsTitle: false, cue: "Was the colt right to say that?", nanaPrompt: "Ask Perry: have you ever felt a little glad when someone got in trouble, then felt bad for feeling glad? Share one from your own life." },
-          { leftEmoji: "😢", leftChapter: "Chapter 2 · The Hunt", leftBody: "Rob Roy — the black horse — was hurt too badly to live. A man with a gun came up to the field. He spoke quietly to the horse. Then there was a sharp loud crack, and a cry, and after that all was very still.", rightTitle: null, rightTitleSub: null, rightBody: "My mother was very sad. She had known Rob Roy for many years. He was brave and good, she said, and there was no badness in him. After that day, she never walked to that part of the meadow again.", rightIsTitle: false, cue: "Why does mother stay away now?", nanaPrompt: "Ask Perry: are there places that feel different to you because of something that happened there? Tell her about one of yours." },
-          { leftEmoji: "🌅", leftChapter: "Chapter 2 · The Hunt", leftBody: "When I grew older, I often wondered why people did this for sport. The man was killed. The horse was killed. The little hare was killed. Many people were in tears. And the hare was so very small, after all.", rightTitle: null, rightTitleSub: null, rightBody: "I did not understand it then, and I am not sure I understand it now. But that day I learned something important: the world has sweet meadows in it, and hard sorrows too. Horses do not always choose which.", rightIsTitle: false, cue: "Was the hunt worth the cost?", nanaPrompt: "Ask Perry: when something costs a lot — in feelings, not money — and the prize is tiny, was it worth doing? Why or why not?" },
-          { leftEmoji: "👦", leftChapter: "Chapter 2 · The Hunt", leftBody: "After that day my mother spoke often about people. 'There are many kinds of men,' she said. 'Thoughtful kind men, like our master — any horse would be proud to serve them. And cruel men, who should never own any animal at all.'", rightTitle: null, rightTitleSub: null, rightBody: "'And then there are foolish men — careless, vain, never stopping to think. They spoil more horses than the cruel ones, just because they never think. A horse never knows who will buy him. I can only hope you fall into good hands.'", rightIsTitle: false, cue: "What kind of person should you be?", nanaPrompt: "Ask Perry: what does it mean to be a 'thoughtful' person? Can she name one thoughtful grown-up she knows?" },
-          { leftEmoji: "🌳", leftChapter: "Chapter 2 · The Hunt", leftBody: "'Always do your best work, and keep up your good name. Then you will be treated well wherever you go. As for me, I am getting old, and I shall stay in this meadow as long as my master will keep me.'", rightTitle: null, rightTitleSub: null, rightBody: "I felt so proud to have such a wise mother. I made a promise in my heart that day: I would grow up to be like her. I would be gentle and good. I would never disgrace her name. From that day on, I tried.", rightIsTitle: false, cue: "What does Beauty promise himself?", nanaPrompt: "Ask Perry: what is one promise you've made to yourself that you'd like to keep? You can share one of yours, too." },
+          { leftEmoji: "📯", leftChapter: "Chapter 2 · The Hunt", leftBody: "Before I was two years old, something happened that I would never forget. It was early spring. The morning was bright. A thin silver mist hung over the small woods and meadows like a soft veil.", rightTitle: null, rightTitleSub: null, rightBody: "I and the other colts were eating grass at the lower end of the meadow. From far away we heard a sound — many dogs barking at once. The eldest colt lifted his head and pricked his ears.", rightIsTitle: false, cue: "What is that sound?", nanaPrompt: "Make a long 'awooooo' together. Have you ever heard a sound and wondered what it was?" },
+          { leftEmoji: "🐇", leftChapter: "Chapter 2 · The Hunt", leftBody: "Then a hare came tearing past us, wild with fear, and ran for the woods. Right behind her came the hounds. They jumped the bank, leaped the stream, and dashed across the meadow with the riders close behind.", rightTitle: null, rightTitleSub: null, rightBody: "Six or eight men jumped their horses clean over the hedge after the dogs. The hare tried to slip through the fence, but it was too thick. She turned around to make for the road — but it was already too late.", rightIsTitle: false, cue: "Can the hare get away?", nanaPrompt: "Who do you root for in a chase — the one running, or the ones chasing?" },
+          { leftEmoji: "🌊", leftChapter: "Chapter 2 · The Hunt", leftBody: "The dogs caught her. They were all over her at once. A huntsman rode up and pulled them off, holding her up by one leg for the others to see. The men in red coats seemed very pleased about it all.", rightTitle: null, rightTitleSub: null, rightBody: "I had been so caught up in watching that I did not see what was happening at the brook. When I did look, my heart sank. Two horses were down — one struggling in the water, the other lying still on the grass.", rightIsTitle: false, cue: "What's happening at the brook?", nanaPrompt: "Have you ever been so busy watching one thing that you missed something else important?" },
+          { leftEmoji: "🌿", leftChapter: "Chapter 2 · The Hunt", leftBody: "One rider was climbing out of the water, all covered in mud. The other lay on the grass and did not move. 'His neck is broken,' my mother said quietly. I shivered, even though the day was warm.", rightTitle: null, rightTitleSub: null, rightBody: "'It serves him right,' said one of the colts beside me. I thought the same — but my mother turned sharply. 'No,' she said. 'You must never be glad when anyone is hurt. It is wrong, even when it is a person.'", rightIsTitle: false, cue: "Was the colt right to say that?", nanaPrompt: "Have you ever felt a little glad when someone got in trouble, then felt bad for feeling glad?" },
+          { leftEmoji: "😢", leftChapter: "Chapter 2 · The Hunt", leftBody: "Rob Roy — the black horse — was hurt too badly to live. A man with a gun came up to the field. He spoke quietly to the horse. Then there was a sharp loud crack, and a cry, and after that all was very still.", rightTitle: null, rightTitleSub: null, rightBody: "My mother was very sad. She had known Rob Roy for many years. He was brave and good, she said, and there was no badness in him. After that day, she never walked to that part of the meadow again.", rightIsTitle: false, cue: "Why does mother stay away now?", nanaPrompt: "Are there places that feel different to you because of something that happened there?" },
+          { leftEmoji: "🌅", leftChapter: "Chapter 2 · The Hunt", leftBody: "When I grew older, I often wondered why people did this for sport. The man was killed. The horse was killed. The little hare was killed. Many people were in tears. And the hare was so very small, after all.", rightTitle: null, rightTitleSub: null, rightBody: "I did not understand it then, and I am not sure I understand it now. But that day I learned something important: the world has sweet meadows in it, and hard sorrows too. Horses do not always choose which.", rightIsTitle: false, cue: "Was the hunt worth the cost?", nanaPrompt: "When something costs a lot — in feelings, not money — and the prize is tiny, was it worth doing? Why or why not?" },
+          { leftEmoji: "👦", leftChapter: "Chapter 2 · The Hunt", leftBody: "After that day my mother spoke often about people. 'There are many kinds of men,' she said. 'Thoughtful kind men, like our master — any horse would be proud to serve them. And cruel men, who should never own any animal at all.'", rightTitle: null, rightTitleSub: null, rightBody: "'And then there are foolish men — careless, vain, never stopping to think. They spoil more horses than the cruel ones, just because they never think. A horse never knows who will buy him. I can only hope you fall into good hands.'", rightIsTitle: false, cue: "What kind of person should you be?", nanaPrompt: "What does it mean to be a 'thoughtful' person? Can you name one thoughtful grown-up you know?" },
+          { leftEmoji: "🌳", leftChapter: "Chapter 2 · The Hunt", leftBody: "'Always do your best work, and keep up your good name. Then you will be treated well wherever you go. As for me, I am getting old, and I shall stay in this meadow as long as my master will keep me.'", rightTitle: null, rightTitleSub: null, rightBody: "I felt so proud to have such a wise mother. I made a promise in my heart that day: I would grow up to be like her. I would be gentle and good. I would never disgrace her name. From that day on, I tried.", rightIsTitle: false, cue: "What does Beauty promise himself?", nanaPrompt: "What is one promise you've made to yourself that you'd like to keep?" },
         ],
       },
       {
@@ -1032,14 +1053,14 @@ const booksLibrary: Record<string, Book> = {
         question: "What helped Beauty be brave when the loud trains rushed past?",
         teaser: "Coming up: a brand-new home, two new friends, and a beautiful name.",
         pages: [
-          { leftEmoji: "🌱", leftChapter: "Chapter 3 · My Breaking In", leftBody: "I grew tall and strong. My coat turned a deep glossy black, with a white star on my forehead and one white sock. My master would not sell me until I was four. He said a horse should not work hard while still a child.", rightTitle: null, rightTitleSub: null, rightBody: "When I turned four, Squire Gordon — a fine gentleman who lived nearby — came to look at me. He felt my legs and watched me trot. At last he nodded: he would buy me. But first, my master said, I had to be 'broken in.'", rightIsTitle: false, cue: "What does 'broken in' mean?", nanaPrompt: "Ask Perry: what do you think 'broken in' means? It sounds scary, but it just means learning a new job." },
-          { leftEmoji: "😣", leftChapter: "Chapter 3 · My Breaking In", leftBody: "To be broken in means learning to wear a saddle and a bridle. It also means learning to carry a person on your back, or to pull a cart behind you. It is not easy at all. The hardest part for me was the bit.", rightTitle: null, rightTitleSub: null, rightBody: "A bit is a cold iron bar. They slip it into your mouth, between your teeth, and there it stays for hours. I tossed my head and tried to spit it out. But my master gave me a soft pat and a little oats, and slowly I got used to it.", rightIsTitle: false, cue: "Would you like a bar in your mouth?", nanaPrompt: "Ask Perry: imagine wearing something on your face all day that you didn't choose. How would you feel? Could you get used to it?" },
-          { leftEmoji: "🪧", leftChapter: "Chapter 3 · My Breaking In", leftBody: "Next came the saddle. It was strange at first — a heavy weight settling on my back — but it did not hurt, and my master spoke softly the whole time. Soon I could trot and canter with it on, as easily as if it weren't there.", rightTitle: null, rightTitleSub: null, rightBody: "After many days of practice, my master climbed gently up into the saddle. I could feel him sitting on my back. It was a very strange feeling at first. But he was kind, and he rode me only a little farther each day.", rightIsTitle: false, cue: "Did Beauty buck him off?", nanaPrompt: "Ask Perry: have you ever tried something new and felt wobbly at first? What helped you get steadier?" },
-          { leftEmoji: "🔩", leftChapter: "Chapter 3 · My Breaking In", leftBody: "Then came the iron shoes. The smith took my hoof onto his lap, pared away a little of the bottom, and nailed a cold iron shoe onto each one. It made my feet feel heavy and stiff, and at first I did not like it one bit.", rightTitle: null, rightTitleSub: null, rightBody: "After a few days I stopped noticing the shoes at all. The smith said they were to protect my hooves from rocky roads. He was right. Once I went out onto the lanes, I was glad to have them on. They made the hard work easier.", rightIsTitle: false, cue: "Nailed to your foot?", nanaPrompt: "Ask Perry: have you ever worn boots so heavy you felt clumpy at first? How long before you forgot they were on?" },
-          { leftEmoji: "🪢", leftChapter: "Chapter 3 · My Breaking In", leftBody: "Last of all, my master taught me to wear the harness. There were stiff leather straps, a heavy collar that pressed on my shoulders, and a strap that went under my tail. I did not like that strap one bit.", rightTitle: null, rightTitleSub: null, rightBody: "But my master was patient and kind. He spoke softly. He gave me a little something nice when I did well. Step by step I learned what each pull and each call meant, until I could pull a cart almost without thinking.", rightIsTitle: false, cue: "What's the trick to learning?", nanaPrompt: "Ask Perry: when you learn something new, does it help when someone is patient with you? Tell her about a good teacher you remember." },
-          { leftEmoji: "🚂", leftChapter: "Chapter 3 · My Breaking In", leftBody: "There was one more test. The farmer next door had a meadow right beside the railway tracks. My master borrowed it, and for two whole weeks I lived right beside the trains. The first time a train roared past, I thought the world was ending!", rightTitle: null, rightTitleSub: null, rightBody: "I trembled and almost ran. But after a few days, I learned the trains were not coming for me. I could stand quietly while the great machines rushed by, even when they whistled. After that, nothing on the road could frighten me.", rightIsTitle: false, cue: "What would you do if a train roared by?", nanaPrompt: "Ask Perry: have you ever heard something so loud it scared you? What helped you not be scared the next time?" },
-          { leftEmoji: "👋", leftChapter: "Chapter 3 · My Breaking In", leftBody: "On the day I was to leave, my master came to say goodbye. My mother stood quietly while he spoke. 'Goodbye, Darkie,' he said, putting his hand softly on my neck. 'You are a brave, good colt. I shall miss you very much.'", rightTitle: null, rightTitleSub: null, rightBody: "My mother had her last words for me too. 'Be a good horse,' she said. 'Always do your best, and keep up your good name. Then no matter where you go, you will have done well.' I never saw her again.", rightIsTitle: false, cue: "How does Beauty feel?", nanaPrompt: "Ask Perry: have you ever had to say goodbye to someone you loved? It's okay if it makes you a little teary." },
-          { leftEmoji: "🛤️", leftChapter: "Chapter 3 · My Breaking In", leftBody: "I was loaded into a railway car for the very first time. It was rattly and strange, and the noise was great. But I remembered my training with the trains, and I stood quite steady. After a long ride, the door opened in a new place.", rightTitle: null, rightTitleSub: null, rightBody: "A man was waiting for me. His name was John Manly, and he was the coachman at Birtwick Park. He led me out gently, looked me over with a smile, and said quietly, 'Well, young one. Let's get you home.'", rightIsTitle: false, cue: "What will Birtwick Park be like?", nanaPrompt: "Ask Perry: how does she feel when she goes somewhere brand new? Excited? Nervous? A little of both?" },
+          { leftEmoji: "🌱", leftChapter: "Chapter 3 · My Breaking In", leftBody: "I grew tall and strong. My coat turned a deep glossy black, with a white star on my forehead and one white sock. My master would not sell me until I was four. He said a horse should not work hard while still a child.", rightTitle: null, rightTitleSub: null, rightBody: "When I turned four, Squire Gordon — a fine gentleman who lived nearby — came to look at me. He felt my legs and watched me trot. At last he nodded: he would buy me. But first, my master said, I had to be 'broken in.'", rightIsTitle: false, cue: "What does 'broken in' mean?", nanaPrompt: "What do you think 'broken in' means? It sounds scary, but it just means learning a new job." },
+          { leftEmoji: "😣", leftChapter: "Chapter 3 · My Breaking In", leftBody: "To be broken in means learning to wear a saddle and a bridle. It also means learning to carry a person on your back, or to pull a cart behind you. It is not easy at all. The hardest part for me was the bit.", rightTitle: null, rightTitleSub: null, rightBody: "A bit is a cold iron bar. They slip it into your mouth, between your teeth, and there it stays for hours. I tossed my head and tried to spit it out. But my master gave me a soft pat and a little oats, and slowly I got used to it.", rightIsTitle: false, cue: "Would you like a bar in your mouth?", nanaPrompt: "Imagine wearing something on your face all day that you didn't choose. How would you feel? Could you get used to it?" },
+          { leftEmoji: "🪧", leftChapter: "Chapter 3 · My Breaking In", leftBody: "Next came the saddle. It was strange at first — a heavy weight settling on my back — but it did not hurt, and my master spoke softly the whole time. Soon I could trot and canter with it on, as easily as if it weren't there.", rightTitle: null, rightTitleSub: null, rightBody: "After many days of practice, my master climbed gently up into the saddle. I could feel him sitting on my back. It was a very strange feeling at first. But he was kind, and he rode me only a little farther each day.", rightIsTitle: false, cue: "Did Beauty buck him off?", nanaPrompt: "Have you ever tried something new and felt wobbly at first? What helped you get steadier?" },
+          { leftEmoji: "🔩", leftChapter: "Chapter 3 · My Breaking In", leftBody: "Then came the iron shoes. The smith took my hoof onto his lap, pared away a little of the bottom, and nailed a cold iron shoe onto each one. It made my feet feel heavy and stiff, and at first I did not like it one bit.", rightTitle: null, rightTitleSub: null, rightBody: "After a few days I stopped noticing the shoes at all. The smith said they were to protect my hooves from rocky roads. He was right. Once I went out onto the lanes, I was glad to have them on. They made the hard work easier.", rightIsTitle: false, cue: "Nailed to your foot?", nanaPrompt: "Have you ever worn boots so heavy you felt clumpy at first? How long before you forgot they were on?" },
+          { leftEmoji: "🪢", leftChapter: "Chapter 3 · My Breaking In", leftBody: "Last of all, my master taught me to wear the harness. There were stiff leather straps, a heavy collar that pressed on my shoulders, and a strap that went under my tail. I did not like that strap one bit.", rightTitle: null, rightTitleSub: null, rightBody: "But my master was patient and kind. He spoke softly. He gave me a little something nice when I did well. Step by step I learned what each pull and each call meant, until I could pull a cart almost without thinking.", rightIsTitle: false, cue: "What's the trick to learning?", nanaPrompt: "When you learn something new, does it help when someone is patient with you?" },
+          { leftEmoji: "🚂", leftChapter: "Chapter 3 · My Breaking In", leftBody: "There was one more test. The farmer next door had a meadow right beside the railway tracks. My master borrowed it, and for two whole weeks I lived right beside the trains. The first time a train roared past, I thought the world was ending!", rightTitle: null, rightTitleSub: null, rightBody: "I trembled and almost ran. But after a few days, I learned the trains were not coming for me. I could stand quietly while the great machines rushed by, even when they whistled. After that, nothing on the road could frighten me.", rightIsTitle: false, cue: "What would you do if a train roared by?", nanaPrompt: "Have you ever heard something so loud it scared you? What helped you not be scared the next time?" },
+          { leftEmoji: "👋", leftChapter: "Chapter 3 · My Breaking In", leftBody: "On the day I was to leave, my master came to say goodbye. My mother stood quietly while he spoke. 'Goodbye, Darkie,' he said, putting his hand softly on my neck. 'You are a brave, good colt. I shall miss you very much.'", rightTitle: null, rightTitleSub: null, rightBody: "My mother had her last words for me too. 'Be a good horse,' she said. 'Always do your best, and keep up your good name. Then no matter where you go, you will have done well.' I never saw her again.", rightIsTitle: false, cue: "How does Beauty feel?", nanaPrompt: "Have you ever had to say goodbye to someone you loved? It's okay if it makes you a little teary." },
+          { leftEmoji: "🛤️", leftChapter: "Chapter 3 · My Breaking In", leftBody: "I was loaded into a railway car for the very first time. It was rattly and strange, and the noise was great. But I remembered my training with the trains, and I stood quite steady. After a long ride, the door opened in a new place.", rightTitle: null, rightTitleSub: null, rightBody: "A man was waiting for me. His name was John Manly, and he was the coachman at Birtwick Park. He led me out gently, looked me over with a smile, and said quietly, 'Well, young one. Let's get you home.'", rightIsTitle: false, cue: "What will Birtwick Park be like?", nanaPrompt: "How do you feel when you go somewhere brand new? Excited? Nervous? A little of both?" },
         ],
       },
       {
@@ -1049,14 +1070,14 @@ const booksLibrary: Record<string, Book> = {
         question: "Why do you think Ginger was so cross when Beauty first met her?",
         teaser: "Coming up: a wild storm, a flooded river, and a choice only Beauty can make.",
         pages: [
-          { leftEmoji: "🏰", leftChapter: "Chapter 4 · Birtwick Park", leftBody: "Birtwick Park was a beautiful place. There were great trees, soft lawns, and a long avenue leading up to the master's house. The stables were clean and bright, with two rows of stalls and a wide door for fresh air.", rightTitle: null, rightTitleSub: null, rightBody: "John led me to my own stall. It was a 'loose box,' which meant I was not tied up. I could move around as I pleased. The straw was fresh and golden, and the manger was full of good oats. I had never seen such a fine stable.", rightIsTitle: false, cue: "What makes a stable feel like home?", nanaPrompt: "Ask Perry: when you go to bed at night, what makes your room feel cozy? Is it soft sheets, a special toy, a favorite blanket?" },
-          { leftEmoji: "🐎", leftChapter: "Chapter 4 · Birtwick Park", leftBody: "In the next stall was a small fat grey pony with a thick mane and tail. I greeted him politely over the low wall. 'Hello,' he said cheerfully. 'My name is Merrylegs. I am very handsome — and I belong to the children of the house.'", rightTitle: null, rightTitleSub: null, rightBody: "Merrylegs was kind and chatty. He told me everything I needed to know — when meals came, when John brushed us down, where the best grass in the paddock was. He had been at Birtwick a long time, and he was very proud of it.", rightIsTitle: false, cue: "What kind of friend is Merrylegs?", nanaPrompt: "Ask Perry: who is the friend in her life who tells her everything? Do you have a Merrylegs friend yourself?" },
-          { leftEmoji: "🔥", leftChapter: "Chapter 4 · Birtwick Park", leftBody: "In the stall on my other side was a chestnut mare with a long, beautiful neck and a fiery eye. She did not say hello. She turned her head and asked sharply, 'And who are you, to come in and take MY stall?'", rightTitle: null, rightTitleSub: null, rightBody: "Her name was Ginger, and she was not friendly that day. Merrylegs told me later that Ginger had a habit of nipping people, and that she had not had a kind life before coming to Birtwick. I felt sorry for her, even when she snapped.", rightIsTitle: false, cue: "Why is Ginger so cross?", nanaPrompt: "Ask Perry: have you ever met someone who seemed grumpy at first but turned out to be kind? Sometimes grumpy people are sad inside." },
-          { leftEmoji: "🕯️", leftChapter: "Chapter 4 · Birtwick Park", leftBody: "One quiet evening Ginger told me her story. Her mother had been taken from her when she was very young. She had been broken in roughly, by men with whips and harsh hands, who never spoke a single gentle word to her.", rightTitle: null, rightTitleSub: null, rightBody: "She had learned, she said, that the world was a cruel place. So she bit and kicked, because it was the only way she knew to stand up for herself. 'I had no kindness,' she told me, 'so I had no kindness to give.' I listened, and I was very sorry.", rightIsTitle: false, cue: "Why does Ginger bite?", nanaPrompt: "Ask Perry: when someone is mean, do you think they are mean because they like it, or because something hurt them long ago? Big question." },
-          { leftEmoji: "🌳", leftChapter: "Chapter 4 · Birtwick Park", leftBody: "The next morning, John saddled me and took me for my first ride. He was a fine rider — light in the saddle, gentle with his hands. We trotted down the lane and through the village. I felt the wind in my mane and the world flying past.", rightTitle: null, rightTitleSub: null, rightBody: "When we came back, John spoke to the master. 'He is a fine, fast goer, sir — and gentle as a lamb.' The master patted my neck and said, 'Take him out tomorrow with the mistress. We'll see how he goes with her.'", rightIsTitle: false, cue: "How was the first ride?", nanaPrompt: "Ask Perry: what is the most fun part of riding in a car or a bike — the wind? The speed? Tell her about your favorite ride." },
-          { leftEmoji: "✨", leftChapter: "Chapter 4 · Birtwick Park", leftBody: "That evening the master and mistress came together to look at me. 'He is a perfect black, John,' the mistress said. 'With such a soft eye. He should have a beautiful name.' 'What about Black Beauty?' said the master.", rightTitle: null, rightTitleSub: null, rightBody: "'Black Beauty — yes,' she answered with a smile. 'It is a very pretty name, and he is a very pretty horse.' From that day, I had a new name. It would be the name they called me here — and it would stay with me, wherever I went.", rightIsTitle: false, cue: "Do you like the name 'Black Beauty'?", nanaPrompt: "Ask Perry: if you could pick a brand-new name for yourself, what would it be? And why?" },
-          { leftEmoji: "👒", leftChapter: "Chapter 4 · Birtwick Park", leftBody: "The next day the mistress drove me herself. She had small, gentle hands on the reins, and she spoke softly to me through the whole drive. We went a long way through the green countryside, past hedges full of wild roses.", rightTitle: null, rightTitleSub: null, rightBody: "When we came home, she patted my neck and told the master, 'I love him already. He is a great gentleman of a horse.' I felt very proud — for I had remembered my mother's advice, and I had tried my best the whole way.", rightIsTitle: false, cue: "What did the mistress think?", nanaPrompt: "Ask Perry: how does it feel when someone notices you doing something well? Have you ever done your best and had someone really see it?" },
-          { leftEmoji: "🏡", leftChapter: "Chapter 4 · Birtwick Park", leftBody: "And so I settled at Birtwick Park. I had Merrylegs to chat with, Ginger to keep me company, John to take care of me, and a master and mistress who were always kind. The days went by like good, warm dreams.", rightTitle: null, rightTitleSub: null, rightBody: "I had work to do, and I did it gladly. I carried the family wherever they wished to go. I came to know every road and lane for miles around. I was strong and happy. In those early years, I thought it would never, ever end.", rightIsTitle: false, cue: "Will it last forever?", nanaPrompt: "Ask Perry: have you ever had a perfect day or a perfect summer? What made it feel so good? Share one of yours." },
+          { leftEmoji: "🏰", leftChapter: "Chapter 4 · Birtwick Park", leftBody: "Birtwick Park was a beautiful place. There were great trees, soft lawns, and a long avenue leading up to the master's house. The stables were clean and bright, with two rows of stalls and a wide door for fresh air.", rightTitle: null, rightTitleSub: null, rightBody: "John led me to my own stall. It was a 'loose box,' which meant I was not tied up. I could move around as I pleased. The straw was fresh and golden, and the manger was full of good oats. I had never seen such a fine stable.", rightIsTitle: false, cue: "What makes a stable feel like home?", nanaPrompt: "When you go to bed at night, what makes your room feel cozy? Is it soft sheets, a special toy, a favorite blanket?" },
+          { leftEmoji: "🐎", leftChapter: "Chapter 4 · Birtwick Park", leftBody: "In the next stall was a small fat grey pony with a thick mane and tail. I greeted him politely over the low wall. 'Hello,' he said cheerfully. 'My name is Merrylegs. I am very handsome — and I belong to the children of the house.'", rightTitle: null, rightTitleSub: null, rightBody: "Merrylegs was kind and chatty. He told me everything I needed to know — when meals came, when John brushed us down, where the best grass in the paddock was. He had been at Birtwick a long time, and he was very proud of it.", rightIsTitle: false, cue: "What kind of friend is Merrylegs?", nanaPrompt: "Who is the friend in your life you tell everything to? Do you have a Merrylegs friend?" },
+          { leftEmoji: "🔥", leftChapter: "Chapter 4 · Birtwick Park", leftBody: "In the stall on my other side was a chestnut mare with a long, beautiful neck and a fiery eye. She did not say hello. She turned her head and asked sharply, 'And who are you, to come in and take MY stall?'", rightTitle: null, rightTitleSub: null, rightBody: "Her name was Ginger, and she was not friendly that day. Merrylegs told me later that Ginger had a habit of nipping people, and that she had not had a kind life before coming to Birtwick. I felt sorry for her, even when she snapped.", rightIsTitle: false, cue: "Why is Ginger so cross?", nanaPrompt: "Have you ever met someone who seemed grumpy at first but turned out to be kind? Sometimes grumpy people are sad inside." },
+          { leftEmoji: "🕯️", leftChapter: "Chapter 4 · Birtwick Park", leftBody: "One quiet evening Ginger told me her story. Her mother had been taken from her when she was very young. She had been broken in roughly, by men with whips and harsh hands, who never spoke a single gentle word to her.", rightTitle: null, rightTitleSub: null, rightBody: "She had learned, she said, that the world was a cruel place. So she bit and kicked, because it was the only way she knew to stand up for herself. 'I had no kindness,' she told me, 'so I had no kindness to give.' I listened, and I was very sorry.", rightIsTitle: false, cue: "Why does Ginger bite?", nanaPrompt: "When someone is mean, do you think they are mean because they like it, or because something hurt them long ago? Big question." },
+          { leftEmoji: "🌳", leftChapter: "Chapter 4 · Birtwick Park", leftBody: "The next morning, John saddled me and took me for my first ride. He was a fine rider — light in the saddle, gentle with his hands. We trotted down the lane and through the village. I felt the wind in my mane and the world flying past.", rightTitle: null, rightTitleSub: null, rightBody: "When we came back, John spoke to the master. 'He is a fine, fast goer, sir — and gentle as a lamb.' The master patted my neck and said, 'Take him out tomorrow with the mistress. We'll see how he goes with her.'", rightIsTitle: false, cue: "How was the first ride?", nanaPrompt: "What is the most fun part of riding in a car or a bike — the wind? The speed?" },
+          { leftEmoji: "✨", leftChapter: "Chapter 4 · Birtwick Park", leftBody: "That evening the master and mistress came together to look at me. 'He is a perfect black, John,' the mistress said. 'With such a soft eye. He should have a beautiful name.' 'What about Black Beauty?' said the master.", rightTitle: null, rightTitleSub: null, rightBody: "'Black Beauty — yes,' she answered with a smile. 'It is a very pretty name, and he is a very pretty horse.' From that day, I had a new name. It would be the name they called me here — and it would stay with me, wherever I went.", rightIsTitle: false, cue: "Do you like the name 'Black Beauty'?", nanaPrompt: "If you could pick a brand-new name for yourself, what would it be? And why?" },
+          { leftEmoji: "👒", leftChapter: "Chapter 4 · Birtwick Park", leftBody: "The next day the mistress drove me herself. She had small, gentle hands on the reins, and she spoke softly to me through the whole drive. We went a long way through the green countryside, past hedges full of wild roses.", rightTitle: null, rightTitleSub: null, rightBody: "When we came home, she patted my neck and told the master, 'I love him already. He is a great gentleman of a horse.' I felt very proud — for I had remembered my mother's advice, and I had tried my best the whole way.", rightIsTitle: false, cue: "What did the mistress think?", nanaPrompt: "How does it feel when someone notices you doing something well? Have you ever done your best and had someone really see it?" },
+          { leftEmoji: "🏡", leftChapter: "Chapter 4 · Birtwick Park", leftBody: "And so I settled at Birtwick Park. I had Merrylegs to chat with, Ginger to keep me company, John to take care of me, and a master and mistress who were always kind. The days went by like good, warm dreams.", rightTitle: null, rightTitleSub: null, rightBody: "I had work to do, and I did it gladly. I carried the family wherever they wished to go. I came to know every road and lane for miles around. I was strong and happy. In those early years, I thought it would never, ever end.", rightIsTitle: false, cue: "Will it last forever?", nanaPrompt: "Have you ever had a perfect day or a perfect summer? What made it feel so good?" },
         ],
       },
       {
@@ -1066,14 +1087,14 @@ const booksLibrary: Record<string, Book> = {
         question: "Have you ever 'just known' something was wrong, like Beauty did?",
         teaser: "Coming up: a candle left burning, and a quiet voice in the smoke.",
         pages: [
-          { leftEmoji: "☁️", leftChapter: "Chapter 5 · A Stormy Day", leftBody: "Late in the autumn the master had a long journey to make on business. The carriage was brought round. John drove, and I and another horse — a big strong gray — were harnessed up. The master got in, and we set off through the morning.", rightTitle: null, rightTitleSub: null, rightBody: "The wind was rising before we reached town. By afternoon the clouds had grown thick and dark. We finished our business — but as we started home, the rain came down in great gray sheets, and the wind began to howl through the trees.", rightIsTitle: false, cue: "Looks like a bad storm ahead!", nanaPrompt: "Ask Perry: do you like the sound of rain? Or thunder? Are storms exciting, scary, or both?" },
-          { leftEmoji: "🌬️", leftChapter: "Chapter 5 · A Stormy Day", leftBody: "As we drove home, the storm grew worse. Whole branches snapped from the trees and came down across the road. We had to pick our way carefully, for the path was wet and slippery. The river beside us was running higher and higher.", rightTitle: null, rightTitleSub: null, rightBody: "Then, just as we turned the bend by the woods, a great oak tree crashed down — right across the road, only a few yards ahead. John pulled us up sharp. The master leapt out to look, but the tree was much too heavy to move.", rightIsTitle: false, cue: "Now what?", nanaPrompt: "Ask Perry: have you ever been blocked from where you were going and had to find another way? What did you do?" },
-          { leftEmoji: "🗺️", leftChapter: "Chapter 5 · A Stormy Day", leftBody: "'There is another way home,' said the master. 'We can go round by the wooden bridge, just below the meadow.' John was uneasy — the river was so high, and the bridge sat low. But there was nothing else to be done.", rightTitle: null, rightTitleSub: null, rightBody: "The light was failing as we came down the long lane toward the bridge. The rain had thinned a little, but the wind was still wild. Ahead, just visible in the gloom, the wooden boards of the bridge stretched across the rushing water.", rightIsTitle: false, cue: "Will it hold?", nanaPrompt: "Ask Perry: when you have to do something a little scary, does it help to take a deep breath first? Try one together!" },
-          { leftEmoji: "🛑", leftChapter: "Chapter 5 · A Stormy Day", leftBody: "As we drew near the bridge, I felt with my hooves that something was very wrong. The boards underfoot were strange. The river was high — too high. I stopped, all on my own. I would not take another step forward.", rightTitle: null, rightTitleSub: null, rightBody: "John shook the reins. 'Get up, Beauty,' he said. 'Get up!' But I would not move. The master leaned out. 'Come on, Beauty, what is the matter?' Still I did not move. I knew with all my heart that the bridge was not safe.", rightIsTitle: false, cue: "Why won't Beauty move?", nanaPrompt: "Ask Perry: have you ever had a deep-down feeling that something wasn't right — and you couldn't say why? Tell her about it." },
-          { leftEmoji: "🔦", leftChapter: "Chapter 5 · A Stormy Day", leftBody: "Then, on the far side of the bridge, a lantern came swinging up the road. A man was waving and shouting. The wind tore his words away. He ran up close, and at last we could hear him through the storm.", rightTitle: null, rightTitleSub: null, rightBody: "'The bridge is broken!' he cried. 'The middle has given way! It went down in the flood not ten minutes ago. If you had driven on, you would all be in the river!' The master and John both went pale. They looked at the bridge — then at me.", rightIsTitle: false, cue: "Beauty saved them all!", nanaPrompt: "Cheer with Perry for Black Beauty! Ask: did you feel proud of him? Tell her about a time you 'just knew' something." },
-          { leftEmoji: "🕯️", leftChapter: "Chapter 5 · A Stormy Day", leftBody: "We turned around once more and took the long way home, through the village. By the time we reached Birtwick Park, the lamps were lit and the mistress was standing at the doorway, very worried indeed.", rightTitle: null, rightTitleSub: null, rightBody: "She had been waiting for hours. 'Oh,' she cried, 'you are safe! I have been so afraid!' The master told her everything that had happened — and how the storm had nearly cost them their lives. And then he told her about me.", rightIsTitle: false, cue: "Will they praise Beauty?", nanaPrompt: "Ask Perry: when someone has been worried about you and you come home safe, what's the best part of that hug?" },
-          { leftEmoji: "🌟", leftChapter: "Chapter 5 · A Stormy Day", leftBody: "John brought me to the stable that night, very tired and very glad. He rubbed me down with extra care, gave me a warm bran mash, and patted my neck for a long time. 'You are a brave good horse,' he said. 'I shall not forget what you did tonight.'", rightTitle: null, rightTitleSub: null, rightBody: "The master, before he went into the house, had stopped at my stall too. He put his hand softly on my nose. 'You saved us all tonight, Beauty,' he said. 'You knew what we did not. You are a wise and good horse.' I felt full of pride.", rightIsTitle: false, cue: "What did he learn?", nanaPrompt: "Ask Perry: when someone really thanks you for something you did, what does it feel like inside? Tell her about a time you helped someone." },
-          { leftEmoji: "💡", leftChapter: "Chapter 5 · A Stormy Day", leftBody: "The next morning, while John was brushing me, the master came in. 'It is wonderful,' the master said, 'how God has given the animals such sense. They know things by feeling that we know only by thinking about it for a long time.'", rightTitle: null, rightTitleSub: null, rightBody: "'Aye, sir,' said John. 'And if we would only listen to them when they tell us something is wrong, we'd be the better for it.' From that day on, when I did not want to go forward, John always stopped to find out why.", rightIsTitle: false, cue: "What does it mean to listen?", nanaPrompt: "Ask Perry: who is good at really listening to you? What's the difference between hearing someone and really, really listening?" },
+          { leftEmoji: "☁️", leftChapter: "Chapter 5 · A Stormy Day", leftBody: "Late in the autumn the master had a long journey to make on business. The carriage was brought round. John drove, and I and another horse — a big strong gray — were harnessed up. The master got in, and we set off through the morning.", rightTitle: null, rightTitleSub: null, rightBody: "The wind was rising before we reached town. By afternoon the clouds had grown thick and dark. We finished our business — but as we started home, the rain came down in great gray sheets, and the wind began to howl through the trees.", rightIsTitle: false, cue: "Looks like a bad storm ahead!", nanaPrompt: "Do you like the sound of rain? Or thunder? Are storms exciting, scary, or both?" },
+          { leftEmoji: "🌬️", leftChapter: "Chapter 5 · A Stormy Day", leftBody: "As we drove home, the storm grew worse. Whole branches snapped from the trees and came down across the road. We had to pick our way carefully, for the path was wet and slippery. The river beside us was running higher and higher.", rightTitle: null, rightTitleSub: null, rightBody: "Then, just as we turned the bend by the woods, a great oak tree crashed down — right across the road, only a few yards ahead. John pulled us up sharp. The master leapt out to look, but the tree was much too heavy to move.", rightIsTitle: false, cue: "Now what?", nanaPrompt: "Have you ever been blocked from where you were going and had to find another way? What did you do?" },
+          { leftEmoji: "🗺️", leftChapter: "Chapter 5 · A Stormy Day", leftBody: "'There is another way home,' said the master. 'We can go round by the wooden bridge, just below the meadow.' John was uneasy — the river was so high, and the bridge sat low. But there was nothing else to be done.", rightTitle: null, rightTitleSub: null, rightBody: "The light was failing as we came down the long lane toward the bridge. The rain had thinned a little, but the wind was still wild. Ahead, just visible in the gloom, the wooden boards of the bridge stretched across the rushing water.", rightIsTitle: false, cue: "Will it hold?", nanaPrompt: "When you have to do something a little scary, does it help to take a deep breath first? Try one together!" },
+          { leftEmoji: "🛑", leftChapter: "Chapter 5 · A Stormy Day", leftBody: "As we drew near the bridge, I felt with my hooves that something was very wrong. The boards underfoot were strange. The river was high — too high. I stopped, all on my own. I would not take another step forward.", rightTitle: null, rightTitleSub: null, rightBody: "John shook the reins. 'Get up, Beauty,' he said. 'Get up!' But I would not move. The master leaned out. 'Come on, Beauty, what is the matter?' Still I did not move. I knew with all my heart that the bridge was not safe.", rightIsTitle: false, cue: "Why won't Beauty move?", nanaPrompt: "Have you ever had a deep-down feeling that something wasn't right — and you couldn't say why?" },
+          { leftEmoji: "🔦", leftChapter: "Chapter 5 · A Stormy Day", leftBody: "Then, on the far side of the bridge, a lantern came swinging up the road. A man was waving and shouting. The wind tore his words away. He ran up close, and at last we could hear him through the storm.", rightTitle: null, rightTitleSub: null, rightBody: "'The bridge is broken!' he cried. 'The middle has given way! It went down in the flood not ten minutes ago. If you had driven on, you would all be in the river!' The master and John both went pale. They looked at the bridge — then at me.", rightIsTitle: false, cue: "Beauty saved them all!", nanaPrompt: "Hooray for Black Beauty! Did you feel proud of him?" },
+          { leftEmoji: "🕯️", leftChapter: "Chapter 5 · A Stormy Day", leftBody: "We turned around once more and took the long way home, through the village. By the time we reached Birtwick Park, the lamps were lit and the mistress was standing at the doorway, very worried indeed.", rightTitle: null, rightTitleSub: null, rightBody: "She had been waiting for hours. 'Oh,' she cried, 'you are safe! I have been so afraid!' The master told her everything that had happened — and how the storm had nearly cost them their lives. And then he told her about me.", rightIsTitle: false, cue: "Will they praise Beauty?", nanaPrompt: "When someone has been worried about you and you come home safe, what's the best part of that hug?" },
+          { leftEmoji: "🌟", leftChapter: "Chapter 5 · A Stormy Day", leftBody: "John brought me to the stable that night, very tired and very glad. He rubbed me down with extra care, gave me a warm bran mash, and patted my neck for a long time. 'You are a brave good horse,' he said. 'I shall not forget what you did tonight.'", rightTitle: null, rightTitleSub: null, rightBody: "The master, before he went into the house, had stopped at my stall too. He put his hand softly on my nose. 'You saved us all tonight, Beauty,' he said. 'You knew what we did not. You are a wise and good horse.' I felt full of pride.", rightIsTitle: false, cue: "What did he learn?", nanaPrompt: "When someone really thanks you for something you did, what does it feel like inside?" },
+          { leftEmoji: "💡", leftChapter: "Chapter 5 · A Stormy Day", leftBody: "The next morning, while John was brushing me, the master came in. 'It is wonderful,' the master said, 'how God has given the animals such sense. They know things by feeling that we know only by thinking about it for a long time.'", rightTitle: null, rightTitleSub: null, rightBody: "'Aye, sir,' said John. 'And if we would only listen to them when they tell us something is wrong, we'd be the better for it.' From that day on, when I did not want to go forward, John always stopped to find out why.", rightIsTitle: false, cue: "What does it mean to listen?", nanaPrompt: "Who is good at really listening to you? What's the difference between hearing someone and really, really listening?" },
         ],
       },
       {
@@ -1083,14 +1104,14 @@ const booksLibrary: Record<string, Book> = {
         question: "What made James brave that night — was it being unafraid, or something else?",
         teaser: "Coming up: a fancy visitor, a cruel new rule, and Ginger has had enough.",
         pages: [
-          { leftEmoji: "🧳", leftChapter: "Chapter 6 · The Fire", leftBody: "Soon after, the master and mistress went on a long journey to visit friends, and they took Ginger and me to pull the carriage. James, the second coachman — who was only seventeen years old — came along to take care of us.", rightTitle: null, rightTitleSub: null, rightBody: "It was a long, hot day's drive. By evening we were tired, and the master decided to stop at a fine old inn we had passed before. The stables were good, and there were many other horses staying there for the night.", rightIsTitle: false, cue: "Why stop at an inn?", nanaPrompt: "Ask Perry: have you ever stayed somewhere new overnight? Was it strange to sleep in a different place?" },
-          { leftEmoji: "🐴", leftChapter: "Chapter 6 · The Fire", leftBody: "The stables were a big square building with two rows of stalls and a wide loft full of hay overhead. James settled Ginger and me into our stalls and brushed us down. We had good food and clean straw, and very soon we were feeling sleepy.", rightTitle: null, rightTitleSub: null, rightBody: "Many other horses were in the same building — all strangers to us. The grooms were busy. One of them was talking to a friend, and as he went out to fetch a pitchfork, he carelessly left a candle burning on a barrel in the corner.", rightIsTitle: false, cue: "Is that safe?", nanaPrompt: "Ask Perry: what should you never, never leave burning by itself? Tell her about fire safety in your house." },
-          { leftEmoji: "🌫️", leftChapter: "Chapter 6 · The Fire", leftBody: "In the deep of the night I was wakened by a strange smell. It was not the good smell of the stable. It was sharp, and it stung my nose. I stood up. The air was thick. Somewhere inside the building, I heard a soft, quick crackling sound.", rightTitle: null, rightTitleSub: null, rightBody: "I began to be afraid. Ginger, next to me, was awake too, snorting and trying to get loose. The other horses grew restless. Then the door opened, and a man with a lantern came hurrying in. He looked around — and gave a great shout of fear.", rightIsTitle: false, cue: "Oh no — what's happening?", nanaPrompt: "Ask Perry: have you ever smelled smoke and had to act fast? Practice the 'smoke alarm' face together!" },
-          { leftEmoji: "😨", leftChapter: "Chapter 6 · The Fire", leftBody: "Up in the loft, the hay was on fire. Flames were already crackling along the rafters. The man tried to lead one horse out — but the horse was so frightened he would not go. He could see the flames, and he was sure they meant his end.", rightTitle: null, rightTitleSub: null, rightBody: "The smoke grew thicker by the moment. I could hardly breathe. I was very afraid, but I knew I had to keep my head. I stood as still as I could in my stall, and I listened — for any voice I knew, for any kind word that might guide me out.", rightIsTitle: false, cue: "What should the horses do?", nanaPrompt: "Ask Perry: when you're scared, what helps you most — being still, being held, hearing a familiar voice?" },
-          { leftEmoji: "🦸", leftChapter: "Chapter 6 · The Fire", leftBody: "Then I heard a quick step on the stones outside. The door of my stall swung open. It was James — my James! 'Come, Beauty,' he said, in a quiet steady voice. 'Come, my fine fellow. It is time to come out.' He spoke as if there were no fire at all.", rightTitle: null, rightTitleSub: null, rightBody: "He took a cloth from his shoulder and gently wrapped it around my eyes, so I could not see the flames. Then he led me with one hand, talking to me the whole way. 'Steady now, Beauty. Good boy. Just a few steps more.' And I followed him.", rightIsTitle: false, cue: "Why cover his eyes?", nanaPrompt: "Ask Perry: why did James cover Beauty's eyes? Because sometimes not seeing is the braver way." },
-          { leftEmoji: "🌌", leftChapter: "Chapter 6 · The Fire", leftBody: "James led me out into the cold, fresh air of the yard. He handed me to a man who held me tight by the bridle. Then — without a single moment of rest — James turned right around and ran back into the burning stable. I could only nicker after him.", rightTitle: null, rightTitleSub: null, rightBody: "In a moment he was out again, leading Ginger. She was wild with fear, snorting and rolling her eyes, but James had not let her go. He had used the same cloth, the same quiet voice. The two of us stood trembling in the yard — safe, but not yet sure of it.", rightIsTitle: false, cue: "Brave James!", nanaPrompt: "Ask Perry: what does it mean to be brave? Is it being not-afraid, or doing the right thing even when you ARE afraid?" },
-          { leftEmoji: "🔥", leftChapter: "Chapter 6 · The Fire", leftBody: "Some of the other horses were led out too. But not all were so lucky. As soon as the last horse was clear of the doors, a great roar came from inside the stable, and the roof caved in with a crash. The fire shot up high into the night sky.", rightTitle: null, rightTitleSub: null, rightBody: "The yard filled with people in their nightclothes, carrying buckets and shouting. The master came running, half-dressed, looking for us. When he saw Ginger and me safe — and James safe with us — he caught James by the hand and could hardly speak. 'My brave lad,' he said.", rightIsTitle: false, cue: "What if James had been a moment later?", nanaPrompt: "Ask Perry: have you ever made it 'just in time' for something? It feels like your heart catches up to you afterwards." },
-          { leftEmoji: "💛", leftChapter: "Chapter 6 · The Fire", leftBody: "We left the inn the next morning. Ginger and I were both well, though we had to be coaxed past the burned stable. We took the road for home. When we got there, John came running out, and the master told him the whole story — every part.", rightTitle: null, rightTitleSub: null, rightBody: "John looked at James and could not speak for a moment. Then he held out his hand. 'I always said you were a good lad,' he told him quietly. 'Now I know it.' James turned a little red. He patted my neck. 'Beauty did his part too,' he said. 'He trusted me.'", rightIsTitle: false, cue: "What did Beauty learn?", nanaPrompt: "Ask Perry: when something is hard and scary, why is trust so important? Who do you trust to help you when you're afraid?" },
+          { leftEmoji: "🧳", leftChapter: "Chapter 6 · The Fire", leftBody: "Soon after, the master and mistress went on a long journey to visit friends, and they took Ginger and me to pull the carriage. James, the second coachman — who was only seventeen years old — came along to take care of us.", rightTitle: null, rightTitleSub: null, rightBody: "It was a long, hot day's drive. By evening we were tired, and the master decided to stop at a fine old inn we had passed before. The stables were good, and there were many other horses staying there for the night.", rightIsTitle: false, cue: "Why stop at an inn?", nanaPrompt: "Have you ever stayed somewhere new overnight? Was it strange to sleep in a different place?" },
+          { leftEmoji: "🐴", leftChapter: "Chapter 6 · The Fire", leftBody: "The stables were a big square building with two rows of stalls and a wide loft full of hay overhead. James settled Ginger and me into our stalls and brushed us down. We had good food and clean straw, and very soon we were feeling sleepy.", rightTitle: null, rightTitleSub: null, rightBody: "Many other horses were in the same building — all strangers to us. The grooms were busy. One of them was talking to a friend, and as he went out to fetch a pitchfork, he carelessly left a candle burning on a barrel in the corner.", rightIsTitle: false, cue: "Is that safe?", nanaPrompt: "What should you never, never leave burning by itself?" },
+          { leftEmoji: "🌫️", leftChapter: "Chapter 6 · The Fire", leftBody: "In the deep of the night I was wakened by a strange smell. It was not the good smell of the stable. It was sharp, and it stung my nose. I stood up. The air was thick. Somewhere inside the building, I heard a soft, quick crackling sound.", rightTitle: null, rightTitleSub: null, rightBody: "I began to be afraid. Ginger, next to me, was awake too, snorting and trying to get loose. The other horses grew restless. Then the door opened, and a man with a lantern came hurrying in. He looked around — and gave a great shout of fear.", rightIsTitle: false, cue: "Oh no — what's happening?", nanaPrompt: "Have you ever smelled smoke and had to act fast? Practice the 'smoke alarm' face together!" },
+          { leftEmoji: "😨", leftChapter: "Chapter 6 · The Fire", leftBody: "Up in the loft, the hay was on fire. Flames were already crackling along the rafters. The man tried to lead one horse out — but the horse was so frightened he would not go. He could see the flames, and he was sure they meant his end.", rightTitle: null, rightTitleSub: null, rightBody: "The smoke grew thicker by the moment. I could hardly breathe. I was very afraid, but I knew I had to keep my head. I stood as still as I could in my stall, and I listened — for any voice I knew, for any kind word that might guide me out.", rightIsTitle: false, cue: "What should the horses do?", nanaPrompt: "When you're scared, what helps you most — being still, being held, hearing a familiar voice?" },
+          { leftEmoji: "🦸", leftChapter: "Chapter 6 · The Fire", leftBody: "Then I heard a quick step on the stones outside. The door of my stall swung open. It was James — my James! 'Come, Beauty,' he said, in a quiet steady voice. 'Come, my fine fellow. It is time to come out.' He spoke as if there were no fire at all.", rightTitle: null, rightTitleSub: null, rightBody: "He took a cloth from his shoulder and gently wrapped it around my eyes, so I could not see the flames. Then he led me with one hand, talking to me the whole way. 'Steady now, Beauty. Good boy. Just a few steps more.' And I followed him.", rightIsTitle: false, cue: "Why cover his eyes?", nanaPrompt: "Why did James cover Beauty's eyes? Because sometimes not seeing is the braver way." },
+          { leftEmoji: "🌌", leftChapter: "Chapter 6 · The Fire", leftBody: "James led me out into the cold, fresh air of the yard. He handed me to a man who held me tight by the bridle. Then — without a single moment of rest — James turned right around and ran back into the burning stable. I could only nicker after him.", rightTitle: null, rightTitleSub: null, rightBody: "In a moment he was out again, leading Ginger. She was wild with fear, snorting and rolling her eyes, but James had not let her go. He had used the same cloth, the same quiet voice. The two of us stood trembling in the yard — safe, but not yet sure of it.", rightIsTitle: false, cue: "Brave James!", nanaPrompt: "What does it mean to be brave? Is it being not-afraid, or doing the right thing even when you ARE afraid?" },
+          { leftEmoji: "🔥", leftChapter: "Chapter 6 · The Fire", leftBody: "Some of the other horses were led out too. But not all were so lucky. As soon as the last horse was clear of the doors, a great roar came from inside the stable, and the roof caved in with a crash. The fire shot up high into the night sky.", rightTitle: null, rightTitleSub: null, rightBody: "The yard filled with people in their nightclothes, carrying buckets and shouting. The master came running, half-dressed, looking for us. When he saw Ginger and me safe — and James safe with us — he caught James by the hand and could hardly speak. 'My brave lad,' he said.", rightIsTitle: false, cue: "What if James had been a moment later?", nanaPrompt: "Have you ever made it 'just in time' for something? It feels like your heart catches up to you afterwards." },
+          { leftEmoji: "💛", leftChapter: "Chapter 6 · The Fire", leftBody: "We left the inn the next morning. Ginger and I were both well, though we had to be coaxed past the burned stable. We took the road for home. When we got there, John came running out, and the master told him the whole story — every part.", rightTitle: null, rightTitleSub: null, rightBody: "John looked at James and could not speak for a moment. Then he held out his hand. 'I always said you were a good lad,' he told him quietly. 'Now I know it.' James turned a little red. He patted my neck. 'Beauty did his part too,' he said. 'He trusted me.'", rightIsTitle: false, cue: "What did Beauty learn?", nanaPrompt: "When something is hard and scary, why is trust so important? Who do you trust to help you when you're afraid?" },
         ],
       },
       {
@@ -1100,14 +1121,14 @@ const booksLibrary: Record<string, Book> = {
         question: "Was Ginger right to fight back, even though it cost her home?",
         teaser: "Coming up: many years later, an old friend at a busy London cab stand.",
         pages: [
-          { leftEmoji: "👒", leftChapter: "Chapter 7 · A Strike for Liberty", leftBody: "Not long after, a fine lady came to stay at Birtwick. Her name was Mrs. Whitebrook. She was the master's cousin, and she lived in a great city far away. She brought her own ideas about how horses should be dressed and driven.", rightTitle: null, rightTitleSub: null, rightBody: "On the second day of her visit, she came into the stable yard to see the horses. She watched John harness Ginger and me to the carriage. Then she frowned. 'But John,' she said sharply, 'where is the bearing rein? It should be put up at once.'", rightIsTitle: false, cue: "What's a bearing rein?", nanaPrompt: "Ask Perry: have you ever been told to do something a new way that just didn't feel right? Tell her about it." },
-          { leftEmoji: "⛓️", leftChapter: "Chapter 7 · A Strike for Liberty", leftBody: "A bearing rein is a strap that runs from the bit up over the horse's neck and down to a hook. When the strap is tight, the horse cannot lower his head. He must hold it high in the air, even when he wants to pull. Many fine ladies thought it looked smart.", rightTitle: null, rightTitleSub: null, rightBody: "But for the horse it is a misery. With his head held high, he cannot lean into his work. He cannot drink water. He cannot ease his neck. Even his breath feels short, for his throat is bent the wrong way. It is a small cruelty, done for fashion.", rightIsTitle: false, cue: "Would you want to hold your head up all day?", nanaPrompt: "Ask Perry: try holding your chin up high, very stiff. Now imagine doing it for hours. Not fun, is it?" },
-          { leftEmoji: "🤔", leftChapter: "Chapter 7 · A Strike for Liberty", leftBody: "The mistress did not like bearing reins. She believed it was wrong to make horses uncomfortable just for the sake of looking fashionable. But Mrs. Whitebrook insisted. 'Without bearing reins, your horses look so awkwardly free,' she said.", rightTitle: null, rightTitleSub: null, rightBody: "At last, to keep the peace, the master nodded. John was told to fasten the bearing reins on. He grumbled, but he obeyed. He fastened the first one to Ginger, then to me. Each click of the buckle made my neck tighter — and my heart smaller.", rightIsTitle: false, cue: "Why did the master give in?", nanaPrompt: "Ask Perry: sometimes adults say yes to something they don't really agree with. Why do you think they do? It's complicated." },
-          { leftEmoji: "🌳", leftChapter: "Chapter 7 · A Strike for Liberty", leftBody: "We started off — but not as we usually did. My neck was held in the air. Ginger's neck too. We could not lean into the harness, and the pulling was twice as hard. Up a long hill, my breath came short, and my eyes grew dim.", rightTitle: null, rightTitleSub: null, rightBody: "By the time we reached the top, both of us were trembling. The mistress called out, 'John! Please, go more slowly. They are working too hard.' But Mrs. Whitebrook only laughed. 'They look very smart. You worry too much, my dear.'", rightIsTitle: false, cue: "Is this fair?", nanaPrompt: "Ask Perry: when something looks pretty but hurts to wear, what should we choose — the pretty, or the not-hurting?" },
-          { leftEmoji: "💥", leftChapter: "Chapter 7 · A Strike for Liberty", leftBody: "Days passed, each one worse than the last. Then one afternoon, as we were being harnessed up, Ginger had had enough. The moment John tightened her bearing rein, she gave a great kick. The straps snapped. The buckle flew across the yard. Ginger was free.", rightTitle: null, rightTitleSub: null, rightBody: "She kicked again and again, fighting like a wild thing. John talked to her, soft and steady, and never struck her once. But the harness was ruined. Mrs. Whitebrook came running out, stood by the yard fence, shook her head, and looked very cross indeed.", rightIsTitle: false, cue: "Was Ginger wrong?", nanaPrompt: "Ask Perry: when is it okay to say 'no, this is too much'? Even for kids, even for horses. Sometimes 'no' is the right answer." },
-          { leftEmoji: "🚂", leftChapter: "Chapter 7 · A Strike for Liberty", leftBody: "The next day, Mrs. Whitebrook left Birtwick in a huff. She told the master his horses were poorly trained. But by then, the master had made up his own mind. He took the bearing reins off — for good. He kept them off all his horses, forever after.", rightTitle: null, rightTitleSub: null, rightBody: "But Ginger was changed. She was given to one of the master's friends, who said he wanted a horse with spirit. He promised to be kind. I tried to be glad — but I missed her badly. I knew her temper might carry her into hard places, sooner or later.", rightIsTitle: false, cue: "Will Ginger be all right?", nanaPrompt: "Ask Perry: have you ever had to say goodbye to a friend you weren't sure would be okay? What did you do to feel a little better?" },
-          { leftEmoji: "🍀", leftChapter: "Chapter 7 · A Strike for Liberty", leftBody: "Without the bearing reins, every drive felt easy again. I could lower my head, and I could pull with all my strength. The mistress took great pleasure in driving me, and the master often said, 'There — that is how a horse should look. Free and well.'", rightTitle: null, rightTitleSub: null, rightBody: "Other horse-owners in the neighborhood noticed. Some of them began to take their own bearing reins off too. Slowly — just a little — the fashion began to change. One small bit of cruelty grew a little smaller, because one good man would not put up with it.", rightIsTitle: false, cue: "How do small changes start?", nanaPrompt: "Ask Perry: can one person change anything? Sometimes yes — by doing the right thing where others can see." },
-          { leftEmoji: "🌌", leftChapter: "Chapter 7 · A Strike for Liberty", leftBody: "I often thought about what Ginger had done that day. She had fought back when nothing else would work. She had broken the harness. She had stood up — even though it had cost her her home. I knew I could not have done it. But I was glad someone had.", rightTitle: null, rightTitleSub: null, rightBody: "I thought, too, about how many small cruelties are done in the world — not from anger, but from carelessness, or fashion, or because no one wants to be the first to speak up. I hoped, when my turn came, I would have the courage to do my small part.", rightIsTitle: false, cue: "What's a 'small cruelty'?", nanaPrompt: "Ask Perry: can you think of an unkindness people do without thinking? What would happen if everyone stopped doing it?" },
+          { leftEmoji: "👒", leftChapter: "Chapter 7 · A Strike for Liberty", leftBody: "Not long after, a fine lady came to stay at Birtwick. Her name was Mrs. Whitebrook. She was the master's cousin, and she lived in a great city far away. She brought her own ideas about how horses should be dressed and driven.", rightTitle: null, rightTitleSub: null, rightBody: "On the second day of her visit, she came into the stable yard to see the horses. She watched John harness Ginger and me to the carriage. Then she frowned. 'But John,' she said sharply, 'where is the bearing rein? It should be put up at once.'", rightIsTitle: false, cue: "What's a bearing rein?", nanaPrompt: "Have you ever been told to do something a new way that just didn't feel right?" },
+          { leftEmoji: "⛓️", leftChapter: "Chapter 7 · A Strike for Liberty", leftBody: "A bearing rein is a strap that runs from the bit up over the horse's neck and down to a hook. When the strap is tight, the horse cannot lower his head. He must hold it high in the air, even when he wants to pull. Many fine ladies thought it looked smart.", rightTitle: null, rightTitleSub: null, rightBody: "But for the horse it is a misery. With his head held high, he cannot lean into his work. He cannot drink water. He cannot ease his neck. Even his breath feels short, for his throat is bent the wrong way. It is a small cruelty, done for fashion.", rightIsTitle: false, cue: "Would you want to hold your head up all day?", nanaPrompt: "Try holding your chin up high, very stiff. Now imagine doing it for hours. Not fun, is it?" },
+          { leftEmoji: "🤔", leftChapter: "Chapter 7 · A Strike for Liberty", leftBody: "The mistress did not like bearing reins. She believed it was wrong to make horses uncomfortable just for the sake of looking fashionable. But Mrs. Whitebrook insisted. 'Without bearing reins, your horses look so awkwardly free,' she said.", rightTitle: null, rightTitleSub: null, rightBody: "At last, to keep the peace, the master nodded. John was told to fasten the bearing reins on. He grumbled, but he obeyed. He fastened the first one to Ginger, then to me. Each click of the buckle made my neck tighter — and my heart smaller.", rightIsTitle: false, cue: "Why did the master give in?", nanaPrompt: "Sometimes adults say yes to something they don't really agree with. Why do you think they do? It's complicated." },
+          { leftEmoji: "🌳", leftChapter: "Chapter 7 · A Strike for Liberty", leftBody: "We started off — but not as we usually did. My neck was held in the air. Ginger's neck too. We could not lean into the harness, and the pulling was twice as hard. Up a long hill, my breath came short, and my eyes grew dim.", rightTitle: null, rightTitleSub: null, rightBody: "By the time we reached the top, both of us were trembling. The mistress called out, 'John! Please, go more slowly. They are working too hard.' But Mrs. Whitebrook only laughed. 'They look very smart. You worry too much, my dear.'", rightIsTitle: false, cue: "Is this fair?", nanaPrompt: "When something looks pretty but hurts to wear, what should we choose — the pretty, or the not-hurting?" },
+          { leftEmoji: "💥", leftChapter: "Chapter 7 · A Strike for Liberty", leftBody: "Days passed, each one worse than the last. Then one afternoon, as we were being harnessed up, Ginger had had enough. The moment John tightened her bearing rein, she gave a great kick. The straps snapped. The buckle flew across the yard. Ginger was free.", rightTitle: null, rightTitleSub: null, rightBody: "She kicked again and again, fighting like a wild thing. John talked to her, soft and steady, and never struck her once. But the harness was ruined. Mrs. Whitebrook came running out, stood by the yard fence, shook her head, and looked very cross indeed.", rightIsTitle: false, cue: "Was Ginger wrong?", nanaPrompt: "When is it okay to say 'no, this is too much'? Even for kids, even for horses. Sometimes 'no' is the right answer." },
+          { leftEmoji: "🚂", leftChapter: "Chapter 7 · A Strike for Liberty", leftBody: "The next day, Mrs. Whitebrook left Birtwick in a huff. She told the master his horses were poorly trained. But by then, the master had made up his own mind. He took the bearing reins off — for good. He kept them off all his horses, forever after.", rightTitle: null, rightTitleSub: null, rightBody: "But Ginger was changed. She was given to one of the master's friends, who said he wanted a horse with spirit. He promised to be kind. I tried to be glad — but I missed her badly. I knew her temper might carry her into hard places, sooner or later.", rightIsTitle: false, cue: "Will Ginger be all right?", nanaPrompt: "Have you ever had to say goodbye to a friend you weren't sure would be okay? What did you do to feel a little better?" },
+          { leftEmoji: "🍀", leftChapter: "Chapter 7 · A Strike for Liberty", leftBody: "Without the bearing reins, every drive felt easy again. I could lower my head, and I could pull with all my strength. The mistress took great pleasure in driving me, and the master often said, 'There — that is how a horse should look. Free and well.'", rightTitle: null, rightTitleSub: null, rightBody: "Other horse-owners in the neighborhood noticed. Some of them began to take their own bearing reins off too. Slowly — just a little — the fashion began to change. One small bit of cruelty grew a little smaller, because one good man would not put up with it.", rightIsTitle: false, cue: "How do small changes start?", nanaPrompt: "Can one person change anything? Sometimes yes — by doing the right thing where others can see." },
+          { leftEmoji: "🌌", leftChapter: "Chapter 7 · A Strike for Liberty", leftBody: "I often thought about what Ginger had done that day. She had fought back when nothing else would work. She had broken the harness. She had stood up — even though it had cost her her home. I knew I could not have done it. But I was glad someone had.", rightTitle: null, rightTitleSub: null, rightBody: "I thought, too, about how many small cruelties are done in the world — not from anger, but from carelessness, or fashion, or because no one wants to be the first to speak up. I hoped, when my turn came, I would have the courage to do my small part.", rightIsTitle: false, cue: "What's a 'small cruelty'?", nanaPrompt: "Can you think of an unkindness people do without thinking? What would happen if everyone stopped doing it?" },
         ],
       },
       {
@@ -1117,14 +1138,14 @@ const booksLibrary: Record<string, Book> = {
         question: "What would you have said to Ginger if you'd been standing there with Beauty?",
         teaser: "Coming up: a freezing Christmas Eve, and harder days than Beauty has ever known.",
         pages: [
-          { leftEmoji: "📅", leftChapter: "Chapter 8 · Poor Ginger", leftBody: "Many years went by. The good days at Birtwick Park came to an end when the mistress fell ill, and the family moved far away to a warmer country. Ginger and I were sold to different masters. We did not say goodbye — we did not even know.", rightTitle: null, rightTitleSub: null, rightBody: "I had been through many places by then. Some were kind. Some were not. By the time of this story, I was pulling a cab on the streets of London. My driver was a man named Jeremiah Barker — Jerry — and he was as kind a master as I had ever known.", rightIsTitle: false, cue: "Where is Beauty now?", nanaPrompt: "Ask Perry: what is a 'cab'? Have you ever been in one? Tell her about how people used to travel in cities long ago." },
-          { leftEmoji: "🚕", leftChapter: "Chapter 8 · Poor Ginger", leftBody: "Every morning, Jerry and I went out to our cab stand. The other cabmen and their horses were there too. We waited in a long row for people to come and hire us. There was always someone nearby with a bit of bread or a kind word for the horses.", rightTitle: null, rightTitleSub: null, rightBody: "On one bright morning in early summer, I was standing in my place, half-asleep in the sun. A new cab pulled up across the way. The horse pulling it was a thin chestnut mare. She moved slowly, her head hung low. My heart almost stopped.", rightIsTitle: false, cue: "Could it be...?", nanaPrompt: "Build the suspense! Ask Perry: do you think Beauty knows this horse? Watch her eyes when you read the next page." },
-          { leftEmoji: "💔", leftChapter: "Chapter 8 · Poor Ginger", leftBody: "She was so thin you could count her ribs. Her coat, once bright chestnut, was rough and dull. Her once-proud neck had drooped. Her hip bones stuck out. Her sides were marked with old whip-stripes. Her eyes were tired — so tired.", rightTitle: null, rightTitleSub: null, rightBody: "But there was something about the way she held her ear, and the small white snip on her muzzle, and the small turn of her head — that I could not mistake. I looked again. I looked once more. And then I knew. It was Ginger.", rightIsTitle: false, cue: "Oh, Ginger...", nanaPrompt: "Ask Perry: have you ever seen someone you used to know who looked very different? How did it make you feel?" },
-          { leftEmoji: "🗣️", leftChapter: "Chapter 8 · Poor Ginger", leftBody: "I called to her, softly. She lifted her head, and slowly her dim eyes brightened. 'Beauty,' she whispered. 'Is it you?' We stood quietly together for a while, our heads close. Then, in her own quiet way, she told me what had happened to her.", rightTitle: null, rightTitleSub: null, rightBody: "She had been passed from master to master. Each one had been harder than the one before. The bearing rein had come back into her life. She had been worked too long, in all weathers, on too little food. Her spirit, she said, was almost broken.", rightIsTitle: false, cue: "Why did this happen to her?", nanaPrompt: "Ask Perry: when someone has a hard life, is it always their fault? Tell her — almost never." },
-          { leftEmoji: "🌧️", leftChapter: "Chapter 8 · Poor Ginger", leftBody: "'I have been worked very, very hard,' she said. 'And no one has spoken a kind word to me for a long time. I am almost glad to be near the end of it.' Her voice was so soft I could barely hear her. I thought of the proud, fiery mare she had been.", rightTitle: null, rightTitleSub: null, rightBody: "'Beauty,' she said, 'I wish I could die where I stand. I am so tired. I would want only one thing now — that they would let me rest, and not whip me any more.' I did not know what to say. I touched my nose to hers. We stood like that.", rightIsTitle: false, cue: "What would help her?", nanaPrompt: "Ask Perry: when a friend is very sad, what is the most loving thing you can do? Sometimes it is just being there." },
-          { leftEmoji: "🕯️", leftChapter: "Chapter 8 · Poor Ginger", leftBody: "Her driver came back from his lunch, climbed up onto the box, and clucked his tongue. Ginger gave a small sigh. She turned her head once more towards me. 'Goodbye, Beauty,' she said. 'You were always a good friend.' Then she pulled the cab away into the city.", rightTitle: null, rightTitleSub: null, rightBody: "I watched until the cab turned a corner and was gone. I never saw Ginger again. A few weeks later, I saw a cart go past the stand carrying a horse no longer alive. The horse had a chestnut coat and a white snip. The carter tipped his cap as it passed.", rightIsTitle: false, cue: "Was that Ginger?", nanaPrompt: "This is a sad page. Ask Perry: is it okay to feel sad about a story? Yes — it means we cared." },
-          { leftEmoji: "🫂", leftChapter: "Chapter 8 · Poor Ginger", leftBody: "I stood in the cab stand for a long time after, very still. Jerry came to me at last, and patted my neck, and said nothing. He could see I was unhappy — though of course he could not know why. He gave me an extra handful of oats that night, just for kindness.", rightTitle: null, rightTitleSub: null, rightBody: "'You're a thinking sort of a horse, Beauty,' he said, scratching gently behind my ear. 'I sometimes wonder what goes on in that head of yours. Whatever it is, old fellow — I'm glad you're with me, and not somewhere worse.' I leaned into his shoulder.", rightIsTitle: false, cue: "Why is kindness so important?", nanaPrompt: "Ask Perry: even when nothing fixes a sad thing — does a kind hand still help? Tell her about a hug that helped you once." },
-          { leftEmoji: "🌅", leftChapter: "Chapter 8 · Poor Ginger", leftBody: "Long after, I would still think of Ginger. I thought of her in the green Birtwick meadow, fiery and beautiful and alive. I thought of her at the cab stand, thin and broken. And I thought of all the other Gingers in the world — too tired even to complain.", rightTitle: null, rightTitleSub: null, rightBody: "If a horse had a prayer, mine would be this: let me serve good people. And let the cruel masters of the world be made gentle, before they meet another horse — or another child — or any other living thing that could be hurt and could not run away.", rightIsTitle: false, cue: "What's Beauty's prayer for?", nanaPrompt: "Ask Perry: if you could pray for one thing for all animals everywhere, what would it be?" },
+          { leftEmoji: "📅", leftChapter: "Chapter 8 · Poor Ginger", leftBody: "Many years went by. The good days at Birtwick Park came to an end when the mistress fell ill, and the family moved far away to a warmer country. Ginger and I were sold to different masters. We did not say goodbye — we did not even know.", rightTitle: null, rightTitleSub: null, rightBody: "I had been through many places by then. Some were kind. Some were not. By the time of this story, I was pulling a cab on the streets of London. My driver was a man named Jeremiah Barker — Jerry — and he was as kind a master as I had ever known.", rightIsTitle: false, cue: "Where is Beauty now?", nanaPrompt: "What is a 'cab'? Have you ever been in one?" },
+          { leftEmoji: "🚕", leftChapter: "Chapter 8 · Poor Ginger", leftBody: "Every morning, Jerry and I went out to our cab stand. The other cabmen and their horses were there too. We waited in a long row for people to come and hire us. There was always someone nearby with a bit of bread or a kind word for the horses.", rightTitle: null, rightTitleSub: null, rightBody: "On one bright morning in early summer, I was standing in my place, half-asleep in the sun. A new cab pulled up across the way. The horse pulling it was a thin chestnut mare. She moved slowly, her head hung low. My heart almost stopped.", rightIsTitle: false, cue: "Could it be...?", nanaPrompt: "Do you think Beauty knows this horse? Let's find out on the next page!" },
+          { leftEmoji: "💔", leftChapter: "Chapter 8 · Poor Ginger", leftBody: "She was so thin you could count her ribs. Her coat, once bright chestnut, was rough and dull. Her once-proud neck had drooped. Her hip bones stuck out. Her sides were marked with old whip-stripes. Her eyes were tired — so tired.", rightTitle: null, rightTitleSub: null, rightBody: "But there was something about the way she held her ear, and the small white snip on her muzzle, and the small turn of her head — that I could not mistake. I looked again. I looked once more. And then I knew. It was Ginger.", rightIsTitle: false, cue: "Oh, Ginger...", nanaPrompt: "Have you ever seen someone you used to know who looked very different? How did it make you feel?" },
+          { leftEmoji: "🗣️", leftChapter: "Chapter 8 · Poor Ginger", leftBody: "I called to her, softly. She lifted her head, and slowly her dim eyes brightened. 'Beauty,' she whispered. 'Is it you?' We stood quietly together for a while, our heads close. Then, in her own quiet way, she told me what had happened to her.", rightTitle: null, rightTitleSub: null, rightBody: "She had been passed from master to master. Each one had been harder than the one before. The bearing rein had come back into her life. She had been worked too long, in all weathers, on too little food. Her spirit, she said, was almost broken.", rightIsTitle: false, cue: "Why did this happen to her?", nanaPrompt: "When someone has a hard life, is it always their fault?" },
+          { leftEmoji: "🌧️", leftChapter: "Chapter 8 · Poor Ginger", leftBody: "'I have been worked very, very hard,' she said. 'And no one has spoken a kind word to me for a long time. I am almost glad to be near the end of it.' Her voice was so soft I could barely hear her. I thought of the proud, fiery mare she had been.", rightTitle: null, rightTitleSub: null, rightBody: "'Beauty,' she said, 'I wish I could die where I stand. I am so tired. I would want only one thing now — that they would let me rest, and not whip me any more.' I did not know what to say. I touched my nose to hers. We stood like that.", rightIsTitle: false, cue: "What would help her?", nanaPrompt: "When a friend is very sad, what is the most loving thing you can do? Sometimes it is just being there." },
+          { leftEmoji: "🕯️", leftChapter: "Chapter 8 · Poor Ginger", leftBody: "Her driver came back from his lunch, climbed up onto the box, and clucked his tongue. Ginger gave a small sigh. She turned her head once more towards me. 'Goodbye, Beauty,' she said. 'You were always a good friend.' Then she pulled the cab away into the city.", rightTitle: null, rightTitleSub: null, rightBody: "I watched until the cab turned a corner and was gone. I never saw Ginger again. A few weeks later, I saw a cart go past the stand carrying a horse no longer alive. The horse had a chestnut coat and a white snip. The carter tipped his cap as it passed.", rightIsTitle: false, cue: "Was that Ginger?", nanaPrompt: "This is a sad page. Is it okay to feel sad about a story? Yes — it means we cared." },
+          { leftEmoji: "🫂", leftChapter: "Chapter 8 · Poor Ginger", leftBody: "I stood in the cab stand for a long time after, very still. Jerry came to me at last, and patted my neck, and said nothing. He could see I was unhappy — though of course he could not know why. He gave me an extra handful of oats that night, just for kindness.", rightTitle: null, rightTitleSub: null, rightBody: "'You're a thinking sort of a horse, Beauty,' he said, scratching gently behind my ear. 'I sometimes wonder what goes on in that head of yours. Whatever it is, old fellow — I'm glad you're with me, and not somewhere worse.' I leaned into his shoulder.", rightIsTitle: false, cue: "Why is kindness so important?", nanaPrompt: "Even when nothing fixes a sad thing — does a kind hand still help?" },
+          { leftEmoji: "🌅", leftChapter: "Chapter 8 · Poor Ginger", leftBody: "Long after, I would still think of Ginger. I thought of her in the green Birtwick meadow, fiery and beautiful and alive. I thought of her at the cab stand, thin and broken. And I thought of all the other Gingers in the world — too tired even to complain.", rightTitle: null, rightTitleSub: null, rightBody: "If a horse had a prayer, mine would be this: let me serve good people. And let the cruel masters of the world be made gentle, before they meet another horse — or another child — or any other living thing that could be hurt and could not run away.", rightIsTitle: false, cue: "What's Beauty's prayer for?", nanaPrompt: "If you could pray for one thing for all animals everywhere, what would it be?" },
         ],
       },
       {
@@ -1134,14 +1155,14 @@ const booksLibrary: Record<string, Book> = {
         question: "When Beauty had nothing left, what kept the smallest bit of hope alive in him?",
         teaser: "Coming up: a tired old horse at a fair, and a face he never thought he'd see again.",
         pages: [
-          { leftEmoji: "🌃", leftChapter: "Chapter 9 · Hard Times", leftBody: "I should tell you more about Jerry. He was a strong, broad man with a quick smile and a kind voice. He had a wife named Polly and two children named Harry and Dolly. They lived in a small house near the cab stand. They were a very happy family.", rightTitle: null, rightTitleSub: null, rightBody: "Cab work in London was hard. The streets were crowded with people and carts and great horse-drawn buses. The roads were stony, and there were many places to slip. The hours were very long. But Jerry never struck me, and he always gave me my rest.", rightIsTitle: false, cue: "What's Jerry like as a master?", nanaPrompt: "Ask Perry: what kind of family would you want to live near, if you were a horse? Tell her about Polly, Harry, and Dolly!" },
-          { leftEmoji: "💗", leftChapter: "Chapter 9 · Hard Times", leftBody: "Polly often came out to the stand at midday with Jerry's dinner in a covered basket. She always brought a carrot or a slice of apple for me too. She would pat my nose and say, 'You are a good horse, Beauty. You take such good care of our Jerry.'", rightTitle: null, rightTitleSub: null, rightBody: "I came to love their voices — Polly's calm, Jerry's hearty, Harry's eager, little Dolly's bird-like piping. They were the sweetest sounds I knew. On hot days when the city was loud, I would think of them, and the streets would not feel so very hard.", rightIsTitle: false, cue: "What makes life sweet?", nanaPrompt: "Ask Perry: what are the little things in your day that you look forward to most? They count for a lot." },
-          { leftEmoji: "❄️", leftChapter: "Chapter 9 · Hard Times", leftBody: "One Christmas Eve, Jerry was hired to drive some gentlemen to a great theatre and wait for them outside until the play was over. The night was bitter cold. I stood for hours in the freezing wind. The snow blew in long stripes across my back.", rightTitle: null, rightTitleSub: null, rightBody: "It was nearly midnight when the gentlemen came out at last. They were laughing and warm, with hot dinners in their bellies. They paid Jerry only the smallest of fares — and not a penny extra for the long, cold wait. Jerry said nothing. We went home.", rightIsTitle: false, cue: "Was that fair?", nanaPrompt: "Ask Perry: have you ever waited a very long time for someone, in the cold? What does it feel like?" },
-          { leftEmoji: "🤒", leftChapter: "Chapter 9 · Hard Times", leftBody: "By morning, Jerry was very sick. He had taken a deep chill on Christmas Eve. The doctor came, and the news was not good. Polly cried, quietly, in the kitchen. For days Jerry lay in bed, and I stood in the stable, eating less and less. I missed him much.", rightTitle: null, rightTitleSub: null, rightBody: "When at last Jerry was a little better, the doctor came to speak to Polly. 'He must give up cab work,' he said. 'Another winter on the streets will kill him.' Polly nodded, brave as ever. She had a brother in the country who would help find Jerry quieter work.", rightIsTitle: false, cue: "What will happen now?", nanaPrompt: "Ask Perry: have you ever had to make a big change because something stopped working? How did it feel?" },
-          { leftEmoji: "👋", leftChapter: "Chapter 9 · Hard Times", leftBody: "On the day they left, Jerry came down to the stable. He was pale and thin, but he could walk a little. He put both arms around my neck and laid his cheek against me. He did not speak for a long time. Then at last he said, 'Goodbye, my Beauty.'", rightTitle: null, rightTitleSub: null, rightBody: "He sold me to a baker who needed a quiet horse to pull his cart around the streets. The baker himself was not a bad man — but he had a head man who was cruel and lazy. The bearing rein came out of its drawer again. And the work, day after day, was very hard.", rightIsTitle: false, cue: "How does Beauty feel?", nanaPrompt: "Ask Perry: have you ever had to leave a place you loved? What did you do to remember it?" },
-          { leftEmoji: "🌑", leftChapter: "Chapter 9 · Hard Times", leftBody: "I was sold once more, and then again. Each new master cared less than the one before. There were drivers who whipped me up hills until I was trembling. There were drivers who let the stable run filthy. There was little hay, and that little was poor.", rightTitle: null, rightTitleSub: null, rightBody: "I worked from before sunrise to long after dark. The streets in winter were like ice. In summer the heat blew up from the stones. The cab was old and heavy. The driver was heavy too — and short of temper. My coat lost its shine. My eyes lost their light.", rightIsTitle: false, cue: "Will it ever get better?", nanaPrompt: "Ask Perry: even in a hard time, what can you hold on to inside? Beauty held on to his memories — and his hope." },
-          { leftEmoji: "🪨", leftChapter: "Chapter 9 · Hard Times", leftBody: "One day a driver took my cab and put far too many people in it. We had to climb a long, steep hill. The driver shouted and laid the whip on hard. I tried — but my legs would not move any faster. Halfway up the hill, my front knees gave way. I went down on the stones.", rightTitle: null, rightTitleSub: null, rightBody: "There was a great deal of shouting. The passengers tumbled out. The driver kicked me. I could not get up. Strangers gathered round. One old gentleman knelt by my head and said quietly, 'This horse is exhausted. He is not vicious. Treat him gently, or you'll answer for it.'", rightIsTitle: false, cue: "Is this the end?", nanaPrompt: "Ask Perry: have you ever been so tired you couldn't go one more step? What did you need then?" },
-          { leftEmoji: "🕯️", leftChapter: "Chapter 9 · Hard Times", leftBody: "They got me to my feet at last. I was led, very slowly, back to the cab yard. The owner came out, looked at me, and shook his head. 'He is done,' he said. 'I'll take him to the horse fair on Friday. Someone will buy him cheap and be glad of it.'", rightTitle: null, rightTitleSub: null, rightBody: "I had thought, at Birtwick, that life was kind. I had thought, with Jerry, that even hard life could be gentle. Now I knew it could be cruel too. Friday came. I was led to the horse fair with the others — all thin, all tired, all almost at the end.", rightIsTitle: false, cue: "Will anyone be kind?", nanaPrompt: "Ask Perry: have you ever hoped — even when you didn't quite believe? Sometimes that's all there is." },
+          { leftEmoji: "🌃", leftChapter: "Chapter 9 · Hard Times", leftBody: "I should tell you more about Jerry. He was a strong, broad man with a quick smile and a kind voice. He had a wife named Polly and two children named Harry and Dolly. They lived in a small house near the cab stand. They were a very happy family.", rightTitle: null, rightTitleSub: null, rightBody: "Cab work in London was hard. The streets were crowded with people and carts and great horse-drawn buses. The roads were stony, and there were many places to slip. The hours were very long. But Jerry never struck me, and he always gave me my rest.", rightIsTitle: false, cue: "What's Jerry like as a master?", nanaPrompt: "What kind of family would you want to live near, if you were a horse?" },
+          { leftEmoji: "💗", leftChapter: "Chapter 9 · Hard Times", leftBody: "Polly often came out to the stand at midday with Jerry's dinner in a covered basket. She always brought a carrot or a slice of apple for me too. She would pat my nose and say, 'You are a good horse, Beauty. You take such good care of our Jerry.'", rightTitle: null, rightTitleSub: null, rightBody: "I came to love their voices — Polly's calm, Jerry's hearty, Harry's eager, little Dolly's bird-like piping. They were the sweetest sounds I knew. On hot days when the city was loud, I would think of them, and the streets would not feel so very hard.", rightIsTitle: false, cue: "What makes life sweet?", nanaPrompt: "What are the little things in your day that you look forward to most? They count for a lot." },
+          { leftEmoji: "❄️", leftChapter: "Chapter 9 · Hard Times", leftBody: "One Christmas Eve, Jerry was hired to drive some gentlemen to a great theatre and wait for them outside until the play was over. The night was bitter cold. I stood for hours in the freezing wind. The snow blew in long stripes across my back.", rightTitle: null, rightTitleSub: null, rightBody: "It was nearly midnight when the gentlemen came out at last. They were laughing and warm, with hot dinners in their bellies. They paid Jerry only the smallest of fares — and not a penny extra for the long, cold wait. Jerry said nothing. We went home.", rightIsTitle: false, cue: "Was that fair?", nanaPrompt: "Have you ever waited a very long time for someone, in the cold? What does it feel like?" },
+          { leftEmoji: "🤒", leftChapter: "Chapter 9 · Hard Times", leftBody: "By morning, Jerry was very sick. He had taken a deep chill on Christmas Eve. The doctor came, and the news was not good. Polly cried, quietly, in the kitchen. For days Jerry lay in bed, and I stood in the stable, eating less and less. I missed him much.", rightTitle: null, rightTitleSub: null, rightBody: "When at last Jerry was a little better, the doctor came to speak to Polly. 'He must give up cab work,' he said. 'Another winter on the streets will kill him.' Polly nodded, brave as ever. She had a brother in the country who would help find Jerry quieter work.", rightIsTitle: false, cue: "What will happen now?", nanaPrompt: "Have you ever had to make a big change because something stopped working? How did it feel?" },
+          { leftEmoji: "👋", leftChapter: "Chapter 9 · Hard Times", leftBody: "On the day they left, Jerry came down to the stable. He was pale and thin, but he could walk a little. He put both arms around my neck and laid his cheek against me. He did not speak for a long time. Then at last he said, 'Goodbye, my Beauty.'", rightTitle: null, rightTitleSub: null, rightBody: "He sold me to a baker who needed a quiet horse to pull his cart around the streets. The baker himself was not a bad man — but he had a head man who was cruel and lazy. The bearing rein came out of its drawer again. And the work, day after day, was very hard.", rightIsTitle: false, cue: "How does Beauty feel?", nanaPrompt: "Have you ever had to leave a place you loved? What did you do to remember it?" },
+          { leftEmoji: "🌑", leftChapter: "Chapter 9 · Hard Times", leftBody: "I was sold once more, and then again. Each new master cared less than the one before. There were drivers who whipped me up hills until I was trembling. There were drivers who let the stable run filthy. There was little hay, and that little was poor.", rightTitle: null, rightTitleSub: null, rightBody: "I worked from before sunrise to long after dark. The streets in winter were like ice. In summer the heat blew up from the stones. The cab was old and heavy. The driver was heavy too — and short of temper. My coat lost its shine. My eyes lost their light.", rightIsTitle: false, cue: "Will it ever get better?", nanaPrompt: "Even in a hard time, what can you hold on to inside? Beauty held on to his memories — and his hope." },
+          { leftEmoji: "🪨", leftChapter: "Chapter 9 · Hard Times", leftBody: "One day a driver took my cab and put far too many people in it. We had to climb a long, steep hill. The driver shouted and laid the whip on hard. I tried — but my legs would not move any faster. Halfway up the hill, my front knees gave way. I went down on the stones.", rightTitle: null, rightTitleSub: null, rightBody: "There was a great deal of shouting. The passengers tumbled out. The driver kicked me. I could not get up. Strangers gathered round. One old gentleman knelt by my head and said quietly, 'This horse is exhausted. He is not vicious. Treat him gently, or you'll answer for it.'", rightIsTitle: false, cue: "Is this the end?", nanaPrompt: "Have you ever been so tired you couldn't go one more step? What did you need then?" },
+          { leftEmoji: "🕯️", leftChapter: "Chapter 9 · Hard Times", leftBody: "They got me to my feet at last. I was led, very slowly, back to the cab yard. The owner came out, looked at me, and shook his head. 'He is done,' he said. 'I'll take him to the horse fair on Friday. Someone will buy him cheap and be glad of it.'", rightTitle: null, rightTitleSub: null, rightBody: "I had thought, at Birtwick, that life was kind. I had thought, with Jerry, that even hard life could be gentle. Now I knew it could be cruel too. Friday came. I was led to the horse fair with the others — all thin, all tired, all almost at the end.", rightIsTitle: false, cue: "Will anyone be kind?", nanaPrompt: "Have you ever hoped — even when you didn't quite believe? Sometimes that's all there is." },
         ],
       },
       {
@@ -1150,14 +1171,14 @@ const booksLibrary: Record<string, Book> = {
         summary: "A tired old horse at a fair catches the eye of a kind farmer. Slowly mended in a country meadow, Beauty finds his very last home — and a familiar face waiting.",
         question: "What part of Beauty's whole story do you think you'll remember the longest?",
         pages: [
-          { leftEmoji: "🐴", leftChapter: "Chapter 10 · My Last Home", leftBody: "The horse fair was a noisy place. Dealers shouted. Crowds of buyers walked up and down, looking at one horse and then another. We stood in a long, sad line. The thin ones, like me, were tied at the cheap end of the field, where the prices were lowest.", rightTitle: null, rightTitleSub: null, rightBody: "Most of the men who came to look were rough sorts. They poked our ribs and stared into our mouths and shook their heads. I lowered my eyes. I had no hope left in the day. I only wanted it to be over, whatever 'over' would mean. I did not look up at all.", rightIsTitle: false, cue: "Has Beauty given up?", nanaPrompt: "Ask Perry: have you ever felt so tired you didn't want to look up? It's okay to have those days. What helps you raise your head again?" },
-          { leftEmoji: "👴", leftChapter: "Chapter 10 · My Last Home", leftBody: "Then a quiet voice spoke close beside me. 'There's some good in this one yet,' it said. I lifted my head — just a little — and saw a tall old gentleman in a wide hat. He had a kind, weathered face. He ran his hand slowly along my neck and looked into my eyes.", rightTitle: null, rightTitleSub: null, rightBody: "A boy was with him — his grandson, no older than twelve. 'Grandfather,' the boy said, 'his eye is bright. Look — he sees us.' The old man nodded. 'Yes. There is still spirit there. He has been a fine horse once. He might be a fine horse again, with care.'", rightIsTitle: false, cue: "Will the kind man buy him?", nanaPrompt: "Ask Perry: how can you tell when someone is really paying attention to you? Show the difference — pretend look, real look." },
-          { leftEmoji: "🤝", leftChapter: "Chapter 10 · My Last Home", leftBody: "The old gentleman's name was Mr. Thoroughgood. He had a small farm in the country, and he often came to the fair to look for tired horses he could make whole again. He offered the dealer a fair price. The dealer agreed gladly, for I was worth almost nothing to him.", rightTitle: null, rightTitleSub: null, rightBody: "Mr. Thoroughgood led me out himself, walking slowly, talking to me in a calm, gentle voice. The boy walked along the other side. They led me to a quiet meadow not far from the fair, and there they let me loose. The grass under my hooves was so soft I could hardly believe it.", rightIsTitle: false, cue: "Is this a dream?", nanaPrompt: "Ask Perry: when something wonderful happens after a hard time, sometimes it feels too good to be true. Tell her about a time you felt that way." },
-          { leftEmoji: "🌾", leftChapter: "Chapter 10 · My Last Home", leftBody: "I lived at Mr. Thoroughgood's small farm for many months. There was no work at first — only good grass, sweet hay, and quiet days. The boy came every day to brush me and to bring me apples. Slowly, my coat began to shine again. My ribs filled out. My eye grew bright.", rightTitle: null, rightTitleSub: null, rightBody: "Mr. Thoroughgood would stand at the fence and watch me grazing. 'He is becoming himself again,' he would say to the boy. 'A horse like this should not end his days pulling a heavy cab. He should end them with people who will love him.' And he set himself to find such a home.", rightIsTitle: false, cue: "What kind of new home?", nanaPrompt: "Ask Perry: who are the people in your life who would love you no matter what? Tell her about them." },
-          { leftEmoji: "🏡", leftChapter: "Chapter 10 · My Last Home", leftBody: "Word came one day of three ladies — sisters — who lived in a country house and wanted a gentle horse. They would not need him to work hard; only to carry one of them on quiet rides, or to pull their little carriage to church on Sundays. They were known for their kindness.", rightTitle: null, rightTitleSub: null, rightBody: "Mr. Thoroughgood drove me to their house himself. The three ladies came out — one tall, one round, one small — and they gathered round me. They patted my neck and looked into my eyes and ran their soft hands along my sides. 'Oh,' said the tall one, 'he is a perfect dear.'", rightIsTitle: false, cue: "Do they like him?", nanaPrompt: "Ask Perry: imagine you are the horse. How does it feel to be looked at with such kind eyes? Try it with her — soft eyes!" },
-          { leftEmoji: "👀", leftChapter: "Chapter 10 · My Last Home", leftBody: "They led me round to the stable. A young groom came out, smiling, to take charge of me. He looked at me carefully, then his eyes grew wide. He looked again. He bent down, parted my forelock, and looked at the white star on my forehead — and at my old white sock.", rightTitle: null, rightTitleSub: null, rightBody: "'It can't be,' he whispered. 'Black Beauty. It can't be.' His voice was quiet and full of wonder. The three ladies looked at him in surprise. He turned to them. 'Ma'am,' he said, 'I think I know this horse. I think — yes — this is Black Beauty, from Birtwick Park.'", rightIsTitle: false, cue: "Who is this groom?", nanaPrompt: "Ask Perry: have you ever met someone you knew long ago, who you hadn't seen for years? What was that like?" },
-          { leftEmoji: "🌟", leftChapter: "Chapter 10 · My Last Home", leftBody: "His name was Joe Green. He had been the stable boy at Birtwick when I was a young horse. He had grown up since then — but I remembered him at once. I bent my head to his shoulder and breathed in the familiar smell of him. He laughed and cried at the same time.", rightTitle: null, rightTitleSub: null, rightBody: "'I always wondered what happened to you,' he said. 'I have been looking for you for years.' He told the ladies all about me — the night of the storm, the fire at the inn, my brave kind days at Birtwick. The ladies listened with shining eyes, and at the end they patted me gently.", rightIsTitle: false, cue: "Is Beauty finally home?", nanaPrompt: "Ask Perry: imagine being recognized by someone who loved you long ago. That's the best kind of welcome." },
-          { leftEmoji: "🌅", leftChapter: "Chapter 10 · My Last Home", leftBody: "And so I came at last to my final home. The work is gentle. The meadows are wide. The ladies are kind, and Joe is always near. Sometimes, when I am dozing in the sun, my mother's old advice drifts through my mind: do your best, keep up your good name, be gentle.", rightTitle: null, rightTitleSub: null, rightBody: "I have had a long life — and a hard one in places. But I have known many good people, and a few brave ones, and I have loved them all. I am only an old black horse with a white star, and one white foot. But I have done my best. And here, at the end, I am home.", rightIsTitle: false, cue: "Did Beauty get his happy ending?", nanaPrompt: "Hug Perry. Ask: what was your favorite part of Beauty's story? What part will you remember the longest?" },
+          { leftEmoji: "🐴", leftChapter: "Chapter 10 · My Last Home", leftBody: "The horse fair was a noisy place. Dealers shouted. Crowds of buyers walked up and down, looking at one horse and then another. We stood in a long, sad line. The thin ones, like me, were tied at the cheap end of the field, where the prices were lowest.", rightTitle: null, rightTitleSub: null, rightBody: "Most of the men who came to look were rough sorts. They poked our ribs and stared into our mouths and shook their heads. I lowered my eyes. I had no hope left in the day. I only wanted it to be over, whatever 'over' would mean. I did not look up at all.", rightIsTitle: false, cue: "Has Beauty given up?", nanaPrompt: "Have you ever felt so tired you didn't want to look up? It's okay to have those days. What helps you raise your head again?" },
+          { leftEmoji: "👴", leftChapter: "Chapter 10 · My Last Home", leftBody: "Then a quiet voice spoke close beside me. 'There's some good in this one yet,' it said. I lifted my head — just a little — and saw a tall old gentleman in a wide hat. He had a kind, weathered face. He ran his hand slowly along my neck and looked into my eyes.", rightTitle: null, rightTitleSub: null, rightBody: "A boy was with him — his grandson, no older than twelve. 'Grandfather,' the boy said, 'his eye is bright. Look — he sees us.' The old man nodded. 'Yes. There is still spirit there. He has been a fine horse once. He might be a fine horse again, with care.'", rightIsTitle: false, cue: "Will the kind man buy him?", nanaPrompt: "How can you tell when someone is really paying attention to you? Let's try a pretend look, then a real look." },
+          { leftEmoji: "🤝", leftChapter: "Chapter 10 · My Last Home", leftBody: "The old gentleman's name was Mr. Thoroughgood. He had a small farm in the country, and he often came to the fair to look for tired horses he could make whole again. He offered the dealer a fair price. The dealer agreed gladly, for I was worth almost nothing to him.", rightTitle: null, rightTitleSub: null, rightBody: "Mr. Thoroughgood led me out himself, walking slowly, talking to me in a calm, gentle voice. The boy walked along the other side. They led me to a quiet meadow not far from the fair, and there they let me loose. The grass under my hooves was so soft I could hardly believe it.", rightIsTitle: false, cue: "Is this a dream?", nanaPrompt: "When something wonderful happens after a hard time, sometimes it feels too good to be true." },
+          { leftEmoji: "🌾", leftChapter: "Chapter 10 · My Last Home", leftBody: "I lived at Mr. Thoroughgood's small farm for many months. There was no work at first — only good grass, sweet hay, and quiet days. The boy came every day to brush me and to bring me apples. Slowly, my coat began to shine again. My ribs filled out. My eye grew bright.", rightTitle: null, rightTitleSub: null, rightBody: "Mr. Thoroughgood would stand at the fence and watch me grazing. 'He is becoming himself again,' he would say to the boy. 'A horse like this should not end his days pulling a heavy cab. He should end them with people who will love him.' And he set himself to find such a home.", rightIsTitle: false, cue: "What kind of new home?", nanaPrompt: "Who are the people in your life who would love you no matter what?" },
+          { leftEmoji: "🏡", leftChapter: "Chapter 10 · My Last Home", leftBody: "Word came one day of three ladies — sisters — who lived in a country house and wanted a gentle horse. They would not need him to work hard; only to carry one of them on quiet rides, or to pull their little carriage to church on Sundays. They were known for their kindness.", rightTitle: null, rightTitleSub: null, rightBody: "Mr. Thoroughgood drove me to their house himself. The three ladies came out — one tall, one round, one small — and they gathered round me. They patted my neck and looked into my eyes and ran their soft hands along my sides. 'Oh,' said the tall one, 'he is a perfect dear.'", rightIsTitle: false, cue: "Do they like him?", nanaPrompt: "Imagine you are the horse. How does it feel to be looked at with such kind eyes? Let's try it: soft eyes!" },
+          { leftEmoji: "👀", leftChapter: "Chapter 10 · My Last Home", leftBody: "They led me round to the stable. A young groom came out, smiling, to take charge of me. He looked at me carefully, then his eyes grew wide. He looked again. He bent down, parted my forelock, and looked at the white star on my forehead — and at my old white sock.", rightTitle: null, rightTitleSub: null, rightBody: "'It can't be,' he whispered. 'Black Beauty. It can't be.' His voice was quiet and full of wonder. The three ladies looked at him in surprise. He turned to them. 'Ma'am,' he said, 'I think I know this horse. I think — yes — this is Black Beauty, from Birtwick Park.'", rightIsTitle: false, cue: "Who is this groom?", nanaPrompt: "Have you ever met someone you knew long ago, who you hadn't seen for years? What was that like?" },
+          { leftEmoji: "🌟", leftChapter: "Chapter 10 · My Last Home", leftBody: "His name was Joe Green. He had been the stable boy at Birtwick when I was a young horse. He had grown up since then — but I remembered him at once. I bent my head to his shoulder and breathed in the familiar smell of him. He laughed and cried at the same time.", rightTitle: null, rightTitleSub: null, rightBody: "'I always wondered what happened to you,' he said. 'I have been looking for you for years.' He told the ladies all about me — the night of the storm, the fire at the inn, my brave kind days at Birtwick. The ladies listened with shining eyes, and at the end they patted me gently.", rightIsTitle: false, cue: "Is Beauty finally home?", nanaPrompt: "Imagine being recognized by someone who loved you long ago. That's the best kind of welcome." },
+          { leftEmoji: "🌅", leftChapter: "Chapter 10 · My Last Home", leftBody: "And so I came at last to my final home. The work is gentle. The meadows are wide. The ladies are kind, and Joe is always near. Sometimes, when I am dozing in the sun, my mother's old advice drifts through my mind: do your best, keep up your good name, be gentle.", rightTitle: null, rightTitleSub: null, rightBody: "I have had a long life — and a hard one in places. But I have known many good people, and a few brave ones, and I have loved them all. I am only an old black horse with a white star, and one white foot. But I have done my best. And here, at the end, I am home.", rightIsTitle: false, cue: "Did Beauty get his happy ending?", nanaPrompt: "What was your favorite part of Beauty's story? What part will you remember the longest?" },
         ],
       },
     ],
@@ -1431,6 +1452,8 @@ function WordWrapped({
     );
     const next = flat[i + 1];
     if (next && !tok.glue && !segBreak(next.seg, next.ti)) nodes.push(" ");
+    // A web address may break after a slash (same as the page planner).
+    else if (next && tok.glue && tok.text.endsWith("/") && !segBreak(next.seg, next.ti)) nodes.push(<wbr key={`w${wid}`} />);
   });
   return <>{nodes}</>;
 }
@@ -1448,10 +1471,12 @@ function WordActionMenu({
   layoutKey,
   onPronounce,
   onPhonics,
+  onDefine,
   onSave,
   onClose,
   pronunciationState,
   phonicsState,
+  defineState = null,
   saveState,
 }: {
   bookAreaRef: React.RefObject<HTMLDivElement | null>;
@@ -1461,10 +1486,13 @@ function WordActionMenu({
   layoutKey: string;
   onPronounce: (word: string) => void;
   onPhonics: (word: string) => void;
+  /** Rick's Build 39 G1: the word's meaning, inside NeverMiss. */
+  onDefine?: (word: string, sentence: string) => void;
   onSave: (word: string, sentence: string) => void;
   onClose: () => void;
   pronunciationState: { word: string; status: "loading" | "done" | "err" } | null;
   phonicsState: { word: string; status: "loading" | "done" | "err" } | null;
+  defineState?: { word: string; status: "loading" | "done" | "err" } | null;
   saveState: { word: string; status: "saving" | "saved" | "already" } | null;
 }) {
   const fromChild = selection.by === "perry";
@@ -1475,7 +1503,7 @@ function WordActionMenu({
     const place = () => {
       const area = bookAreaRef.current;
       if (!area) return;
-      const width = Math.min(360, area.clientWidth - 16);
+      const width = Math.min(onDefine ? 430 : 360, area.clientWidth - 16);
       const span = selection.wid
         ? area.querySelector<HTMLElement>(`[data-wid="${selection.wid}"]`)
         : null;
@@ -1499,12 +1527,13 @@ function WordActionMenu({
     const ro = area && typeof ResizeObserver !== "undefined" ? new ResizeObserver(place) : null;
     if (ro && area) ro.observe(area);
     return () => { cancelAnimationFrame(raf); window.clearTimeout(t); ro?.disconnect(); };
-  }, [selection.wid, selection.ts, layoutKey, bookAreaRef, menuH]);
+  }, [selection.wid, selection.ts, layoutKey, bookAreaRef, menuH, onDefine]);
 
   if (!pos) return null;
   const w = selection.word;
   const pronBusy = pronunciationState?.word.toLowerCase() === w.toLowerCase() && pronunciationState.status === "loading";
   const phonBusy = phonicsState?.word.toLowerCase() === w.toLowerCase() && phonicsState.status === "loading";
+  const defBusy = defineState?.word.toLowerCase() === w.toLowerCase() && defineState.status === "loading";
   const saved = saveState?.word.toLowerCase() === w.toLowerCase() && saveState.status !== "saving";
 
   const btn = (icon: string, label: string, onClick: () => void, busy: boolean) => (
@@ -1585,6 +1614,7 @@ function WordActionMenu({
       <div style={{ display: "flex", gap: 6 }}>
         {btn("🔊", "Pronunciation", () => onPronounce(w), pronBusy)}
         {btn("🔤", "Phonics", () => onPhonics(w), phonBusy)}
+        {onDefine && btn("📖", "Definition", () => onDefine(w, selection.sentence), defBusy)}
         {btn(saved ? "✓" : "⭐", saved ? "Saved" : "Save", () => onSave(w, selection.sentence), false)}
       </div>
     </div>
@@ -1898,20 +1928,21 @@ function BookContent({
       }}>
         <div style={{
           flex: 1, minHeight: 0,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          padding: caption ? "10px 12px 4px" : "10px 12px",
+          position: "relative",
           backgroundColor: themeColors.page,
           overflow: "hidden",
         }}>
+          {/* Pinned inside the padding, never sized by a percentage of a
+              stretchy box (Rick's Build 39 H2: cut-off covers). */}
           <img
             src={p.imageUrl}
             alt=""
             style={{
-              maxWidth: "100%",
-              maxHeight: "100%",
+              position: "absolute",
+              top: 10, left: 12, right: 12, bottom: caption ? 4 : 10,
+              width: "calc(100% - 24px)", height: `calc(100% - ${caption ? 14 : 20}px)`,
               objectFit: "contain",
-              borderRadius: 4,
-              boxShadow: "0 4px 14px rgba(0,0,0,0.28)",
+              filter: "drop-shadow(0 4px 10px rgba(0,0,0,0.22))",
             }}
           />
         </div>
@@ -2128,8 +2159,9 @@ function BookContent({
         overflow: "hidden",
         transition: "background-color 240ms ease",
       }}>
-        {/* Running header — small caps, refined letter-spacing */}
-        <div style={{ borderBottom: `1px solid ${themeColors.muted}`, paddingBottom: "4px", marginBottom: "10px", display: "flex", justifyContent: "center", opacity: 0.55 }}>
+        {/* Running header — small caps, refined letter-spacing. Hidden
+            facing the goodbye page: a blank last page, as in a book. */}
+        <div style={{ borderBottom: `1px solid ${themeColors.muted}`, paddingBottom: "4px", marginBottom: "10px", display: "flex", justifyContent: "center", opacity: 0.55, visibility: p.signOff && isTitleSpread ? "hidden" : undefined }}>
           <span style={runningHeadText}>
             {bookTitle}
           </span>
@@ -2182,7 +2214,9 @@ function BookContent({
             side picked (Rick: "everyone always sees the same lines per
             page and turns at exactly the same point — regardless of
             which font size they have chosen"). */}
-        <div className={heading && !images ? "nm-book-dropcap" : undefined} style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative", zIndex: 1 }}>
+        {/* No big first letter on an information page ("About This Book",
+            "About this book · Endnotes"): it's for story chapters. */}
+        <div className={heading && !images && !/^About this book/i.test(heading) ? "nm-book-dropcap" : undefined} style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative", zIndex: 1 }}>
           {/* Rick's Build 32 review #A-7: inline illustrations
               extracted from the source EPUB, on the spread that opens
               their page. On a planned spread they fill the left page and
@@ -2226,14 +2260,8 @@ function BookContent({
               })}
             </div>
           )}
-          {/* The closing page: Rick's heart QR (nevermiss.family/#story) on
-              its blank left page (illustrated-book guide, Oct 2026). */}
-          {isTitleSpread && p.signOff && pageMode === "double" && (
-            <div data-testid="closing-qr" style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10 }}>
-              <img src="/nevermiss-heart-qr.png" alt="QR code for nevermiss.family" style={{ width: "min(52%, 200px)", aspectRatio: "1", imageRendering: "pixelated", borderRadius: 8 }} />
-              <span style={{ color: themeColors.muted, fontFamily: "Merriweather, serif", fontSize: 13, fontStyle: "italic", letterSpacing: "0.04em" }}>nevermiss.family</span>
-            </div>
-          )}
+          {/* The goodbye spread's left page stays blank, like a book's last
+              page: Rick's goodbye page (with its heart QR) is on the right. */}
           <p ref={leftRef} className="book-body nm-book-body" style={{
             color: themeColors.text,
             margin: 0,
@@ -2257,6 +2285,7 @@ function BookContent({
             display: "flex", alignItems: "center", justifyContent: "center",
             gap: 10, opacity: 0.32, marginTop: "auto", paddingTop: 6,
             color: themeColors.muted, fontSize: 12, lineHeight: "14px",
+            visibility: p.signOff && isTitleSpread ? "hidden" : undefined,
           }}>
             <span style={{ width: 28, height: 1, backgroundColor: themeColors.muted }} />
             ❦
@@ -2319,7 +2348,10 @@ function BookContent({
             `overflow: hidden` contract: source data is paginated so
             content always fits at 1.5x. */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "flex-start", overflow: "hidden" }}>
-          {p.rightIsTitle ? (
+          {p.signOff ? (
+            // Rick's NeverMiss goodbye page (Oct 2026 design).
+            <ClosingPage text={themeColors.text} page={themeColors.page} />
+          ) : p.rightIsTitle ? (
             <>
               <h2 style={{ color: themeColors.text, fontFamily: "Playfair Display, serif", fontSize: headPx, fontWeight: 700, textAlign: "center", marginBottom: 8, marginTop: 14, lineHeight: 1.2, letterSpacing: "0.005em" }}>
                 {p.rightTitle}
@@ -2341,9 +2373,6 @@ function BookContent({
               }}>
                 {p.rightBody}
               </p>
-              {p.signOff && pageMode === "single" && (
-                <img data-testid="closing-qr" src="/nevermiss-heart-qr.png" alt="QR code for nevermiss.family" style={{ display: "block", margin: "6px auto 0", width: 96, height: 96, imageRendering: "pixelated", borderRadius: 6 }} />
-              )}
             </>
           ) : (
             <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative", zIndex: 1 }}>
@@ -3426,9 +3455,11 @@ function BookSpread({
   onPageProfile,
   onSelectionPronounce,
   onSelectionPhonics,
+  onSelectionDefine,
   onSelectionSave,
   selectionPronunciationState = null,
   selectionPhonicsState = null,
+  selectionDefineState = null,
   selectionSaveState = null,
   isFullscreen = false,
   onToggleFullscreen,
@@ -3469,9 +3500,12 @@ function BookSpread({
   onPageProfile?: (p: PageProfile) => void;
   onSelectionPronounce?: (word: string) => void;
   onSelectionPhonics?: (word: string) => void;
+  /** Definition button (Rick's Build 39 G1). */
+  onSelectionDefine?: (word: string, sentence: string) => void;
   onSelectionSave?: (word: string, sentence: string) => void;
   selectionPronunciationState?: { word: string; status: "loading" | "done" | "err" } | null;
   selectionPhonicsState?: { word: string; status: "loading" | "done" | "err" } | null;
+  selectionDefineState?: { word: string; status: "loading" | "done" | "err" } | null;
   selectionSaveState?: { word: string; status: "saving" | "saved" | "already" } | null;
   /** Nana only: labeled full-screen toggle on the book's own top row. */
   isFullscreen?: boolean;
@@ -3541,7 +3575,10 @@ function BookSpread({
   // Reading pointer (Rick's spec): a touch that barely moves is a word
   // tap; a slow drag becomes Nana's pointer; a quick flick (under 300ms,
   // over 50px sideways) still turns the page.
-  const pointerDownRef = useRef<{ x: number; y: number; id: number; t: number; dragging: boolean } | null>(null);
+  // `held`: a drag whose arrow isn't drawn yet, because it may still turn
+  // out to be a flick that turns the page (Rick's Build 39 D3: the arrow
+  // flashed up on every swipe as if the page had been tapped).
+  const pointerDownRef = useRef<{ x: number; y: number; id: number; t: number; dragging: boolean; held?: boolean; lastX?: number; lastY?: number; timer?: number } | null>(null);
   const lastPtrSendRef = useRef(0);
   const pointerOn = isNana && pointerMode !== "off";
 
@@ -3674,17 +3711,42 @@ function BookSpread({
     linesRef.current = readLines();
   };
 
+  // A drag is pointing once it has lasted POINT_AFTER_MS without racing
+  // sideways like a flick, or once it is too long to be a flick at all.
+  const POINT_AFTER_MS = 160;
+  const isFlicking = (d: { x: number; y: number; t: number }, x: number, y: number) => {
+    const dx = Math.abs(x - d.x);
+    const dy = Math.abs(y - d.y);
+    const ms = Math.max(1, Date.now() - d.t);
+    return ms < 300 && dx > dy && dx / ms > 0.45;
+  };
+  const releaseHeld = (d: NonNullable<typeof pointerDownRef.current>) => {
+    if (!d.held || d.lastX === undefined || d.lastY === undefined) return;
+    if (Date.now() - d.t < POINT_AFTER_MS || isFlicking(d, d.lastX, d.lastY)) return;
+    d.held = false;
+    if (d.timer !== undefined) { window.clearTimeout(d.timer); d.timer = undefined; }
+    const m = pointerMsgAt(d.lastX, d.lastY, "move");
+    if (m) sendPointer(m);
+  };
+
   const handleBookPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const d = pointerDownRef.current;
     if (!d || e.pointerId !== d.id) return;
     if (!d.dragging && (Math.abs(e.clientX - d.x) > TAP_SLOP || Math.abs(e.clientY - d.y) > TAP_SLOP)) {
       if (!pointerOn || pointerSuppressed) { pointerDownRef.current = null; return; }
       d.dragging = true;
+      d.held = true;
+      // A finger that rests after the first move still gets its arrow.
+      const wait = Math.max(0, POINT_AFTER_MS - (Date.now() - d.t)) + 20;
+      d.timer = window.setTimeout(() => { d.timer = undefined; if (pointerDownRef.current === d) releaseHeld(d); }, wait);
       // Pointing takes over from a highlighted word (its menu would
       // otherwise hide the pointer).
       if (wordSelection && onSelectWord) onSelectWord(null);
     }
     if (d.dragging) {
+      d.lastX = e.clientX;
+      d.lastY = e.clientY;
+      if (d.held) { releaseHeld(d); return; }
       const m = pointerMsgAt(e.clientX, e.clientY, "move");
       if (m) sendPointer(m);
     }
@@ -3694,8 +3756,10 @@ function BookSpread({
     const d = pointerDownRef.current;
     pointerDownRef.current = null;
     if (!d || e.pointerId !== d.id) return;
+    if (d.timer !== undefined) { window.clearTimeout(d.timer); d.timer = undefined; }
     if (d.dragging) {
-      endPointer(e.clientX, e.clientY);
+      // An arrow that was never drawn has nothing to lift.
+      if (!d.held) endPointer(e.clientX, e.clientY);
       // A quick sideways flick still turns the page.
       const dx = e.clientX - d.x;
       const dy = e.clientY - d.y;
@@ -3728,7 +3792,8 @@ function BookSpread({
   const handleBookPointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
     const d = pointerDownRef.current;
     pointerDownRef.current = null;
-    if (d?.dragging) endPointer(e.clientX, e.clientY);
+    if (d?.timer !== undefined) window.clearTimeout(d.timer);
+    if (d?.dragging && !d.held) endPointer(e.clientX, e.clientY);
   };
 
   // The conversation prompt used to live as a 218px bookmark panel
@@ -3814,10 +3879,12 @@ function BookSpread({
             layoutKey={`${displayPage}.${displayOff}|${pageSide}|${pageMode}|${fontScale}|${pagePlan?.key ?? ""}|${area?.w ?? 0}x${area?.h ?? 0}`}
             onPronounce={onSelectionPronounce}
             onPhonics={onSelectionPhonics}
+            onDefine={onSelectionDefine}
             onSave={onSelectionSave}
             onClose={() => onSelectWord(null)}
             pronunciationState={selectionPronunciationState ?? null}
             phonicsState={selectionPhonicsState ?? null}
+            defineState={selectionDefineState ?? null}
             saveState={selectionSaveState ?? null}
           />
         )}
@@ -3904,31 +3971,36 @@ function BookSpread({
                 <div
                   data-bk-image-page
                   style={{
-                    width: "100%", height: "100%",
-                    display: "flex", flexDirection: imagePage.imageCaption ? "column" : undefined, alignItems: "center", justifyContent: "center",
+                    // Pinned to the book area, and the picture pinned to its
+                    // own box: percentage heights inside the stretchy page
+                    // layout aren't resolved by every iPad's Safari, which
+                    // drew the picture at full width and cut its top and
+                    // bottom (Rick's Build 39 H2, Squirrel Nutkin's cover).
+                    position: "absolute", inset: 0,
+                    display: "flex", flexDirection: "column",
                     backgroundColor: READING_THEMES[readingTheme].page,
                     overflow: "hidden",
                   }}
                 >
-                  <img
-                    src={imagePage.imageUrl}
-                    alt={imagePage.leftChapter || bookTitle || `Page ${idxPage}`}
-                    draggable={false}
-                    style={{
-                      // Fill the whole page box (scaling small art up),
-                      // never crop (Master Plan §6).
-                      width: "100%",
-                      height: imagePage.imageCaption ? "auto" : "100%",
-                      flex: imagePage.imageCaption ? "1 1 0" : undefined,
-                      minHeight: 0,
-                      objectFit: "contain",
-                      display: "block",
-                      userSelect: "none",
-                      WebkitUserSelect: "none",
-                      WebkitTouchCallout: "none",
-                      pointerEvents: "none",
-                    }}
-                  />
+                  <div style={{ position: "relative", flex: "1 1 0", minHeight: 0 }}>
+                    <img
+                      src={imagePage.imageUrl}
+                      alt={imagePage.leftChapter || bookTitle || `Page ${idxPage}`}
+                      draggable={false}
+                      style={{
+                        // Fill the whole page box (scaling small art up),
+                        // never crop (Master Plan §6).
+                        position: "absolute", inset: 0,
+                        width: "100%", height: "100%",
+                        objectFit: "contain",
+                        display: "block",
+                        userSelect: "none",
+                        WebkitUserSelect: "none",
+                        WebkitTouchCallout: "none",
+                        pointerEvents: "none",
+                      }}
+                    />
+                  </div>
                   {imagePage.imageCaption && (
                     <div style={{ ...pictureCaptionStyle(READING_THEMES[readingTheme].muted ?? "#6b5a45"), padding: "6px 16px 10px" }}>{imagePage.imageCaption}</div>
                   )}
@@ -6195,6 +6267,14 @@ function OnboardingView({
             </a>.
           </div>
         </label>
+        {/* Build 39 A1: a refusal ("Perry is already set up…") used to
+            show only on the invite-code step, so this button seemed to
+            do nothing. */}
+        {perryInviteError && (
+          <div role="alert" data-testid="child-setup-error" style={{ color: "#fca5a5", fontFamily: "DM Sans, sans-serif", fontSize: "15px", lineHeight: 1.4, textAlign: "center" }}>
+            {perryInviteError}
+          </div>
+        )}
         <button
           disabled={authLoading}
           onClick={() => {
@@ -11091,6 +11171,7 @@ function DeviceFrame({
   onSelectWord,
   onSelectionPronounce,
   onSelectionPhonics,
+  onSelectionDefine,
   onSelectionSave,
   onPerryPickBook,
   onPerryAskNana,
@@ -11100,6 +11181,7 @@ function DeviceFrame({
   onToggleReadingFullscreen,
   selectionPronunciationState = null,
   selectionPhonicsState = null,
+  selectionDefineState = null,
   selectionSaveState = null,
   readingTheme = "day",
   onThemeChange,
@@ -11133,6 +11215,7 @@ function DeviceFrame({
   onUpdateChild,
   onCloseLearnedWords,
   onJumpToPage,
+  onJumpToPageNumber,
   pointerMode = "finger",
   onPointerModeChange,
   onNavBack,
@@ -11315,6 +11398,8 @@ function DeviceFrame({
   /** Nana-only word actions. */
   onSelectionPronounce?: (word: string) => void;
   onSelectionPhonics?: (word: string) => void;
+  /** Definition button (Rick's Build 39 G1). */
+  onSelectionDefine?: (word: string, sentence: string) => void;
   onSelectionSave?: (word: string, sentence: string) => void;
   /** Perry-only: pill handlers that publish perry_request SSE events. */
   onPerryPickBook?: () => void;
@@ -11332,6 +11417,7 @@ function DeviceFrame({
   onToggleReadingFullscreen?: () => void;
   selectionPronunciationState?: { word: string; status: "loading" | "done" | "err" } | null;
   selectionPhonicsState?: { word: string; status: "loading" | "done" | "err" } | null;
+  selectionDefineState?: { word: string; status: "loading" | "done" | "err" } | null;
   selectionSaveState?: { word: string; status: "saving" | "saved" | "already" } | null;
   readingTheme?: ReadingTheme;
   onThemeChange?: (t: ReadingTheme) => void;
@@ -11388,6 +11474,8 @@ function DeviceFrame({
   onCloseLearnedWords?: () => void;
   /** Nana: jump to a source page (Menu → Chapters & Pages). */
   onJumpToPage?: (page: number) => void;
+  /** Page n as the reader counts them (the Chapters & Pages slider). */
+  onJumpToPageNumber?: (n: number) => void;
   /** Nana's reading pointer style (Menu → Reading Setup). */
   pointerMode?: PointerMode;
   onPointerModeChange?: (m: PointerMode) => void;
@@ -11529,6 +11617,7 @@ function DeviceFrame({
               pageNum={pageNum}
               pageTotal={pageTotal}
               onJump={onJumpToPage}
+              onJumpToPageNumber={onJumpToPageNumber}
               close={close}
             />
           ),
@@ -11829,6 +11918,8 @@ function DeviceFrame({
             onAddChild={onOpenAddChild}
             onSetPhoto={onSetChildPhoto ?? (async () => {})}
             loading={dashboardLoading}
+            onOpenLibrary={onOpenLibrary}
+            familyCode={inviteToken}
           />
         ) : isHome && !isNana ? (
           // Perry on home: she's not supposed to navigate Nana's dashboard.
@@ -12082,9 +12173,11 @@ function DeviceFrame({
                 childName={childName}
                 onSelectionPronounce={onSelectionPronounce}
                 onSelectionPhonics={onSelectionPhonics}
+                onSelectionDefine={onSelectionDefine}
                 onSelectionSave={onSelectionSave}
                 selectionPronunciationState={selectionPronunciationState}
                 selectionPhonicsState={selectionPhonicsState}
+                selectionDefineState={selectionDefineState}
                 selectionSaveState={selectionSaveState}
                 isFullscreen={readingFullscreen}
                 onToggleFullscreen={isNana ? onToggleReadingFullscreen : undefined}
@@ -12109,7 +12202,7 @@ function DeviceFrame({
                 readingTheme={readingTheme}
                 onThemeChange={isNana ? onThemeChange : undefined}
                 onReact={onReact}
-                cue={isNana && bookPages.length > 0 ? (spreadCue(bookPages, plan, safePage, displayOff) || spreadPrompt(bookPages, plan, safePage, displayOff).replace(/^Ask:\s*/, "")) : null}
+                cue={isNana && bookPages.length > 0 ? (spreadCue(bookPages, plan, safePage, displayOff) || spreadPrompt(bookPages, plan, safePage, displayOff)) : null}
                 onLetsTalk={isNana ? onStartChat : undefined}
                 onShowAndTell={onStartShowAndTell}
                 readingPos={readingPos}
@@ -12353,7 +12446,7 @@ function FullPageReading({
                   fontFamily: "Merriweather, serif", fontSize: 19, lineHeight: 1.22, fontStyle: "italic",
                   display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden",
                 }}>
-                  {cue || `Ask ${childLabel} about the story`}
+                  {cue || "What do you think of the story so far?"}
                 </span>
               </span>
             </button>
@@ -14683,6 +14776,9 @@ export default function App() {
 
   // Nana connection dashboard — fetched when step 3 is reached
   const [dashboardLoading, setDashboardLoading] = useState(false);
+  // Which connection the grandchildren list was last loaded for: until it
+  // arrives Home says "Loading…", not "Add your first grandchild".
+  const [childrenLoadedFor, setChildrenLoadedFor] = useState<string | null>(null);
   // Full list of siblings on this connection. Replaces the old single-
   // child `dashboardPerryName` so Nana can switch between Perry / Cooper /
   // etc. Loaded by `api.children.list` after onboarding step 3.
@@ -15703,16 +15799,18 @@ export default function App() {
   const handleChildProfileConfirm = async (name: string, birthday: string | null, pin: string) => {
     if (!connectionId) return;
     setAuthLoading(true);
+    setPerryInviteError("");
     try {
       // The setup screen requires the parent's consent box (Build 38
-      // records when it was given).
+      // records when it was given). A grandchild who is already set up
+      // comes back signed in when the PIN is theirs (Build 39 A1).
       const created = await api.children.create({ connectionId, name, birthday, pin, consent: true });
       // This iPad now belongs to the child who was just set up: presence
       // ("Perry is here") and the sibling handover need to know who it is.
       setAuthenticatedChildId(created.id);
       setActiveChildId(created.id);
       // Save Perry's connection info to localStorage for PIN login next time
-      const connData = { connectionId, childName: name, nanaName: nanaDisplayName };
+      const connData = { connectionId, childName: created.name || name, nanaName: nanaDisplayName };
       localStorage.setItem("nm_perry_conn", JSON.stringify(connData));
       perryConnRef.current = connData;
       // Same jail-arming as the PIN-login path: ensure Perry stays on the
@@ -16348,6 +16446,7 @@ export default function App() {
             steps?: Array<{ code: string; codeLabel: string; target: string; prompt: string }>;
             level?: string;
             syllables?: string;
+            respelling?: string;
           };
           if (typeof p.word === "string" && typeof p.nanaCue === "string") {
             setSelPhonicsCard({
@@ -16360,6 +16459,7 @@ export default function App() {
               steps: Array.isArray(p.steps) ? p.steps : undefined,
               level: p.level,
               syllables: p.syllables,
+              respelling: p.respelling,
             });
             setSelPhonicsStep(0);
             if (selPhonicsTimerRef.current) window.clearTimeout(selPhonicsTimerRef.current);
@@ -16852,9 +16952,11 @@ export default function App() {
   useEffect(() => {
     if (nanaOnboardingStep !== 3 || !connectionId) return;
     setDashboardLoading(true);
+    // The grandchildren don't wait on reading progress: a failed progress
+    // call used to leave Home on "Add your first grandchild" (Build 39 D2).
     Promise.all([
       api.children.list(connectionId),
-      api.progress.all(connectionId),
+      api.progress.all(connectionId).catch(() => ({ progress: [] as Awaited<ReturnType<typeof api.progress.all>>["progress"] })),
     ]).then(([childList, progressRes]) => {
       setChildren(childList);
       const savedId = (() => {
@@ -16876,7 +16978,7 @@ export default function App() {
               || (p.childId == null && !progressRes.progress.some(q => q.childId === next.id && q.bookId === p.bookId)))
           : progressRes.progress,
       );
-    }).catch(() => {}).finally(() => setDashboardLoading(false));
+    }).catch(() => {}).finally(() => { setDashboardLoading(false); setChildrenLoadedFor(connectionId); });
     // activeChildId intentionally excluded — we read it once on fetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nanaOnboardingStep, connectionId]);
@@ -17304,6 +17406,14 @@ export default function App() {
   // Save          = persist to learned_words with enrichment
   //                 (definition, IPA, audio URL, phonics rule).
   const [selPronState, setSelPronState] = useState<{ word: string; status: "loading" | "done" | "err" } | null>(null);
+  // The Definition card (Rick's Build 39 G1), on Nana's iPad like Phonics.
+  const [selDefinition, setSelDefinition] = useState<{
+    word: string;
+    status: "loading" | "done" | "err";
+    definition?: string | null;
+    partOfSpeech?: string | null;
+    respelling?: string;
+  } | null>(null);
   const [selPhoState,  setSelPhoState]  = useState<{ word: string; status: "loading" | "done" | "err" } | null>(null);
   const [selSaveState, setSelSaveState] = useState<{ word: string; status: "saving" | "saved" | "already" } | null>(null);
   // Rick's Sep 24 feature: Diane's 94 teacher-approved words carry
@@ -17320,8 +17430,29 @@ export default function App() {
     steps?: Array<{ code: string; codeLabel: string; target: string; prompt: string }>;
     level?: string;
     syllables?: string;
+    /** How the word sounds, stress in capitals: KON-suh-kwuhns (G2). */
+    respelling?: string;
   } | null>(null);
   const [selPhonicsStep, setSelPhonicsStep] = useState<number>(0);
+  // A meaning belongs to the page it was asked on.
+  useEffect(() => { setSelDefinition(null); }, [nanaPage]);
+  // Where the phonics card sits: over the book, on the half away from the
+  // word it explains, so it covers neither that word nor the page arrows
+  // below the book (Rick's Build 39 D1 screenshot).
+  const [phonicsCardPos, setPhonicsCardPos] = useState<{ left: number; width: number; top?: number; bottom?: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!selPhonicsCard && !selDefinition) { setPhonicsCardPos(null); return; }
+    const area = document.querySelector<HTMLElement>(".nm-book-area");
+    if (!area) { setPhonicsCardPos(null); return; }
+    const a = area.getBoundingClientRect();
+    const wid = wordSelection?.wid;
+    const el = wid ? area.querySelector<HTMLElement>(`[data-wid="${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(wid) : wid}"]`) : null;
+    const w = el?.getBoundingClientRect();
+    const low = !!w && (w.top + w.bottom) / 2 > a.top + a.height / 2;
+    const width = Math.min(560, a.width - 24);
+    const left = a.left + a.width / 2;
+    setPhonicsCardPos(low ? { left, width, top: a.top + 12 } : { left, width, bottom: window.innerHeight - a.bottom + 12 });
+  }, [selPhonicsCard, selDefinition?.word, wordSelection?.wid]);
   // Rick's Build 30 review #2: Perry can tap Ask/Pick-a-Book/etc pills
   // that ask Nana to do something. Nana sees a floating banner and
   // taps Accept to route the request.
@@ -17382,7 +17513,19 @@ export default function App() {
     void fetchDict(word);
   }, [fetchDict, connectionId]);
 
+  const handleSelectionDefine = useCallback(async (word: string, sentence: string) => {
+    setSelPhonicsCard(null);
+    setSelDefinition({ word, status: "loading" });
+    try {
+      const d = await api.phonics.define({ word, sentence, bookTitle: currentBook?.title });
+      setSelDefinition(cur => (cur && cur.word === word ? { word, status: "done", definition: d.definition, partOfSpeech: d.partOfSpeech, respelling: d.respelling } : cur));
+    } catch {
+      setSelDefinition(cur => (cur && cur.word === word ? { word, status: "err" } : cur));
+    }
+  }, [currentBook?.title]);
+
   const handleSelectionPhonics = useCallback(async (word: string) => {
+    setSelDefinition(null);
     const cached = selPhoCacheRef.current.get(word.toLowerCase());
     if (cached) {
       setSelPhonicsCard({ word, ...cached });
@@ -17409,6 +17552,7 @@ export default function App() {
         steps: data.steps,
         level: data.level,
         syllables: data.syllables,
+        respelling: data.respelling,
       };
       selPhoCacheRef.current.set(word.toLowerCase(), payload);
       setSelPhonicsCard({ word, ...payload });
@@ -18025,6 +18169,47 @@ export default function App() {
     }
     lastPageChangeRef.current = 0;
     changePage(target.page, { off: target.off, skipChapterEndDetection: true });
+  };
+
+  /** The page slider in Chapters & Pages (Rick's Build 39 G3): page `n` as
+   *  the reader counts them (spreads in two-page view, single pages in
+   *  one-page view). Pages not laid out yet are reached in proportion. */
+  const handleJumpToDisplayPage = (n: number) => {
+    const plan = effectivePagePlanRef.current ?? identityPlan(selectedBookId, currentBook.pages.length, pageMode);
+    const pages = currentBook.pages;
+    const K = plan.starts.length;
+    const stepsSpreads = pageMode === "double" || isFullPagePictureBook(pages);
+    let k = -1;
+    let side: "L" | "R" = "L";
+    if (stepsSpreads) {
+      if (n - 1 < K) k = Math.max(0, n - 1);
+    } else {
+      const counts = sideCountsFor(pages, plan);
+      let before = 0;
+      for (let i = 0; i < K; i++) {
+        if (n <= before + counts[i]) { k = i; side = n - before === 2 ? "R" : "L"; break; }
+        before += counts[i];
+      }
+    }
+    if (k < 0) {
+      const pos = readingPosition(currentBook, plan, nanaPageRef.current, nanaOffRef.current, pageSideRef.current, pageMode);
+      handleJumpToPage(Math.max(1, Math.round((n / Math.max(1, pos.pageTotal)) * pages.length)));
+      return;
+    }
+    const target = spreadStart(plan, k);
+    if (k === spreadIndexOf(plan, nanaPageRef.current, nanaOffRef.current)) {
+      if (pageSideRef.current !== side) {
+        setPageSide(side);
+        if (connectionId) api.sessions.publishEvent(connectionId, "page_change", { page: target.page, off: target.off, side }).catch(() => {});
+      }
+      return;
+    }
+    lastPageChangeRef.current = 0;
+    changePage(target.page, { off: target.off, skipChapterEndDetection: true });
+    if (side === "R") {
+      setPageSide("R");
+      if (connectionId) api.sessions.publishEvent(connectionId, "page_change", { page: target.page, off: target.off, side: "R" }).catch(() => {});
+    }
   };
 
   /** Nana taps "Next Chapter" on the chapter-end card. Dismisses the
@@ -19500,7 +19685,10 @@ export default function App() {
           the card shows one step at a time with Prev/Next controls
           and a step-count chip. Single-step cards render unchanged. */}
       {selPhonicsCard && deviceView !== "perry" && (() => {
-        const isDiane = selPhonicsCard.source === "diane" && Array.isArray(selPhonicsCard.steps) && selPhonicsCard.steps.length > 0;
+        // Steps for any answer that has them (Diane's list, and the AI
+        // since Build 39 F4); the green chip only for teacher-checked ones.
+        const isDiane = Array.isArray(selPhonicsCard.steps) && selPhonicsCard.steps.length > 0;
+        const teacherApproved = selPhonicsCard.source === "diane" || selPhonicsCard.source === "approved";
         const steps = selPhonicsCard.steps ?? [];
         const stepIdx = Math.min(selPhonicsStep, Math.max(0, steps.length - 1));
         const currentStep = isDiane ? steps[stepIdx] : null;
@@ -19514,11 +19702,14 @@ export default function App() {
         <div
           role="dialog"
           aria-live="polite"
+          data-testid="phonics-card"
           style={{
             position: "fixed",
-            bottom: 24, left: "50%", transform: "translateX(-50%)",
+            ...(phonicsCardPos
+              ? { left: phonicsCardPos.left, width: phonicsCardPos.width, ...(phonicsCardPos.top !== undefined ? { top: phonicsCardPos.top } : { bottom: phonicsCardPos.bottom }) }
+              : { bottom: 24, left: "50%", width: "min(560px, calc(100vw - 32px))" }),
+            transform: "translateX(-50%)",
             zIndex: 120,
-            width: "min(560px, calc(100vw - 32px))",
             background: "linear-gradient(180deg, #F7F0E3 0%, #f2e4c4 100%)",
             color: "#2D1A08",
             border: "2px solid #C9922A",
@@ -19539,6 +19730,13 @@ export default function App() {
               <span style={{ color: "#5C3A1E", fontFamily: "Playfair Display, serif", fontSize: 22, fontWeight: 700 }}>
                 {selPhonicsCard.syllables && isDiane ? selPhonicsCard.syllables : selPhonicsCard.word}
               </span>
+              {selPhonicsCard.respelling && (
+                <span data-testid="phonics-respelling" title="How it sounds: the loud part is in capitals" style={{
+                  color: "#5C3A1E", fontFamily: "DM Sans, sans-serif", fontSize: 17, fontWeight: 700,
+                  letterSpacing: "0.04em", padding: "2px 10px", borderRadius: 8,
+                  background: "rgba(92,58,30,0.08)", border: "1px solid rgba(92,58,30,0.18)",
+                }}>says {selPhonicsCard.respelling}</span>
+              )}
               {isDiane && totalSteps > 1 && (
                 <span style={{
                   background: "rgba(92,58,30,0.14)",
@@ -19548,7 +19746,7 @@ export default function App() {
                   letterSpacing: "0.10em",
                 }}>Step {stepIdx + 1} of {totalSteps}</span>
               )}
-              {isDiane && (
+              {teacherApproved && (
                 <span style={{
                   background: "rgba(134,239,172,0.28)",
                   color: "#166534",
@@ -19657,6 +19855,73 @@ export default function App() {
         </div>
         );
       })()}
+      {/* Definition card (Rick's Build 39 G1): what the word means in its
+          sentence, said simply, inside NeverMiss. Nana's iPad only, in the
+          same spot as the phonics card. */}
+      {selDefinition && deviceView !== "perry" && (
+        <div
+          role="dialog"
+          aria-live="polite"
+          aria-label={`Meaning of ${selDefinition.word}`}
+          data-testid="definition-card"
+          style={{
+            position: "fixed",
+            ...(phonicsCardPos
+              ? { left: phonicsCardPos.left, width: phonicsCardPos.width, ...(phonicsCardPos.top !== undefined ? { top: phonicsCardPos.top } : { bottom: phonicsCardPos.bottom }) }
+              : { bottom: 24, left: "50%", width: "min(560px, calc(100vw - 32px))" }),
+            transform: "translateX(-50%)",
+            zIndex: 120,
+            background: "linear-gradient(180deg, #F7F0E3 0%, #f2e4c4 100%)",
+            color: "#2D1A08",
+            border: "2px solid #C9922A",
+            borderRadius: 16,
+            padding: "16px 20px 18px",
+            boxShadow: "0 20px 44px rgba(0,0,0,0.55)",
+            animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{
+                background: "#C9922A", color: "#F7F0E3",
+                padding: "3px 10px", borderRadius: 999,
+                fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800,
+                letterSpacing: "0.14em", textTransform: "uppercase",
+              }}>Meaning</span>
+              <span style={{ color: "#5C3A1E", fontFamily: "Playfair Display, serif", fontSize: 22, fontWeight: 700 }}>{selDefinition.word}</span>
+              {selDefinition.respelling && (
+                <span style={{
+                  color: "#5C3A1E", fontFamily: "DM Sans, sans-serif", fontSize: 17, fontWeight: 700,
+                  letterSpacing: "0.04em", padding: "2px 10px", borderRadius: 8,
+                  background: "rgba(92,58,30,0.08)", border: "1px solid rgba(92,58,30,0.18)",
+                }}>says {selDefinition.respelling}</span>
+              )}
+              {selDefinition.partOfSpeech && selDefinition.partOfSpeech !== "other" && (
+                <span style={{ color: "#5C3A1E", fontFamily: "Merriweather, serif", fontSize: 14, fontStyle: "italic", opacity: 0.8 }}>{selDefinition.partOfSpeech}</span>
+              )}
+            </div>
+            <button
+              onClick={() => setSelDefinition(null)}
+              aria-label="Close meaning card"
+              style={{
+                width: 30, height: 30, borderRadius: 999, flexShrink: 0,
+                background: "rgba(92,58,30,0.10)", color: "#5C3A1E",
+                border: "1px solid rgba(92,58,30,0.30)",
+                cursor: "pointer", padding: 0,
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                fontSize: 15, fontWeight: 700,
+              }}
+            >×</button>
+          </div>
+          <div data-testid="definition-text" style={{ fontFamily: "Merriweather, serif", fontSize: 17, lineHeight: 1.55, color: "#2D1A08" }}>
+            {selDefinition.status === "loading"
+              ? "Looking it up…"
+              : selDefinition.status === "err"
+                ? "Couldn't look that word up just now. Try again in a moment."
+                : selDefinition.definition || "We couldn't find a meaning for this word."}
+          </div>
+        </div>
+      )}
       {/* Perry-only toggle-flip toast — see Rick's Build 28 #7. */}
       {childPromptsToast && (
         <div
@@ -19999,7 +20264,7 @@ export default function App() {
           openWith={openWith}
           onOpenWithChange={setOpenWith}
           onRenameNana={handleRenameNana}
-          dashboardLoading={dashboardLoading}
+          dashboardLoading={dashboardLoading || (nanaOnboardingStep === 3 && !!connectionId && childrenLoadedFor !== connectionId)}
           dashboardPerryName={dashboardPerryName}
           dashboardProgress={dashboardProgress}
           showChildIcebreakerPrompts={showChildIcebreakerPrompts}
@@ -20021,9 +20286,11 @@ export default function App() {
           onSelectWord={handleSelectWordNana}
           onSelectionPronounce={handleSelectionPronounce}
           onSelectionPhonics={handleSelectionPhonics}
+          onSelectionDefine={handleSelectionDefine}
           onSelectionSave={handleSelectionSave}
           selectionPronunciationState={selPronState}
           selectionPhonicsState={selPhoState}
+          selectionDefineState={selDefinition ? { word: selDefinition.word, status: selDefinition.status } : null}
           selectionSaveState={selSaveState}
           readingTheme={readingTheme}
           onThemeChange={handleThemeChange}
@@ -20056,6 +20323,7 @@ export default function App() {
           onRemoveChildPhoto={handleRemoveChildPhoto}
           onUpdateChild={handleUpdateChild}
           onJumpToPage={handleJumpToPage}
+          onJumpToPageNumber={handleJumpToDisplayPage}
           pointerMode={pointerMode}
           onPointerModeChange={setPointerMode}
           onNavBack={canNavBack ? handleNavBack : undefined}
@@ -20215,6 +20483,7 @@ export default function App() {
           onPerryAskNana={() => handlePerryRequest("wave")}
           selectionPronunciationState={selPronState}
           selectionPhonicsState={selPhoState}
+          selectionDefineState={selDefinition ? { word: selDefinition.word, status: selDefinition.status } : null}
           selectionSaveState={selSaveState}
           readingTheme={readingTheme}
           readingLayout={readingLayout}

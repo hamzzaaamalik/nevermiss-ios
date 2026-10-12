@@ -19,7 +19,11 @@ export function tokenizeHalf(text: string | undefined | null): WordTok[] {
   while ((m = re.exec(text)) !== null) {
     const newlines = out.length === 0 ? 0 : (m[1].match(/\n/g) ?? []).length;
     const brk: 1 | 2 | undefined = newlines >= 2 ? 2 : newlines === 1 ? 1 : undefined;
-    const parts = m[2].replace(/([—–])(?=\S)/g, "$1\u0000").split("\u0000").filter(Boolean);
+    // A dash, or (in a very long "word" such as a web address) a slash,
+    // may end a line: "standardebooks.org/ebooks/…" ran off the page.
+    let marked = m[2].replace(/([—–])(?=\S)/g, "$1\u0000");
+    if (m[2].length > 24) marked = marked.replace(/(\/+)(?=[^/\s\u0000])/g, "$1\u0000");
+    const parts = marked.split("\u0000").filter(Boolean);
     parts.forEach((t, i) => out.push(i === 0 && brk ? { text: t, glue: i < parts.length - 1, brk } : { text: t, glue: i < parts.length - 1 }));
   }
   if (cache.size > 4000) cache.clear();

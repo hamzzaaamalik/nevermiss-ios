@@ -178,8 +178,10 @@ export const api = {
       ),
   },
   children: {
+    /** `existing` when the name and PIN matched a grandchild already set
+     *  up: the server signs that child in instead of adding a new one. */
     create: (body: { connectionId: string; name: string; birthday: string | null; pin: string; consent?: boolean }) =>
-      req<Child>("POST", "/children", body),
+      req<Child & { existing?: boolean }>("POST", "/children", body),
     /** Nana-only edits (signed-in account that owns the connection). */
     update: (childId: string, body: { name?: string; pin?: string }) =>
       req<{ child: Child }>("PATCH", `/children/${childId}`, body),
@@ -414,6 +416,10 @@ export const api = {
    *  caches every response in the phonics_cache table so each unique
    *  word costs at most one OpenAI call ever. */
   phonics: {
+    /** The word's meaning as used in its sentence, for a child (Rick's
+     *  Build 39 G1). `definition` is null when none was found. */
+    define: (body: { word: string; sentence: string; bookTitle?: string }) =>
+      req<{ word: string; definition: string | null; partOfSpeech: string | null; source: string; respelling?: string }>("POST", "/ai/define", body),
     classify: (word: string) =>
       req<{
         rule: string;
@@ -421,10 +427,12 @@ export const api = {
         nanaCue: string;
         perryHint: string;
         source: string;
-        /** Diane-source only: sequential lesson steps. */
+        /** Sequential lesson steps: Diane's list, and AI answers (Build 39 F4). */
         steps?: Array<{ code: string; codeLabel: string; target: string; prompt: string }>;
         level?: string;
         syllables?: string;
+        /** Dictionary-style respelling, stress in capitals (G2). */
+        respelling?: string;
       }>(
         "POST", "/ai/phonics", { word },
       ),
