@@ -657,13 +657,24 @@ function PageSlider({ pageNum, pageTotal, onGo }: { pageNum: number; pageTotal: 
 }
 
 /** "End this call?" confirm (Master Plan §4): Cancel / End Call. */
-export function EndCallConfirm({ onCancel, onConfirm }: { onCancel: () => void; onConfirm: () => void }) {
+export function EndCallConfirm({
+  onCancel, onConfirm,
+  title = "End this call?",
+  body = "The video call ends on both iPads. Your place in the book is saved.",
+  confirmLabel = "End Call",
+  cancelLabel = "Cancel",
+  testId = "end-call-confirm",
+}: {
+  onCancel: () => void; onConfirm: () => void;
+  /** The same question for Home during a visit and for Sign Out. */
+  title?: string; body?: string; confirmLabel?: string; cancelLabel?: string; testId?: string;
+}) {
   return (
     <div
       role="dialog"
       aria-modal="true"
       aria-labelledby="end-call-title"
-      data-testid="end-call-confirm"
+      data-testid={testId}
       style={{
         position: "absolute", inset: 0, zIndex: 80,
         backgroundColor: "rgba(8,15,30,0.78)",
@@ -683,10 +694,10 @@ export function EndCallConfirm({ onCancel, onConfirm }: { onCancel: () => void; 
         animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
       }}>
         <div id="end-call-title" style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 28, fontWeight: 700 }}>
-          End this call?
+          {title}
         </div>
         <div style={{ color: "rgba(247,240,227,0.78)", fontFamily: FONT, fontSize: 17, lineHeight: 1.5, marginTop: 8, marginBottom: 22 }}>
-          The video call ends on both iPads. Your place in the book is saved.
+          {body}
         </div>
         <div style={{ display: "flex", gap: 12 }}>
           <button
@@ -698,7 +709,7 @@ export function EndCallConfirm({ onCancel, onConfirm }: { onCancel: () => void; 
               fontFamily: FONT, fontWeight: 800, fontSize: 18, cursor: "pointer", touchAction: "manipulation",
             }}
           >
-            Cancel
+            {cancelLabel}
           </button>
           <button
             type="button"
@@ -710,7 +721,7 @@ export function EndCallConfirm({ onCancel, onConfirm }: { onCancel: () => void; 
               boxShadow: "0 6px 22px rgba(239,68,68,0.35)",
             }}
           >
-            End Call
+            {confirmLabel}
           </button>
         </div>
       </div>

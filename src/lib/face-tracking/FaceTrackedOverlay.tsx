@@ -344,17 +344,18 @@ function TrackedCanvas({
   //   2) Otherwise fall back to the legacy CSS overlay (covers floater
   //      IDs + the small set of legacy head IDs that pre-date the
   //      sticker catalog).
-  if (initFailed && sticker) {
-    return <StaticStickerFallback sticker={sticker} />;
-  }
-  if (initFailed) {
-    return <FilterOverlay filter={legacyFilterId} />;
-  }
+  // The canvas stays mounted while the static sticker shows: the drawing
+  // loop holds on to this canvas, so swapping it out left a slow first
+  // load with an invisible sticker until another one was picked (Rick's
+  // Build 40 review: Silly Faces' first start).
+  const fallback = initFailed ? (sticker ? <StaticStickerFallback sticker={sticker} /> : <FilterOverlay filter={legacyFilterId} />) : null;
 
   return (
+    <>
+    {fallback}
     <div
       ref={wrapperRef}
-      style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 5 }}
+      style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 5, visibility: initFailed ? "hidden" : undefined }}
     >
       <canvas
         ref={canvasRef}
@@ -375,5 +376,6 @@ function TrackedCanvas({
         }}
       />
     </div>
+    </>
   );
 }

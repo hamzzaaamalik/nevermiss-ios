@@ -163,8 +163,15 @@ export async function pronounce(word: string): Promise<"clip" | "device" | "none
   return "device";
 }
 
-/** Warm the cache for a word the user is likely to hear next. */
+/** Warm the cache for a word the user is likely to hear next. The first
+ *  time, also load the iPad's own voices, so the fallback voice can start
+ *  at once if the natural clip is slow (Rick's Build 40 review). */
+let voicesWarmed = false;
 export function preloadPronunciation(word: string): void {
   const w = cleanWord(word);
   if (w) void loadClip(w);
+  if (!voicesWarmed && typeof window !== "undefined" && "speechSynthesis" in window) {
+    voicesWarmed = true;
+    try { window.speechSynthesis.getVoices(); } catch {}
+  }
 }

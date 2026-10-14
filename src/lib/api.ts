@@ -166,7 +166,7 @@ export const api = {
     invite: () => req<{ connection: Connection; inviteToken: string }>("POST", "/connections/invite"),
     lookup: (token: string) =>
       req<{ valid: boolean; connectionId: string; nanaName: string; needsPin: boolean }>("GET", `/connections/lookup/${token}`),
-    list: () => req<{ connections: Array<{ connection: Connection; nana: SafeUser | null }> }>("GET", "/connections"),
+    list: () => req<{ connections: Array<{ connection: Connection; nana: SafeUser | null; childCount?: number }> }>("GET", "/connections"),
     activate: (token: string) => req<{ connection: Connection }>("POST", `/connections/activate/${token}`),
     /** `perryOnline` is real presence: a child's iPad has the session
      *  stream open right now. `perryChildId` is who is logged in there. */
@@ -176,12 +176,19 @@ export const api = {
       req<{ nextSession: { startsAt: string; childId: string | null } | null }>(
         "GET", `/connections/${id}/next-session${childId ? `?childId=${encodeURIComponent(childId)}` : ""}`,
       ),
+    /** Settings > Family > "Make a new code": the old code stops working
+     *  for new iPads; iPads already set up keep signing in. */
+    newInviteCode: (id: string) =>
+      req<{ connection: Connection; inviteToken: string }>("POST", `/connections/${id}/invite-code`),
   },
   children: {
     /** `existing` when the name and PIN matched a grandchild already set
      *  up: the server signs that child in instead of adding a new one. */
-    create: (body: { connectionId: string; name: string; birthday: string | null; pin: string; consent?: boolean }) =>
+    create: (body: { connectionId: string; name: string; birthday: string | null; pin: string; consent?: boolean; inviteCode?: string }) =>
       req<Child & { existing?: boolean }>("POST", "/children", body),
+    /** Nana removes a grandchild (and their bookmarks, saved words and log). */
+    remove: (childId: string) =>
+      req<{ removed: string }>("DELETE", `/children/${childId}`),
     /** Nana-only edits (signed-in account that owns the connection). */
     update: (childId: string, body: { name?: string; pin?: string }) =>
       req<{ child: Child }>("PATCH", `/children/${childId}`, body),
@@ -190,8 +197,10 @@ export const api = {
     removePhoto: (childId: string) =>
       req<{ child: Child }>("DELETE", `/children/${childId}/photo`),
     list: (connectionId: string) => req<Child[]>("GET", `/children/${connectionId}`),
-    pinLogin: (connectionId: string, pin: string) =>
-      req<{ child: Child; nanaName: string; connectionId: string }>("POST", "/children/pin-login", { connectionId, pin }),
+    /** With `childId` (the picture the child tapped) the PIN is checked
+     *  for that child only. */
+    pinLogin: (connectionId: string, pin: string, childId?: string | null) =>
+      req<{ child: Child; nanaName: string; connectionId: string }>("POST", "/children/pin-login", { connectionId, pin, ...(childId ? { childId } : {}) }),
   },
   sessions: {
     publishEvent: (connectionId: string, type: string, payload: unknown) =>

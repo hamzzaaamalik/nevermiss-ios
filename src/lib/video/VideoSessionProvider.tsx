@@ -241,6 +241,13 @@ export function VideoSessionProvider({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, createAttempt]);
 
+  // Whether this iPad's call is switched on, readable from outside (the
+  // two-iPad tests check that Home and the waiting screen keep it off).
+  useEffect(() => {
+    if (!role) return;
+    document.documentElement.setAttribute(`data-nm-video-${role}`, enabled ? "on" : "off");
+  }, [enabled, role]);
+
   const retryCreate = useCallback(() => {
     setHelpDismissed(false);
     // An unsupported or insecure page won't fix itself in place.

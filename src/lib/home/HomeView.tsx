@@ -1,6 +1,7 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import type { Child } from "../api";
 import { compressPhoto, pickPhotoFile } from "./photo";
+import { PinPad } from "../pin/PinPad";
 
 const NAVY = "#1B2B4B";
 const AMBER = "#C9922A";
@@ -75,8 +76,11 @@ export function HomeView({
   onAddChild,
   onSetPhoto,
   loading,
+  loadError,
+  onRetry,
   onOpenLibrary,
-  familyCode,
+  onOpenSettings,
+  accountLabel,
 }: {
   nanaName: string;
   children: Child[];
@@ -94,10 +98,17 @@ export function HomeView({
   onAddChild: () => void;
   onSetPhoto: (childId: string, dataUrl: string) => Promise<void>;
   loading?: boolean;
+  /** The grandchildren couldn't be loaded: say so and offer Try again,
+   *  instead of "Add your first grandchild" (Rick's Build 40 review). */
+  loadError?: boolean;
+  onRetry?: () => void;
   /** Before the first grandchild (Rick's Build 39 E3): a way into the
-   *  Library, and the code the child's iPad signs up with. */
+   *  Library. The family code lives in Settings > Family, not on Home
+   *  (Rick's Build 40 review: not on a public screen). */
   onOpenLibrary?: () => void;
-  familyCode?: string;
+  onOpenSettings?: () => void;
+  /** Who is signed in, shown on the empty Home so a wrong account is obvious. */
+  accountLabel?: string;
 }) {
   const [photoBusy, setPhotoBusy] = useState<string | null>(null);
   const [photoError, setPhotoError] = useState("");
@@ -107,8 +118,10 @@ export function HomeView({
     return () => window.clearTimeout(t);
   }, [photoError]);
 
-  const active = children.find(c => c.id === activeChildId) ?? children[0] ?? null;
   const n = children.length;
+  // With two or more grandchildren nobody is picked until Nana taps one.
+  const active = children.find(c => c.id === activeChildId) ?? (n === 1 ? children[0] : null);
+  const onKidsIpad = perryOnline && perryHereChildId ? children.find(c => c.id === perryHereChildId) ?? null : null;
   const size = n <= 1 ? 230 : n === 2 ? 190 : n === 3 ? 160 : 132;
   const name = active?.name ?? "your grandchild";
   const here = perryOnline && (!perryHereChildId || perryHereChildId === active?.id);
@@ -156,6 +169,12 @@ export function HomeView({
 
       {loading && children.length === 0 ? (
         <div style={{ color: "rgba(247,240,227,0.6)", fontFamily: FONT, fontSize: 18, marginTop: 40 }}>Loading…</div>
+      ) : loadError && children.length === 0 ? (
+        <div data-testid="home-load-error" style={{ marginTop: 36, display: "flex", flexDirection: "column", alignItems: "center", gap: 16, maxWidth: 520, textAlign: "center" }}>
+          <div style={{ color: CREAM, fontFamily: SERIF, fontSize: 28, fontWeight: 700 }}>Couldn't load your grandchildren</div>
+          <div style={{ color: "rgba(247,240,227,0.75)", fontFamily: FONT, fontSize: 17, lineHeight: 1.5 }}>Check that this iPad is online, then try again.</div>
+          {onRetry && <button type="button" data-testid="home-retry" onClick={onRetry} className="nm-home-cta" style={ctaStyle(true)}>Try again</button>}
+        </div>
       ) : children.length === 0 ? (
         <div style={{ marginTop: 36, display: "flex", flexDirection: "column", alignItems: "center", gap: 16 }}>
           <div style={{ color: CREAM, fontFamily: SERIF, fontSize: 30, fontWeight: 700, textAlign: "center" }}>Add your first grandchild</div>
@@ -170,23 +189,39 @@ export function HomeView({
               📚 Browse the Library
             </button>
           )}
-          {familyCode && (
-            <div data-testid="home-family-code" style={{
-              marginTop: 18, maxWidth: 460, padding: "16px 20px", borderRadius: 18,
-              background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.12)",
-              textAlign: "center", display: "flex", flexDirection: "column", gap: 8,
-            }}>
-              <div style={{ color: "rgba(247,240,227,0.8)", fontFamily: FONT, fontSize: 16, lineHeight: 1.45 }}>
-                On your grandchild's iPad, open NeverMiss, tap <strong>I'm a Grandchild</strong> and enter this family code:
-              </div>
-              <div style={{ color: AMBER, fontFamily: FONT, fontSize: 30, fontWeight: 900, letterSpacing: "0.22em" }}>{familyCode}</div>
+          <div data-testid="home-connect-help" style={{
+            marginTop: 18, maxWidth: 480, padding: "16px 20px", borderRadius: 18,
+            background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.12)",
+            textAlign: "center", display: "flex", flexDirection: "column", gap: 10, alignItems: "center",
+          }}>
+            <div style={{ color: "rgba(247,240,227,0.82)", fontFamily: FONT, fontSize: 16, lineHeight: 1.5 }}>
+              To connect your grandchild's iPad, open NeverMiss there, tap <strong>I'm a Grandchild</strong> and enter your family code. You'll find it in <strong>Menu › Settings › Family</strong>.
+            </div>
+            {onOpenSettings && (
+              <button type="button" data-testid="home-open-family" onClick={onOpenSettings} style={{
+                minHeight: 48, padding: "10px 20px", borderRadius: 999,
+                background: "transparent", border: "1.5px solid rgba(201,146,42,0.55)",
+                color: CREAM, fontFamily: FONT, fontSize: 16, fontWeight: 700, cursor: "pointer", touchAction: "manipulation",
+              }}>
+                Show my family code
+              </button>
+            )}
+          </div>
+          {accountLabel && (
+            <div data-testid="home-account" style={{ color: "rgba(247,240,227,0.55)", fontFamily: FONT, fontSize: 14, lineHeight: 1.5, textAlign: "center", maxWidth: 480 }}>
+              Signed in as <strong style={{ color: "rgba(247,240,227,0.8)" }}>{accountLabel}</strong>. Not your family? Sign out from the Menu.
             </div>
           )}
         </div>
       ) : (
         <>
+          {!active && (
+            <div data-testid="home-who" style={{ marginTop: 18, color: CREAM, fontFamily: SERIF, fontSize: 30, fontWeight: 700, textAlign: "center" }}>
+              Who's reading today?
+            </div>
+          )}
           <div role="radiogroup" aria-label="Choose a grandchild" style={{
-            marginTop: 26,
+            marginTop: active ? 26 : 18,
             display: "flex", flexWrap: "wrap", justifyContent: "center",
             gap: n <= 2 ? 56 : 36, rowGap: 24,
             maxWidth: 980,
@@ -198,7 +233,7 @@ export function HomeView({
                 <div key={c.id} className="nm-home-kid" style={{
                   display: "flex", flexDirection: "column", alignItems: "center", gap: 10,
                   transform: selected && n > 1 ? "scale(1.04)" : "none",
-                  opacity: selected || n === 1 ? 1 : 0.78,
+                  opacity: selected || n === 1 || !active ? 1 : 0.78,
                   animation: `nm-home-in 0.45s ${0.06 * i}s ease-out both`,
                 }}>
                   <button
@@ -245,7 +280,18 @@ export function HomeView({
 
           {/* Status line: who is here, or the next saved visit */}
           <div data-testid="home-status" style={{ marginTop: 22, minHeight: 34, display: "flex", alignItems: "center", gap: 10, fontFamily: FONT, fontSize: 18, fontWeight: 700 }}>
-            {here ? (
+            {!active ? (
+              onKidsIpad ? (
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 10, color: "#86efac" }}>
+                  <span aria-hidden style={{ width: 12, height: 12, borderRadius: "50%", background: "#22c55e", animation: "nm-here-pulse 2s ease-in-out infinite" }} />
+                  {onKidsIpad.name} is on the kids' iPad
+                </span>
+              ) : next ? (
+                <span style={{ color: "rgba(247,240,227,0.85)" }}>📅 Next • {next}</span>
+              ) : (
+                <span style={{ color: "rgba(247,240,227,0.6)", fontWeight: 600 }}>Tap a grandchild to start</span>
+              )
+            ) : here ? (
               <span style={{ display: "inline-flex", alignItems: "center", gap: 10, color: "#86efac" }}>
                 <span aria-hidden style={{ width: 12, height: 12, borderRadius: "50%", background: "#22c55e", animation: "nm-here-pulse 2s ease-in-out infinite" }} />
                 {name} is here
@@ -259,7 +305,7 @@ export function HomeView({
             )}
           </div>
 
-          <button type="button" data-testid="home-primary" className="nm-home-cta" onClick={onPrimary} style={{ ...ctaStyle(true), marginTop: 18 }}>
+          {active && <button type="button" data-testid="home-primary" className="nm-home-cta" onClick={onPrimary} style={{ ...ctaStyle(true), marginTop: 18 }}>
             {visitActive && continueBook ? (
               <>Back to <i style={{ fontFamily: SERIF, fontWeight: 700 }}>{continueBook.title}</i> with {name}</>
             ) : continueBook ? (
@@ -267,7 +313,7 @@ export function HomeView({
             ) : (
               <>Start Reading with {name}</>
             )}
-          </button>
+          </button>}
 
           <button
             type="button"
@@ -357,15 +403,17 @@ export function AddChildModal({
   };
 
   return (
-    <div role="dialog" aria-modal="true" aria-labelledby="add-child-title" data-testid="add-child-modal"
+    <div role="dialog" aria-modal="true" aria-labelledby="add-child-title" data-testid="add-child-modal" className="nm-kb-lift"
       style={{ position: "absolute", inset: 0, zIndex: 90, backgroundColor: "rgba(8,15,30,0.8)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, animation: "phase-intro-fade 0.2s ease-out" }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div style={{ backgroundColor: "#162240", border: "1px solid rgba(201,146,42,0.35)", borderRadius: 22, padding: "24px 24px 20px", width: "100%", maxWidth: 460, maxHeight: "100%", overflowY: "auto", boxShadow: "0 18px 60px rgba(0,0,0,0.55)", animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)" }}>
+      <div style={{ backgroundColor: "#162240", border: "1px solid rgba(201,146,42,0.35)", borderRadius: 22, padding: "22px 24px 20px", width: "100%", maxWidth: 780, maxHeight: "100%", overflowY: "auto", boxShadow: "0 18px 60px rgba(0,0,0,0.55)", animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)" }}>
         <div id="add-child-title" style={{ color: CREAM, fontFamily: SERIF, fontSize: 28, fontWeight: 700, textAlign: "center" }}>Add a grandchild</div>
-        <div style={{ color: "rgba(247,240,227,0.7)", fontFamily: FONT, fontSize: 15, lineHeight: 1.5, textAlign: "center", margin: "6px 0 18px" }}>
-          They sign in on their iPad with a 4-digit PIN.
+        <div style={{ color: "rgba(247,240,227,0.7)", fontFamily: FONT, fontSize: 15, lineHeight: 1.5, textAlign: "center", margin: "6px 0 16px" }}>
+          They sign in on their iPad by tapping their picture and a 4-digit PIN.
         </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 28, alignItems: "flex-start", justifyContent: "center" }}>
+        <div style={{ flex: "1 1 320px", minWidth: 0 }}>
 
         <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 16 }}>
           <button type="button" onClick={() => void choosePhoto()} aria-label={photo ? "Change photo" : "Add a photo"} style={{ padding: 0, border: "none", background: "transparent", cursor: "pointer", borderRadius: "50%" }}>
@@ -382,12 +430,10 @@ export function AddChildModal({
         </div>
 
         <label style={fieldLabel} htmlFor="nm-add-child-name">Name</label>
-        <input id="nm-add-child-name" type="text" value={name} autoFocus onChange={(e) => setName(e.target.value)} placeholder="Cooper" maxLength={40} style={{ ...fieldInput, marginBottom: 14 }} />
-
-        <label style={fieldLabel} htmlFor="nm-add-child-pin">4-digit PIN</label>
-        <input id="nm-add-child-pin" type="text" inputMode="numeric" pattern="\d{4}" value={pin}
-          onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 4))}
-          placeholder="1234" style={{ ...fieldInput, fontSize: 22, letterSpacing: "0.4em", textAlign: "center", marginBottom: 14 }} />
+        <input id="nm-add-child-name" data-testid="add-child-name" type="text" value={name} onChange={(e) => setName(e.target.value)} placeholder="Cooper" maxLength={40}
+          enterKeyHint="done" autoCapitalize="words" autoCorrect="off"
+          onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+          style={{ ...fieldInput, marginBottom: 14 }} />
 
         <label style={{ display: "flex", alignItems: "flex-start", gap: 12, cursor: "pointer", padding: "12px 14px", borderRadius: 14, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.12)" }}>
           <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} data-testid="add-child-consent"
@@ -396,6 +442,12 @@ export function AddChildModal({
             I'm their parent or guardian, or I have their parent's permission to set this up.
           </span>
         </label>
+
+        </div>
+        <div style={{ flex: "0 0 auto", display: "flex", flexDirection: "column", alignItems: "center" }}>
+          <PinPad value={pin} onChange={setPin} keySize={56} label="Their 4-digit PIN" testId="add-child-pin" />
+        </div>
+        </div>
 
         {error && <div role="alert" style={{ color: "#fca5a5", fontFamily: FONT, fontSize: 14, marginTop: 10, textAlign: "center" }}>{error}</div>}
 
@@ -419,14 +471,18 @@ export function GrandchildrenCard({
   onRemovePhoto,
   onUpdate,
   onAddChild,
+  onRemove,
 }: {
   children: Child[];
   onSetPhoto: (childId: string, dataUrl: string) => Promise<void>;
   onRemovePhoto: (childId: string) => Promise<void>;
   onUpdate: (childId: string, body: { name?: string; pin?: string }) => Promise<void>;
   onAddChild: () => void;
+  /** Rick's Build 40 review: remove a (test or duplicate) grandchild. */
+  onRemove?: (childId: string) => Promise<void>;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<Child | null>(null);
   const [msg, setMsg] = useState<{ text: string; bad?: boolean } | null>(null);
   const [editing, setEditing] = useState<{ child: Child; field: "name" | "pin" } | null>(null);
   useEffect(() => {
@@ -466,11 +522,33 @@ export function GrandchildrenCard({
             )}
             <button type="button" style={smallBtn} onClick={() => setEditing({ child: c, field: "name" })}>Rename</button>
             <button type="button" style={smallBtn} onClick={() => setEditing({ child: c, field: "pin" })}>Change PIN</button>
+            {onRemove && (
+              <button type="button" data-testid={`remove-child-${c.name}`} style={{ ...smallBtn, color: "#fca5a5", borderColor: "rgba(248,113,113,0.45)" }} disabled={busy === c.id} onClick={() => setRemoving(c)}>Remove</button>
+            )}
           </div>
         </div>
       ))}
       <button type="button" onClick={onAddChild} style={{ ...smallBtn, alignSelf: "flex-start", color: AMBER, borderColor: "rgba(201,146,42,0.5)" }}>+ Add a grandchild</button>
       {msg && <div role="status" style={{ color: msg.bad ? "#fca5a5" : "#86efac", fontFamily: FONT, fontSize: 15 }}>{msg.text}</div>}
+      {removing && onRemove && (
+        <div role="dialog" aria-modal="true" data-testid="remove-child-confirm" style={{ position: "fixed", inset: 0, zIndex: 95, backgroundColor: "rgba(8,15,30,0.8)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+          onClick={(e) => { if (e.target === e.currentTarget) setRemoving(null); }}>
+          <div style={{ backgroundColor: "#162240", border: "1px solid rgba(248,113,113,0.45)", borderRadius: 22, padding: 24, width: "100%", maxWidth: 440, textAlign: "center" }}>
+            <div style={{ color: CREAM, fontFamily: SERIF, fontSize: 26, fontWeight: 700 }}>Remove {removing.name}?</div>
+            <div style={{ color: "rgba(247,240,227,0.78)", fontFamily: FONT, fontSize: 16, lineHeight: 1.5, margin: "10px 0 20px" }}>
+              {removing.name} will no longer appear on Home or on the kids' iPad. Their bookmarks, saved words and reading history are deleted too. This can't be undone.
+            </div>
+            <div style={{ display: "flex", gap: 12 }}>
+              <button type="button" onClick={() => setRemoving(null)} style={{ flex: 1, minHeight: 56, backgroundColor: "rgba(255,255,255,0.07)", color: CREAM, border: "1px solid rgba(255,255,255,0.18)", borderRadius: 999, fontFamily: FONT, fontWeight: 800, fontSize: 17, cursor: "pointer" }}>Keep</button>
+              <button type="button" data-testid="remove-child-ok" onClick={() => {
+                const c = removing;
+                setRemoving(null);
+                void run(c.id, () => onRemove(c.id), `${c.name} was removed.`);
+              }} style={{ flex: 1, minHeight: 56, backgroundColor: "#ef4444", color: "white", border: "none", borderRadius: 999, fontFamily: FONT, fontWeight: 800, fontSize: 17, cursor: "pointer" }}>Remove {removing.name}</button>
+            </div>
+          </div>
+        </div>
+      )}
       {editing && (
         <ChildEditModal
           child={editing.child}
@@ -501,18 +579,20 @@ function ChildEditModal({ child, field, onClose, onSave }: { child: Child; field
     finally { setSaving(false); }
   };
   return (
-    <div role="dialog" aria-modal="true" style={{ position: "fixed", inset: 0, zIndex: 95, backgroundColor: "rgba(8,15,30,0.8)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+    <div role="dialog" aria-modal="true" className="nm-kb-lift" style={{ position: "fixed", inset: 0, zIndex: 95, backgroundColor: "rgba(8,15,30,0.8)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div style={{ backgroundColor: "#162240", border: "1px solid rgba(201,146,42,0.35)", borderRadius: 22, padding: 24, width: "100%", maxWidth: 420 }}>
+      <div style={{ backgroundColor: "#162240", border: "1px solid rgba(201,146,42,0.35)", borderRadius: 22, padding: 24, width: "100%", maxWidth: 420, maxHeight: "100%", overflowY: "auto" }}>
         <div style={{ color: CREAM, fontFamily: SERIF, fontSize: 24, fontWeight: 700, marginBottom: 14, textAlign: "center" }}>
           {field === "name" ? `Rename ${child.name}` : `New PIN for ${child.name}`}
         </div>
         {field === "name" ? (
-          <input type="text" value={value} autoFocus maxLength={40} onChange={(e) => setValue(e.target.value)} style={fieldInput} />
+          <input type="text" value={value} autoFocus maxLength={40} onChange={(e) => setValue(e.target.value)} style={fieldInput}
+            enterKeyHint="done" autoCapitalize="words" autoCorrect="off"
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void save(); } }} />
         ) : (
-          <input type="text" inputMode="numeric" value={value} autoFocus placeholder="1234"
-            onChange={(e) => setValue(e.target.value.replace(/\D/g, "").slice(0, 4))}
-            style={{ ...fieldInput, fontSize: 24, letterSpacing: "0.4em", textAlign: "center" }} />
+          <div style={{ display: "flex", justifyContent: "center" }}>
+            <PinPad value={value} onChange={setValue} keySize={60} testId="edit-pin-pad" />
+          </div>
         )}
         {error && <div role="alert" style={{ color: "#fca5a5", fontFamily: FONT, fontSize: 14, marginTop: 10, textAlign: "center" }}>{error}</div>}
         <div style={{ display: "flex", gap: 12, marginTop: 18 }}>

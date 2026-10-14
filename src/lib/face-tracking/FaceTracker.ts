@@ -25,6 +25,18 @@ const ASSET_BASE = `${(import.meta.env.BASE_URL || "/").replace(/\/?$/, "/")}med
 const MODEL_URL = `${ASSET_BASE}/face_landmarker.task`;
 const WASM_BASE = `${ASSET_BASE}/tasks-vision`;
 
+// Rick's Build 40 review: on Perry's iPad Silly Faces took 40 to 50
+// seconds the first time, then was quick. The GPU mode compiles its
+// graphics shaders on first use, which WebKit does very slowly on iPads
+// (the system keeps them afterwards). The CPU mode needs none and is fast
+// enough for stickers, so iPads and Safari use it; other browsers keep
+// the GPU. If the first choice fails, the other one is tried.
+function preferCpu(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent;
+  return /AppleWebKit/.test(ua) && !/Chrome|Chromium|CriOS|Edg|FxiOS|Android/.test(ua);
+}
+
 class FaceTracker {
   private landmarker: FaceLandmarker | null = null;
   private failed = false;
@@ -32,8 +44,34 @@ class FaceTracker {
   async init(): Promise<void> {
     if (this.landmarker || this.failed) return;
     const fileset = await FilesetResolver.forVisionTasks(WASM_BASE);
-    this.landmarker = await FaceLandmarker.createFromOptions(fileset, {
-      baseOptions: { modelAssetPath: MODEL_URL, delegate: "GPU" },
+    const order: Array<"CPU" | "GPU"> = preferCpu() ? ["CPU", "GPU"] : ["GPU", "CPU"];
+    let lastErr: unknown = null;
+    for (const delegate of order) {
+      try {
+        this.landmarker = await this.create(fileset, delegate);
+        break;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (!this.landmarker) throw lastErr ?? new Error("Face tracking could not start.");
+    // One detection on a blank frame warms the model up now, in the
+    // background, instead of when Silly Faces first opens.
+    try {
+      const warm = document.createElement("canvas");
+      warm.width = 64;
+      warm.height = 64;
+      const ctx = warm.getContext("2d");
+      if (ctx) { ctx.fillStyle = "#808080"; ctx.fillRect(0, 0, 64, 64); }
+      this.landmarker.detect(warm);
+    } catch {
+      // A warm-up that fails changes nothing: the first real frame warms it.
+    }
+  }
+
+  private create(fileset: Awaited<ReturnType<typeof FilesetResolver.forVisionTasks>>, delegate: "CPU" | "GPU"): Promise<FaceLandmarker> {
+    return FaceLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: MODEL_URL, delegate },
       // IMAGE mode (stateless per call) instead of VIDEO. Reason: the
       // singleton instance is shared by BOTH SillyFaces tiles. VIDEO mode
       // keeps temporal tracker state across calls — when alternating
@@ -125,6 +163,24 @@ class FaceTracker {
 
 let instance: FaceTracker | null = null;
 let initPromise: Promise<FaceTracker | null> | null = null;
+let loading = false;
+const loadingListeners = new Set<() => void>();
+const setLoading = (on: boolean) => {
+  if (loading === on) return;
+  loading = on;
+  for (const l of loadingListeners) l();
+};
+
+/** Face tracking is loading right now (Silly Faces says "Getting the silly
+ *  faces ready…"). False once loaded, and after a failed load, when the
+ *  stickers sit still instead. */
+export function isLoading(): boolean {
+  return loading;
+}
+export function subscribeLoading(cb: () => void): () => void {
+  loadingListeners.add(cb);
+  return () => { loadingListeners.delete(cb); };
+}
 
 /** The shared tracker once loaded (null if loading failed). A load in
  *  progress is shared, never restarted: callers that grow impatient show
@@ -133,9 +189,10 @@ let initPromise: Promise<FaceTracker | null> | null = null;
 export function getInstance(): Promise<FaceTracker | null> {
   if (initPromise) return initPromise;
   const tracker = new FaceTracker();
+  setLoading(true);
   initPromise = tracker.init().then(
-    () => { instance = tracker; return tracker; },
-    () => { tracker.markFailed(); initPromise = null; return null; },
+    () => { instance = tracker; setLoading(false); return tracker; },
+    () => { tracker.markFailed(); initPromise = null; setLoading(false); return null; },
   );
   return initPromise;
 }
@@ -158,6 +215,7 @@ export function dispose(): void {
     instance = null;
   }
   initPromise = null;
+  setLoading(false);
 }
 
 export type { FaceTracker };
