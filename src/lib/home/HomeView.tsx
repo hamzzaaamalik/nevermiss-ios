@@ -81,6 +81,7 @@ export function HomeView({
   onOpenLibrary,
   onOpenSettings,
   accountLabel,
+  familyCode,
 }: {
   nanaName: string;
   children: Child[];
@@ -109,6 +110,10 @@ export function HomeView({
   onOpenSettings?: () => void;
   /** Who is signed in, shown on the empty Home so a wrong account is obvious. */
   accountLabel?: string;
+  /** The family code a grandchild's iPad connects with, with Copy (Rick's
+   *  Build 41 review: easy to reach from Home). Home is only ever shown
+   *  to the signed-in grandparent. */
+  familyCode?: string;
 }) {
   const [photoBusy, setPhotoBusy] = useState<string | null>(null);
   const [photoError, setPhotoError] = useState("");
@@ -195,9 +200,9 @@ export function HomeView({
             textAlign: "center", display: "flex", flexDirection: "column", gap: 10, alignItems: "center",
           }}>
             <div style={{ color: "rgba(247,240,227,0.82)", fontFamily: FONT, fontSize: 16, lineHeight: 1.5 }}>
-              To connect your grandchild's iPad, open NeverMiss there, tap <strong>I'm a Grandchild</strong> and enter your family code. You'll find it in <strong>Menu › Settings › Family</strong>.
+              To connect your grandchild's iPad, open NeverMiss there, tap <strong>I'm a Grandchild</strong> and enter your family code{familyCode ? ":" : <>. You'll find it in <strong>Menu › Settings › Family</strong>.</>}
             </div>
-            {onOpenSettings && (
+            {familyCode ? <FamilyCodeLine code={familyCode} /> : onOpenSettings && (
               <button type="button" data-testid="home-open-family" onClick={onOpenSettings} style={{
                 minHeight: 48, padding: "10px 20px", borderRadius: 999,
                 background: "transparent", border: "1.5px solid rgba(201,146,42,0.55)",
@@ -328,10 +333,44 @@ export function HomeView({
             + Add a grandchild
           </button>
           {photoError && <div role="alert" style={{ color: "#fca5a5", fontFamily: FONT, fontSize: 15, marginTop: 6 }}>{photoError}</div>}
+          {familyCode && (
+            <div data-testid="home-family" style={{ marginTop: 18, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+              <span style={{ color: "rgba(247,240,227,0.55)", fontFamily: FONT, fontSize: 13, fontWeight: 600 }}>
+                Family code, for a grandchild's iPad
+              </span>
+              <FamilyCodeLine code={familyCode} small />
+            </div>
+          )}
         </>
       )}
 
       <div style={{ flex: "1 1 0", minHeight: 8 }} />
+    </div>
+  );
+}
+
+/** The family code with a Copy button. */
+function FamilyCodeLine({ code, small }: { code: string; small?: boolean }) {
+  const [copied, setCopied] = useState<"yes" | "no" | null>(null);
+  useEffect(() => {
+    if (!copied) return;
+    const t = window.setTimeout(() => setCopied(null), 2500);
+    return () => window.clearTimeout(t);
+  }, [copied]);
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(code); setCopied("yes"); }
+    catch { setCopied("no"); }
+  };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", justifyContent: "center" }}>
+      <span data-testid="home-family-code" style={{ color: AMBER, fontFamily: FONT, fontSize: small ? 24 : 30, fontWeight: 900, letterSpacing: "0.22em" }}>{code}</span>
+      <button type="button" data-testid="home-family-copy" onClick={() => void copy()} style={{
+        minHeight: 44, padding: "0 16px", borderRadius: 999,
+        background: "rgba(255,255,255,0.06)", border: "1px solid rgba(201,146,42,0.5)",
+        color: CREAM, fontFamily: FONT, fontSize: 15, fontWeight: 700, cursor: "pointer", touchAction: "manipulation",
+      }}>
+        {copied === "yes" ? "Copied ✓" : copied === "no" ? "Couldn't copy" : "📋 Copy"}
+      </button>
     </div>
   );
 }
@@ -509,7 +548,18 @@ export function GrandchildrenCard({
     color: CREAM, fontFamily: FONT, fontSize: 14, fontWeight: 700, cursor: "pointer", touchAction: "manipulation",
   };
 
+  const sharing = children.filter(c => c.pinShared);
   return (
+    <>
+    {sharing.length > 1 && (
+      <div data-testid="settings-pin-shared" role="note" style={{
+        marginBottom: 12, padding: "12px 16px", borderRadius: 14,
+        background: "rgba(201,146,42,0.12)", border: "1px solid rgba(201,146,42,0.45)",
+        color: CREAM, fontFamily: FONT, fontSize: 15, lineHeight: 1.5,
+      }}>
+        {sharing.map(c => c.name).join(" and ")} have the same PIN. Give each their own, so they can sign in by just typing it.
+      </div>
+    )}
     <div data-testid="settings-grandchildren" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 12 }}>
       {children.map(c => (
         <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 14px", borderRadius: 16, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", flexWrap: "wrap" }}>
@@ -562,6 +612,7 @@ export function GrandchildrenCard({
         />
       )}
     </div>
+    </>
   );
 }
 

@@ -182,11 +182,22 @@ const SHOW_PAGE_FOLIOS = false;
 // Master Plan v6.1: the beta ships reading + video + phonics only. These
 // features keep their code but stay out of the UI until Rick turns them
 // back on. Flip a flag to true to restore every entry point for it.
+/** How long the child's page turn takes (the lift at the spine). */
+const PAGE_TURN_MS = 400;
+
+/** Events the kids' iPad acts on while it's being handed to the next
+ *  reader mid-visit (the PIN pad is up and the call stays on). */
+const HANDOVER_EVENTS = new Set([
+  "active_child_change", "session_end", "session_reset", "session_complete",
+  "child_removed", "child_added", "child_updated", "presence", "nana_name",
+]);
+
 const FEATURES = {
   memoryVault: false,   // Memory Vault / recordings library
   familyJournal: false, // Family Journal + "Save a Memory" after a call
   requestBook: false,   // Request a Book (library search + request flow)
   recording: false,     // Rec button, consent overlay, REC badge
+  childQuestions: false, // "Let Perry ask questions" on the conversation screen (Rick's Build 41 review: hidden for now)
 } as const;
 type FamilyStoriesSubMode = "write" | "browse";
 
@@ -1244,6 +1255,11 @@ function mergeServerCatalog(serverBooks: unknown[]): void {
     if (pages.length > 1 && first?.rightIsTitle && !first.imageUrl
       && /^Imported from EPUB/.test(first.rightBody ?? "") && pages[1]?.imageUrl) {
       pages.shift();
+    } else if (first?.rightIsTitle && !first.imageUrl && /^Imported from EPUB/.test(first.rightBody ?? "")) {
+      // Text books: the title and author stay; the importer's old counts
+      // ("51 chapters · 1673 pages", never the iPad's) go (Rick's Build 41
+      // review). The admin's repair gives the book its own cover.
+      pages[0] = { ...first, rightBody: "" };
     }
     // A picture book is one story: its per-page "chapters" are ignored
     // (no chapter labels, no chapter list, no chapter breaks).
@@ -2744,10 +2760,20 @@ function GreetingView({
   onPerryAskNana,
   continueTitle = null,
   onPickDifferent,
+  switchTargets = [],
+  onSwitchTo,
+  waitingFor = null,
 }: {
   isNana: boolean;
   childName: string;
   nanaName: string;
+  /** Nana: the other grandchildren, to switch to without ending the visit
+   *  (Rick's Build 41 review). */
+  switchTargets?: Array<{ id: string; name: string }>;
+  onSwitchTo?: (childId: string) => void;
+  /** Nana, after a switch: who the kids' iPad is waiting for ("" = the
+   *  next reader); null when nobody is being waited for. */
+  waitingFor?: string | null;
   /** Nana-side primary action: "Pick a Book →". Routes to library (or
    *  directly to reading if a pre-selected book is set from the home
    *  dashboard). Perry never calls this — she follows via phase_change. */
@@ -2819,9 +2845,37 @@ function GreetingView({
           maxWidth: "calc(100% - 32px)",
           textAlign: "center",
         }}>
-          <span style={{ fontSize: 20 }}>💬</span>
-          <span>Take your time — say hi, get settled.</span>
+          <span style={{ fontSize: 20 }}>{waitingFor !== null ? "👥" : "💬"}</span>
+          <span data-testid={waitingFor !== null ? "greeting-waiting" : undefined}>
+            {waitingFor === null
+              ? "Take your time — say hi, get settled."
+              : waitingFor
+                ? `${waitingFor}'s turn. Waiting for ${waitingFor} to sign in on the kids' iPad.`
+                : "The kids' iPad is ready for the next reader to sign in."}
+          </span>
         </div>
+        {isNana && onSwitchTo && switchTargets.length > 0 && waitingFor === null && (
+          <div data-testid="greeting-switch" style={{ position: "absolute", right: 16, bottom: 16, zIndex: 5, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
+            {switchTargets.map(c => (
+              <button
+                key={c.id}
+                type="button"
+                data-testid={`greeting-switch-${c.name}`}
+                onClick={() => onSwitchTo(c.id)}
+                style={{
+                  minHeight: 48, padding: "0 18px", borderRadius: 999,
+                  background: "rgba(11,23,46,0.82)", border: "1.5px solid rgba(201,146,42,0.65)",
+                  color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 16, fontWeight: 800,
+                  cursor: "pointer", touchAction: "manipulation",
+                  boxShadow: "0 6px 18px rgba(0,0,0,0.4)",
+                  display: "inline-flex", alignItems: "center", gap: 8,
+                }}
+              >
+                <span aria-hidden>👥</span> Switch to {c.name}
+              </button>
+            ))}
+          </div>
+        )}
         </div>
       </div>
 
@@ -3062,7 +3116,7 @@ function IcebreakerView({
               spells that out, and Perry gets an "always on" pulse
               badge (see IcebreakerView Perry branch) so she can see
               the flip land regardless of the timing. */}
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+          {FEATURES.childQuestions && <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
             <button
               onClick={onToggleChildPrompts}
               style={{
@@ -3080,7 +3134,7 @@ function IcebreakerView({
             <span style={{ color: "rgba(247,240,227,0.42)", fontFamily: "DM Sans, sans-serif", fontSize: 10, textAlign: "center" }}>
               Shows an "Ask {nanaName || "Nana"}" prompt on {childName || "Perry"}'s screen
             </span>
-          </div>
+          </div>}
 
           {/* NEED 1 — prominent Home escape so Nana isn't forced to keep
               tapping Next Prompt or Pick Your Book to leave the icebreaker.
@@ -4020,106 +4074,62 @@ function BookSpread({
             );
           })()}
 
-          {/* Page turn on the child's iPad (Rick's Build 40 review: a
-              distracting movement, worst turning back). Two pages: the
-              turning page lifts to upright at the spine, then its back,
-              the new page, comes down on the other side, which keeps the
-              old page until it is covered; nothing swaps early. One page
-              or a picture page: the whole old page lifts off the new one,
-              which is already drawn underneath (Build 38 #4). */}
+          {/* Page turn on the child's iPad, as in Build 40 (Rick's Build 41
+              review: "natural and attractive"). The new pages are already
+              drawn underneath; the old page lifts at the spine (the right
+              page going forward, the left going back; one page or a picture
+              page lifts whole) and is gone by the time it stands upright.
+              It keeps speeding up until then: Build 40 slowed it almost to
+              a stop at the top before it faded, the small hesitation Rick
+              saw at the end of each turn. */}
           {!isNana && flipping && (() => {
             const back = flipDirection === "backward";
             const single = pageMode === "single";
-            const clampPage = (n: number) => Math.max(1, Math.min(n, bookPages.length));
-            const oldPage = clampPage(flipFromPage);
-            const newPage = clampPage(flipToPage);
+            const oldPage = Math.max(1, Math.min(flipFromPage, bookPages.length));
             const oldImage = bookPages[oldPage - 1]?.imageUrl;
-            const newImage = bookPages[newPage - 1]?.imageUrl;
             const oldSide: "L" | "R" = single ? flipFromSide : pageSide;
-            const pageBg = READING_THEMES[readingTheme].page;
-            const turnKey = `${oldPage}:${flipFromOff}>${newPage}:${flipToOff}`;
-            const spread = (page: number, off: number, side: "L" | "R") => (
-              <BookContent
-                page={page}
-                off={off}
-                bookPages={bookPages}
-                bookTitle={bookTitle}
-                fontScale={fontScale}
-                highlightWid={null}
-                theme={readingTheme}
-                pageMode={pageMode}
-                pageSide={side}
-                plan={pagePlan}
-                area={area}
-              />
-            );
-            if (single || oldImage || newImage) {
-              return (
-                <div key={turnKey} aria-hidden data-turn-leaf style={{ ...(oldImage ? { position: "absolute", inset: 0 } : stageStyle), pointerEvents: "none", zIndex: 20 }}>
-                  <div style={{
-                    position: "absolute", top: 0, left: 0, width: "100%", height: "100%",
-                    overflow: "hidden",
-                    transformOrigin: back ? "right center" : "left center",
-                    animation: `${back ? "nm-leaf-back" : "nm-leaf"} 0.42s cubic-bezier(0.45, 0, 0.55, 1) forwards`,
-                    willChange: "transform",
-                    backfaceVisibility: "hidden",
-                    backgroundColor: pageBg,
-                  }}>
-                    {oldImage ? (
-                      <img src={oldImage} alt="" draggable={false} style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
-                    ) : (
-                      <div style={{ position: "absolute", top: 0, height: "100%", display: "flex", width: "100%", left: 0 }}>
-                        {spread(oldPage, flipFromOff, oldSide)}
-                      </div>
-                    )}
-                    <div style={{
-                      position: "absolute", inset: 0, pointerEvents: "none",
-                      background: back
-                        ? "linear-gradient(to left, rgba(0,0,0,0.08) 0%, rgba(0,0,0,0) 22%)"
-                        : "linear-gradient(to right, rgba(0,0,0,0.08) 0%, rgba(0,0,0,0) 22%)",
-                    }} />
-                  </div>
-                </div>
-              );
-            }
-            // Two-page spread. `lift` is the half of the old spread that
-            // turns; `stay` is the other half, which shows the old page
-            // until the new one lands on it.
-            const lift: "L" | "R" = back ? "L" : "R";
-            const stay: "L" | "R" = back ? "R" : "L";
-            const half = (which: "L" | "R", content: ReactNode, extra: React.CSSProperties, testId: string) => (
-              <div data-turn-part={testId} style={{
-                position: "absolute", top: 0, height: "100%", width: "50%",
-                left: which === "L" ? 0 : "50%",
-                overflow: "hidden",
-                backgroundColor: pageBg,
-                backfaceVisibility: "hidden",
-                ...extra,
-              }}>
-                <div style={{ position: "absolute", top: 0, height: "100%", width: "200%", left: which === "L" ? 0 : "-100%", display: "flex" }}>
-                  {content}
-                </div>
-                <div style={{
-                  position: "absolute", inset: 0, pointerEvents: "none",
-                  background: which === "L"
-                    ? "linear-gradient(to left, rgba(0,0,0,0.08) 0%, rgba(0,0,0,0) 22%)"
-                    : "linear-gradient(to right, rgba(0,0,0,0.08) 0%, rgba(0,0,0,0) 22%)",
-                }} />
-              </div>
-            );
+            const fullWidth = single || !!oldImage;
             return (
-              <div key={turnKey} aria-hidden data-turn-leaf style={{ ...stageStyle, pointerEvents: "none", zIndex: 20 }}>
-                {half(stay, spread(oldPage, flipFromOff, oldSide), {}, "hold")}
-                {half(lift, spread(oldPage, flipFromOff, oldSide), {
-                  transformOrigin: lift === "R" ? "left center" : "right center",
-                  animation: `${lift === "R" ? "nm-turn-up-r" : "nm-turn-up-l"} 0.24s cubic-bezier(0.55, 0, 0.85, 0.4) forwards`,
-                  willChange: "transform",
-                }, "lift")}
-                {half(stay, spread(newPage, flipToOff, pageSide), {
-                  transformOrigin: stay === "L" ? "right center" : "left center",
-                  animation: `${stay === "L" ? "nm-turn-down-l" : "nm-turn-down-r"} 0.26s cubic-bezier(0.15, 0.6, 0.45, 1) 0.24s both`,
-                  willChange: "transform",
-                }, "land")}
+              <div key={`${oldPage}:${flipFromOff}>${flipToPage}:${flipToOff}`} aria-hidden data-turn-leaf style={{ ...(oldImage ? { position: "absolute", inset: 0 } : stageStyle), pointerEvents: "none", zIndex: 20 }}>
+                <div data-turn-page style={{
+                  position: "absolute", top: 0, height: "100%",
+                  left: fullWidth || back ? 0 : "50%",
+                  width: fullWidth ? "100%" : "50%",
+                  overflow: "hidden",
+                  transformOrigin: back ? "right center" : "left center",
+                  animation: `${back ? "nm-leaf-back" : "nm-leaf"} ${PAGE_TURN_MS}ms cubic-bezier(0.4, 0, 0.8, 0.5) forwards`,
+                  willChange: "transform, opacity",
+                  backfaceVisibility: "hidden",
+                  WebkitBackfaceVisibility: "hidden",
+                  backgroundColor: READING_THEMES[readingTheme].page,
+                }}>
+                  {oldImage ? (
+                    <img src={oldImage} alt="" draggable={false} style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }} />
+                  ) : (
+                    <div style={{ position: "absolute", top: 0, height: "100%", display: "flex", width: fullWidth ? "100%" : "200%", left: fullWidth || back ? 0 : "-100%" }}>
+                      <BookContent
+                        page={oldPage}
+                        off={flipFromOff}
+                        bookPages={bookPages}
+                        bookTitle={bookTitle}
+                        fontScale={fontScale}
+                        highlightWid={null}
+                        theme={readingTheme}
+                        pageMode={pageMode}
+                        pageSide={oldSide}
+                        plan={pagePlan}
+                        area={area}
+                      />
+                    </div>
+                  )}
+                  {/* A light fold shadow at the spine, nothing darker. */}
+                  <div style={{
+                    position: "absolute", inset: 0, pointerEvents: "none",
+                    background: back
+                      ? "linear-gradient(to left, rgba(0,0,0,0.08) 0%, rgba(0,0,0,0) 22%)"
+                      : "linear-gradient(to right, rgba(0,0,0,0.08) 0%, rgba(0,0,0,0) 22%)",
+                  }} />
+                </div>
               </div>
             );
           })()}
@@ -5023,6 +5033,7 @@ function OnboardingView({
    *  server-side across all children. */
   pinScreenChildren = [],
   pinScreenExpectedChild = null,
+  handoverCall = false,
 }: {
   isNana: boolean;
   step: number;
@@ -5061,6 +5072,8 @@ function OnboardingView({
    *  currently authenticated on this iPad, surface a "It's Cooper's
    *  turn!" banner so the parent knows which PIN to enter. */
   pinScreenExpectedChild?: Child | null;
+  /** Mid-visit handover: the call is still on, so Nana shows here. */
+  handoverCall?: boolean;
 }) {
   const [authMode, setAuthMode] = useState<"register" | "login">("register");
   const [dashSelectedBook, setDashSelectedBook] = useState<{ bookId: string; startPage: number; startOff?: number } | null>(null);
@@ -5825,13 +5838,14 @@ function OnboardingView({
     const kids = pinScreenChildren;
     const pickedId = pickedReaderId ?? pinScreenExpectedChild?.id ?? (kids.length === 1 ? kids[0].id : null);
     const pickedKid = kids.find(c => c.id === pickedId) ?? null;
-    // With brothers and sisters, the picture comes first. If the list
-    // couldn't load, the PIN alone still signs a child in.
+    // With brothers and sisters the picture comes first, but a PIN only
+    // one of them has signs that child in anyway (Rick's Build 41 review);
+    // a PIN they share asks for the picture.
     const needsPick = kids.length > 1 && !pickedKid;
     const padLabel = perryPinLoading
       ? "Checking…"
       : needsPick
-        ? "Tap your picture first"
+        ? "Tap your picture, or enter your PIN"
         : pickedKid ? `Hi ${pickedKid.name}! Enter your PIN.` : "Enter your 4-digit PIN.";
     return (
       <div data-testid="child-pin-screen" style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#0b172e", padding: "20px 16px", alignItems: "center", justifyContent: "center", position: "relative", overflowY: "auto" }}>
@@ -5858,8 +5872,13 @@ function OnboardingView({
         )}
         <div style={{ width: "100%", maxWidth: 980, display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "center", columnGap: 56, rowGap: 22 }}>
           <div style={{ flex: "1 1 360px", maxWidth: 460, minWidth: 0 }}>
+            {handoverCall && (
+              <div data-testid="handover-call" style={{ width: "100%", aspectRatio: "16 / 9", marginBottom: 14, borderRadius: 16, overflow: "hidden", boxShadow: "0 10px 30px rgba(0,0,0,0.45)", display: "flex" }}>
+                <FaceVideo person="nana" width="100%" height="100%" label={nanaDisplayName} showLabel borderRadius={16} objectFit="cover" objectPosition="center 35%" autoMirror={false} />
+              </div>
+            )}
             <div style={{ textAlign: "center", marginBottom: "18px" }}>
-              {kids.length <= 1 && <div style={{ fontSize: "40px", marginBottom: "8px" }}>🔐</div>}
+              {kids.length <= 1 && !handoverCall && <div style={{ fontSize: "40px", marginBottom: "8px" }}>🔐</div>}
               <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: "28px", fontWeight: 700 }}>
                 Reading with {nanaDisplayName}
               </div>
@@ -6005,7 +6024,7 @@ function OnboardingView({
               value={pinEntry}
               onChange={(v) => setPinEntry(v)}
               onComplete={(pin) => onPerryPinLogin?.(pin, kids.length > 1 ? pickedId : null)}
-              disabled={perryPinLoading || needsPick}
+              disabled={perryPinLoading}
               error={!!perryPinError}
               label={padLabel}
               testId="child-pin-pad"
@@ -8975,6 +8994,22 @@ const GOODBYE_HANDS = ["🖐️", "🖖", "🤟", "✌️", "☝️"];
  * they read, the next saved visit, and one big Home button. Returns to
  * Home on its own after a minute so an iPad left on the stand resets.
  */
+/** Under "Working out how to sound out…": after a few seconds, says a
+ *  new word takes a little longer the first time (Rick's Build 41
+ *  review: some new words took longer than expected). */
+function PhonicsWaitNote() {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const t = window.setTimeout(() => setSlow(true), 6000);
+    return () => window.clearTimeout(t);
+  }, []);
+  return (
+    <div data-testid="phonics-wait-note" style={{ fontSize: 13, color: "#5C3A1E", marginTop: 2 }}>
+      {slow ? "Still working. A new word takes a little longer the first time." : "A new word can take a few seconds."}
+    </div>
+  );
+}
+
 function VisitEndCard({ data, onHome, others = [], onVisitChild, autoHomeMs = 60_000 }: {
   data: VisitEndCardData;
   onHome: () => void;
@@ -11313,6 +11348,9 @@ function DeviceFrame({
   onRemoveChild,
   onNewFamilyCode,
   onSwitchReader,
+  onSwitchVisitTo,
+  awaitingReaderName = null,
+  handoverCall = false,
   homeLoadError = false,
   onHomeRetry,
   restoringSignIn = false,
@@ -11556,6 +11594,13 @@ function DeviceFrame({
   onNewFamilyCode?: () => Promise<string>;
   /** Child's Menu: back to the pictures and PIN for a sibling. */
   onSwitchReader?: () => void;
+  /** Nana, mid-visit: switch to this grandchild, keeping the call. */
+  onSwitchVisitTo?: (childId: string) => void;
+  /** Nana, after a switch: the child the kids' iPad is waiting for ("" =
+   *  the next reader, after a child's own Switch Reader); null = none. */
+  awaitingReaderName?: string | null;
+  /** Kids' iPad: handing over mid-visit; Nana stays on the PIN screen. */
+  handoverCall?: boolean;
   homeLoadError?: boolean;
   onHomeRetry?: () => void;
   /** A saved sign-in is being checked (shows "Opening NeverMiss…"). */
@@ -12030,6 +12075,10 @@ function DeviceFrame({
           autoCloseMs={isNana ? undefined : 7000}
           onBack={onNavBack}
           onEndCall={menuShowsEndCall ? () => setEndCallConfirmOpen(true) : undefined}
+          // Rick's Build 41 review: switch grandchild mid-visit, pinned
+          // beside End Visit (Sign Out stays under More).
+          switchTargets={isNana && inVisit && onSwitchVisitTo ? childrenList.filter(c => c.id !== activeChildId).map(c => ({ id: c.id, name: c.name })) : []}
+          onSwitchTo={isNana && inVisit ? onSwitchVisitTo : undefined}
         />
 
         {/* Phase intro card — shown to both Nana and Perry. Coaching-specific
@@ -12089,6 +12138,7 @@ function DeviceFrame({
             onSwitchUser={onSwitchDevice}
             pinScreenChildren={childrenList}
             pinScreenExpectedChild={pinScreenExpectedChild ?? null}
+            handoverCall={handoverCall}
           />
         ) : isHome && isNana ? (
           <HomeView
@@ -12110,6 +12160,7 @@ function DeviceFrame({
             accountLabel={accountLabel}
             loadError={homeLoadError}
             onRetry={onHomeRetry}
+            familyCode={inviteToken || undefined}
           />
         ) : isHome && !isNana ? (
           // Perry on home: she's not supposed to navigate Nana's dashboard.
@@ -12208,6 +12259,9 @@ function DeviceFrame({
             onPerryAskNana={!isNana ? onPerryAskNana : undefined}
             continueTitle={isNana ? greetingContinueTitle : null}
             onPickDifferent={isNana ? onGreetingPickDifferent : undefined}
+            switchTargets={isNana && onSwitchVisitTo ? childrenList.filter(c => c.id !== activeChildId).map(c => ({ id: c.id, name: c.name })) : []}
+            onSwitchTo={isNana ? onSwitchVisitTo : undefined}
+            waitingFor={isNana ? awaitingReaderName : null}
           />
         ) : isIcebreaker ? (
           <IcebreakerView
@@ -12525,6 +12579,22 @@ function DeviceFrame({
           );
         })()}
 
+        {/* After a switch, on any screen but the chat one (which says it in
+            its own banner): who the kids' iPad is waiting for. */}
+        {isNana && awaitingReaderName !== null && !isGreeting && (
+          <div data-testid="switch-waiting" role="status" style={{
+            position: "absolute", top: 72, left: "50%", transform: "translateX(-50%)", zIndex: 60,
+            maxWidth: "calc(100% - 32px)", padding: "9px 18px", borderRadius: 999,
+            background: "linear-gradient(135deg, rgba(201,146,42,0.95), rgba(141,98,28,0.95))",
+            color: NAVY, fontFamily: "DM Sans, sans-serif", fontSize: 16, fontWeight: 800,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.45)", pointerEvents: "none", textAlign: "center",
+          }}>
+            👥 {awaitingReaderName
+              ? `${awaitingReaderName}'s turn. Waiting for ${awaitingReaderName} to sign in on the kids' iPad.`
+              : "The kids' iPad is ready for the next reader to sign in."}
+          </div>
+        )}
+
         {confirmAsk && (
           <EndCallConfirm
             title={confirmAsk.title}
@@ -12539,6 +12609,7 @@ function DeviceFrame({
 
         {endCallConfirmOpen && (
           <EndCallConfirm
+            title={`End your visit with ${(childrenList.find(c => c.id === activeChildId)?.name ?? "").trim() || getRoleLabel("child")}?`}
             onCancel={() => setEndCallConfirmOpen(false)}
             onConfirm={() => {
               setEndCallConfirmOpen(false);
@@ -15007,6 +15078,8 @@ export default function App() {
   // per-child progress + session log + "child name" copy throughout
   // the app. Initialized from localStorage so a reload remembers
   // who Nana was reading with last.
+  const deviceViewNowRef = useRef(deviceView);
+  deviceViewNowRef.current = deviceView;
   const [activeChildId, setActiveChildIdRaw] = useState<string | null>(() => {
     try { return localStorage.getItem("nm_active_child_id"); } catch { return null; }
   });
@@ -15021,7 +15094,7 @@ export default function App() {
       else localStorage.removeItem("nm_active_child_id");
     } catch {}
     if (nextId && connectionId) {
-      api.sessions.publishEvent(connectionId, "active_child_change", { childId: nextId }).catch(() => {});
+      api.sessions.publishEvent(connectionId, "active_child_change", { childId: nextId, by: deviceViewNowRef.current === "perry" ? "child" : "nana" }).catch(() => {});
     }
   }, [connectionId]);
   // Derived: the active child object + display name. All existing
@@ -15049,6 +15122,13 @@ export default function App() {
   // then. It turns off on an explicit end, never on the server's idle
   // timer, so a long quiet chat can't drop the child's video.
   const [childVisitLive, setChildVisitLive] = useState(false);
+  const childVisitLiveRef = useRef(false);
+  childVisitLiveRef.current = childVisitLive;
+  // Child's iPad, mid-visit: handing over to the next reader (Rick's Build
+  // 41 review). The pictures and PIN pad show with Nana on screen; the call
+  // and the live stream stay up until the next reader signs in.
+  const [switchingReader, setSwitchingReader] = useState(false);
+  const switchingReaderRef = useRef(false);
   // True for ~1s after Perry's PIN-login succeeds — drives the
   // "✓ You're in!" celebration banner so her tap has visible positive
   // feedback before the static waiting screen appears.
@@ -15086,6 +15166,7 @@ export default function App() {
   // always see the current book / page / child.
   const endVisitRef = useRef<((reason: "endcall" | "goodbye" | "childhangup") => void) | null>(null);
   const sendChildToPinRef = useRef<(() => void) | null>(null);
+  const handOverReaderRef = useRef<((fromThisIpad?: boolean) => void) | null>(null);
   // Last time ANY SSE message arrived — used by the health check to
   // detect "open but silent" sockets (Cloudflare buffering). Initialized
   // generously so the first 30s after mount don't accidentally trigger a
@@ -16144,6 +16225,9 @@ export default function App() {
         // server-anchored timestamp downstream (countdown startAt,
         // holding endsAt, etc.) converts to an accurate local time.
         if (msg.serverTs) updateServerOffset(msg.serverTs);
+        // Handing the iPad over: only what concerns the handover itself.
+        // The next reader's sign-in resyncs the book, page and screen.
+        if (switchingReaderRef.current && !HANDOVER_EVENTS.has(msg.type)) return;
         if (msg.type === "page_change") {
           const newPage = msg.payload.page as number;
           const newOff = typeof msg.payload.off === "number" ? msg.payload.off : 0;
@@ -16188,7 +16272,7 @@ export default function App() {
           // moment Nana flips. Tactile + auditory sync.
           playPageTurn();
           haptic("light");
-          setTimeout(() => { setChildPage(newPage, newOff); setChildFlipping(false); }, 540);
+          setTimeout(() => { setChildPage(newPage, newOff); setChildFlipping(false); }, PAGE_TURN_MS + 20);
         } else if (msg.type === "page_mode") {
           // Nana toggled the page-mode dropdown — mirror exactly.
           const m = msg.payload.mode as "single" | "double" | undefined;
@@ -16746,8 +16830,12 @@ export default function App() {
             level?: string;
             syllables?: string;
             respelling?: string;
+            origin?: string;
           };
-          if (typeof p.word === "string" && typeof p.nanaCue === "string") {
+          // Our own card, back from the server: already showing (or closed).
+          if (p.origin && p.origin === myLibraryOriginRef.current) {
+            // nothing to do
+          } else if (typeof p.word === "string" && typeof p.nanaCue === "string") {
             setSelPhonicsCard({
               word: p.word,
               rule: p.rule ?? "other",
@@ -16880,14 +16968,21 @@ export default function App() {
           lastAppliedChildHangupTsRef.current = msg.serverTs ?? Date.now() + serverOffsetMsRef.current;
           if (modeRef.current === "goodbye") endVisitRef.current?.("childhangup");
         } else if (msg.type === "active_child_change") {
-          // A sibling taking over on the kids' iPad mid-visit becomes the
-          // child Nana reads with. Outside a visit Home keeps Nana's own
-          // choice (Rick's Build 40 review); "is here" still shows who it is.
+          // A sibling signing in on the kids' iPad mid-visit becomes the
+          // child Nana reads with (their own book and choices; the reading
+          // so far stays the previous child's). Outside a visit Home keeps
+          // Nana's own choice (Rick's Build 40 review); "is here" still
+          // shows who it is. Nana's own publish comes back marked "nana".
           const nextId = msg.payload?.childId as string | undefined;
-          if (nextId && sessionStartedFiredRef.current) {
-            setActiveChildIdRaw(nextId);
-            try { localStorage.setItem("nm_active_child_id", nextId); } catch {}
+          const fromNana = msg.payload?.by === "nana";
+          if (nextId && !fromNana && sessionStartedFiredRef.current) {
+            if (nextId !== activeChildIdLatestRef.current) void switchVisitToRef.current?.(nextId, true);
+            else setAwaitingReader(null);
           }
+        } else if (msg.type === "reader_handover") {
+          // A child tapped Switch Reader on the kids' iPad: it's showing
+          // the pictures and PIN pad, with the call still on.
+          if (sessionStartedFiredRef.current) setAwaitingReader({ childId: null });
         } else if (msg.type === "goodbye_start") {
           // Convert the server-stamped startAt to this iPad's local
           // clock via the EMA-tracked offset. Guarded: if a local
@@ -16976,6 +17071,8 @@ export default function App() {
   // room, so the camera and microphone really stop. Closing the live
   // stream clears "Perry is here" on Nana's Home until the next PIN.
   const sendChildToPin = () => {
+    switchingReaderRef.current = false;
+    setSwitchingReader(false);
     setChapterEndOverlay(null);
     setWordSelection(null);
     if (sseRef.current) { sseRef.current.close(); sseRef.current = null; }
@@ -16992,13 +17089,42 @@ export default function App() {
   };
   sendChildToPinRef.current = sendChildToPin;
 
+  // Mid-visit, another grandchild takes a turn (Nana's Switch, or Switch
+  // Reader on this iPad): the pictures and PIN pad come back, but the call
+  // and the live stream stay up, so Nana and the children can talk through
+  // the handover (Rick's Build 41 review). Outside a visit it's the usual
+  // exit to the PIN pad.
+  const handOverReader = (fromThisIpad = false) => {
+    if (!childVisitLiveRef.current) { sendChildToPin(); return; }
+    if (fromThisIpad && connectionId) {
+      api.sessions.publishEvent(connectionId, "reader_handover", { childId: authenticatedChildIdRef.current }).catch(() => {});
+    }
+    switchingReaderRef.current = true;
+    setSwitchingReader(true);
+    // Handed over from this iPad: nobody is picked; the next reader taps
+    // their own picture (Nana's iPad hears who it is when they sign in).
+    if (fromThisIpad) setActiveChildIdRaw(null);
+    setChapterEndOverlay(null);
+    setWordSelection(null);
+    perryActiveRef.current = false;
+    setPerryHasJoined(false);
+    setPerryAuthenticated(false);
+    setAuthenticatedChildId(null);
+    setPerryPinError("");
+    setGoodbyePhase(0);
+    setGoodbyeStartTime(null);
+    setPerryPinMode(true);
+    setMode("onboarding");
+  };
+  handOverReaderRef.current = handOverReader;
+
   const handlePerryPinLogin = async (pin: string, childId?: string | null) => {
     const data = perryConnRef.current;
     if (!data) return;
     setPerryPinLoading(true);
     setPerryPinError("");
     try {
-      const res = await api.children.pinLogin(data.connectionId, pin, childId);
+      const res = await api.children.pinLogin(data.connectionId, pin, childId, true);
       setConnectionId(res.connectionId);
       setNanaDisplayName(res.nanaName);
       // Bind this iPad to the child who just authenticated. Mismatch
@@ -17039,6 +17165,8 @@ export default function App() {
       setPerryHasJoined(false);
       startPerrySSE(res.connectionId);
       setPerryAuthenticated(true);
+      switchingReaderRef.current = false;
+      setSwitchingReader(false);
       setPerryOnboardingStep(2);
       // Brief celebration so the PIN tap has visible positive feedback.
       // Cleared after 1.6s — long enough to read, short enough not to
@@ -17207,6 +17335,8 @@ export default function App() {
   };
   const handleUpdateChild = async (childId: string, body: { name?: string; pin?: string }) => {
     replaceChild((await api.children.update(childId, body)).child);
+    // A new PIN can end (or start) sharing one with a sibling.
+    if (body.pin && connectionId) api.children.list(connectionId).then(setChildren).catch(() => {});
   };
 
   // Auto-clear the toast 8s after it appears (long enough to read,
@@ -17289,10 +17419,10 @@ export default function App() {
     if (authenticatedChildId === activeChildId) return;
     // Mismatch — drop back to PIN entry. Don't wipe perryConnRef so
     // the kid's iPad stays bound to the family connection; only the
-    // child-level auth gets reset. Same exit as the end of a visit, so
-    // the live stream closes too (Home then stops saying the previous
-    // child is here) and the camera turns off.
-    sendChildToPinRef.current?.();
+    // child-level auth gets reset. During a visit the call stays up for
+    // the handover (Rick's Build 41 review); otherwise it's the same exit
+    // as the end of a visit (the live stream closes, the camera turns off).
+    handOverReaderRef.current?.();
   }, [activeChildId, authenticatedChildId, perryAuthenticated, setAuthenticatedChildId]);
 
   // Fetch dashboard data when Nana reaches step 3 (connected). Loads
@@ -17468,22 +17598,25 @@ export default function App() {
   // Cooper's session (his bookmark if he has one, otherwise the greeting
   // and Pick a Book). The child's iPad gets active_child_change first,
   // shows "It's Cooper's turn" on the PIN screen, then joins.
+  /** The child's own book in progress, if any. Same rows as Home's
+   *  "Continue …" label: the server already scopes bookmarks saved before
+   *  siblings existed to the first child (Rick's Build 36 #5). */
+  const latestBookmarkFor = async (childId: string): Promise<{ bookId: string; page: number; off: number } | null> => {
+    if (!connectionId) return null;
+    try {
+      const { progress } = await api.progress.all(connectionId, childId);
+      const latest = progress
+        .filter(r => (r.childId === childId || r.childId == null) && booksLibrary[r.bookId]
+          && r.currentPage > 1 && r.currentPage < booksLibrary[r.bookId].pages.length)
+        .sort((a, b) => Date.parse(b.lastReadAt) - Date.parse(a.lastReadAt))[0];
+      return latest ? { bookId: latest.bookId, page: latest.currentPage, off: latest.currentOff ?? 0 } : null;
+    } catch {
+      return null;
+    }
+  };
   const handleReadWithChild = async (childId: string) => {
     if (childId !== activeChildId) handleSelectChild(childId);
-    let resume: { bookId: string; page: number; off: number } | null = null;
-    if (connectionId) {
-      try {
-        // Same rows as Home's "Continue …" label: the server already
-        // scopes bookmarks saved before siblings existed to the first
-        // child (Rick's Build 36 #5: Cooper and Perry started differently).
-        const { progress } = await api.progress.all(connectionId, childId);
-        const latest = progress
-          .filter(r => (r.childId === childId || r.childId == null) && booksLibrary[r.bookId]
-            && r.currentPage > 1 && r.currentPage < booksLibrary[r.bookId].pages.length)
-          .sort((a, b) => Date.parse(b.lastReadAt) - Date.parse(a.lastReadAt))[0];
-        if (latest) resume = { bookId: latest.bookId, page: latest.currentPage, off: latest.currentOff ?? 0 };
-      } catch {}
-    }
+    const resume = await latestBookmarkFor(childId);
     setPostEndCall(false);
     setChapterEndOverlay(null);
     // This child's own book, or none: a sibling's queued book must never
@@ -17820,7 +17953,7 @@ export default function App() {
     partOfSpeech?: string | null;
     respelling?: string;
   } | null>(null);
-  const [selPhoState,  setSelPhoState]  = useState<{ word: string; status: "loading" | "done" | "err" } | null>(null);
+  const [selPhoState,  setSelPhoState]  = useState<{ word: string; status: "loading" | "done" | "err"; reason?: "slow" | "offline" } | null>(null);
   const [selSaveState, setSelSaveState] = useState<{ word: string; status: "saving" | "saved" | "already" | "err" } | null>(null);
   // Rick's Sep 24 feature: Diane's 94 teacher-approved words carry
   // 1-3 sequential lesson steps. Card renders single-step (source
@@ -17856,13 +17989,37 @@ export default function App() {
   }, [wordSelection?.word, wordSelection?.wid]);
   // A phonics or meaning card belongs to its word: tapping another word
   // closes it (Rick's Build 40 review: "sometimes" stayed open while the
-  // menu was on "friends").
+  // menu was on "friends"), and so does closing the word's dark menu
+  // (Rick's Build 41 review). The card's own × leaves the menu open.
   useEffect(() => {
     const w = wordSelection?.word?.toLowerCase();
-    if (!w) return;
+    if (!w) {
+      setSelPhonicsCard(null);
+      setSelPhonicsStep(0);
+      setSelDefinition(null);
+      return;
+    }
     setSelPhonicsCard(cur => (cur && cur.word.toLowerCase() !== w ? null : cur));
     setSelDefinition(cur => (cur && cur.word.toLowerCase() !== w ? null : cur));
   }, [wordSelection?.word, wordSelection?.wid]);
+  // Leaving the book (Home, the end of a visit, a conversation, Silly
+  // Faces, any Menu screen) closes the word and its cards (Rick's Build 41
+  // review: the "Ebooks" meaning card stayed on Home).
+  const wordSelectionNowRef = useRef(wordSelection);
+  wordSelectionNowRef.current = wordSelection;
+  useEffect(() => {
+    if (deviceView === "perry" || mode === "reading") return;
+    phoRequestRef.current = null;
+    setSelPhoState(null);
+    setSelPhonicsCard(null);
+    setSelPhonicsStep(0);
+    setSelDefinition(null);
+    if (wordSelectionNowRef.current) {
+      setWordSelection(null);
+      if (connectionId) api.sessions.publishEvent(connectionId, "word_select_clear", { by: "nana" }).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, deviceView]);
   // An error card goes away by itself.
   useEffect(() => {
     if (selPhoState?.status !== "err") return;
@@ -18034,9 +18191,10 @@ export default function App() {
       setSelPhonicsStep(0);
       setSelPhoState({ word, status: "done" });
       // Broadcast so both iPads see the same coaching card.
-      if (connectionId) api.sessions.publishEvent(connectionId, "phonics_card", { word, ...payload }).catch(() => {});
-    } catch {
-      if (phoRequestRef.current === word.toLowerCase()) setSelPhoState({ word, status: "err" });
+      if (connectionId) api.sessions.publishEvent(connectionId, "phonics_card", { word, ...payload, origin: myLibraryOriginRef.current }).catch(() => {});
+    } catch (err) {
+      const reason = err instanceof Error && err.message === "timeout" ? "slow" : "offline";
+      if (phoRequestRef.current === word.toLowerCase()) setSelPhoState({ word, status: "err", reason });
       return;
     }
     if (selPhonicsTimerRef.current) window.clearTimeout(selPhonicsTimerRef.current);
@@ -18345,6 +18503,21 @@ export default function App() {
     [effectivePagePlan, selectedBookId, currentBook, pageMode],
   );
   const nanaReadingPos = readingPosition(currentBook, displayPagePlan, nanaPage, nanaOff, pageSide, pageMode);
+  // Pages turned forward together this visit, one turn at a time: the
+  // "Read N pages together" at the end (Rick's Build 41 review: a jump
+  // with the page slider was counted as 1203 pages read). Jumps, turning
+  // back and re-measured pages don't count; a new visit or book starts
+  // again from 0.
+  const pagesTurnedRef = useRef(0);
+  const lastTurnPosRef = useRef<{ book: string; num: number } | null>(null);
+  useEffect(() => {
+    if (deviceView === "perry") return;
+    const cur = { book: selectedBookId, num: nanaReadingPos.pageNum };
+    const prev = lastTurnPosRef.current;
+    lastTurnPosRef.current = cur;
+    if (!prev || prev.book !== cur.book) { pagesTurnedRef.current = 0; return; }
+    if (mode === "reading" && cur.num === prev.num + 1) pagesTurnedRef.current += 1;
+  }, [nanaReadingPos.pageNum, selectedBookId, mode, deviceView]);
   const childReadingPos = readingPosition(currentBook, displayPagePlan, childPage, childOff, pageSide, pageMode);
 
   // After a re-plan (text size, page mode, screen) the reader stays on
@@ -18629,7 +18802,7 @@ export default function App() {
     setFlipToPage(newPage);
     setFlipToOff(newOff);
     setChildFlipping(true);
-    timerRef.current = setTimeout(() => { setChildPage(newPage, newOff); setChildFlipping(false); setBusy(false); }, 540);
+    timerRef.current = setTimeout(() => { setChildPage(newPage, newOff); setChildFlipping(false); setBusy(false); }, PAGE_TURN_MS + 20);
     return true;
   };
 
@@ -18716,14 +18889,12 @@ export default function App() {
   };
 
   /** Snapshot of this session for the goodbye summary card. Pages read
-   *  is `nanaPage - sessionStartPageRef.current`. For chapter books the
+   *  is the pages turned forward together this visit. For chapter books the
    *  chapter the family ended in is included. Picture books and flat
    *  books get bookTitle + pagesRead only. Recomputed per render — cheap. */
   const sessionSummary = (() => {
-    // Same count as the end-of-visit card: display pages under the shared
-    // plan. Only Nana's iPad knows where the visit started.
-    const startPos = readingPosition(currentBook, displayPagePlan, sessionStartPageRef.current, 0, "L", pageMode);
-    const pagesRead = deviceView === "perry" ? 0 : Math.max(0, nanaReadingPos.pageNum - startPos.pageNum);
+    // Same count as the end-of-visit card. Only Nana's iPad counts.
+    const pagesRead = deviceView === "perry" ? 0 : pagesTurnedRef.current;
     const chapInfo = isChapterBook(currentBook)
       ? getChapterForPage(currentBook, nanaPage)
       : null;
@@ -19011,7 +19182,12 @@ export default function App() {
   };
   const handleOpenScheduleFromHome = () => { setCloseReturnsTo("home"); setMode("parentcheck"); };
   const handleOpenBookRequests = () => setMode("bookrequests");
-  const handleOpenSettings = () => setMode("settings");
+  const handleOpenSettings = () => {
+    // Settings shows the grandchildren as they are now (names, photos, a
+    // PIN two of them share).
+    if (connectionId && deviceView !== "perry") api.children.list(connectionId).then(setChildren).catch(() => {});
+    setMode("settings");
+  };
   // Words We're Learning returns to the screen it was opened from (the
   // child's copy used to have no way out at all).
   const learnedWordsReturnRef = useRef<Mode>("home");
@@ -19102,6 +19278,54 @@ export default function App() {
   useEffect(() => {
     if (sessionStartedFiredRef.current !== visitActive) setVisitActive(sessionStartedFiredRef.current);
   });
+  // Each visit counts its own pages turned.
+  useEffect(() => { if (visitActive) pagesTurnedRef.current = 0; }, [visitActive]);
+
+  // ── Switch grandchildren mid-visit (Rick's Build 41 review) ──────────
+  // Nana's "Switch to Cooper" (Menu, or the chat screen), or a sibling
+  // signing in on the kids' iPad mid-visit. The call stays up: the kids'
+  // iPad shows the next child's PIN pad with Nana on screen. The reading
+  // so far is saved as the previous child's, and Nana gets the new
+  // child's own three choices. A sibling signing in during a game (Silly
+  // Faces, Show & Tell, a conversation) leaves Nana where she is, with
+  // the game reset for the new child. Ending the visit is still End Visit.
+  const [awaitingReader, setAwaitingReader] = useState<{ childId: string | null } | null>(null);
+  const switchVisitTo = async (nextId: string, fromKidsIpad = false) => {
+    if (deviceView === "perry" || !sessionStartedFiredRef.current) return;
+    if (!children.some(c => c.id === nextId)) return;
+    if (nextId === activeChildIdLatestRef.current) return;
+    const bookScreen = modeRef.current === "reading" || modeRef.current === "library";
+    if (modeRef.current === "reading") saveProgressBookmark();
+    if (fromKidsIpad) {
+      setActiveChildIdRaw(nextId);
+      try { localStorage.setItem("nm_active_child_id", nextId); } catch {}
+      setAwaitingReader(null);
+    } else {
+      // Tells the kids' iPad: the next reader's pictures and PIN pad.
+      setActiveChildId(nextId);
+      setAwaitingReader({ childId: nextId });
+    }
+    setPreSelectedBook(null);
+    setSelectedBookId("");
+    setChapterEndOverlay(null);
+    readThisVisitRef.current = false;
+    if (!fromKidsIpad || bookScreen) setMode("greeting");
+    const resume = await latestBookmarkFor(nextId);
+    if (resume && activeChildIdLatestRef.current === nextId) {
+      setPreSelectedBook({ bookId: resume.bookId, startPage: resume.page, startOff: resume.off });
+    }
+  };
+  const switchVisitToRef = useRef(switchVisitTo);
+  switchVisitToRef.current = switchVisitTo;
+  // The kids' iPad has the next reader signed in (or the visit is over).
+  useEffect(() => {
+    if (!awaitingReader) return;
+    if (!visitActive) { setAwaitingReader(null); return; }
+    if (awaitingReader.childId && perryConnected && perryHereChildId === awaitingReader.childId) setAwaitingReader(null);
+  }, [awaitingReader, visitActive, perryConnected, perryHereChildId]);
+  const awaitingReaderName = awaitingReader
+    ? (awaitingReader.childId ? children.find(c => c.id === awaitingReader.childId)?.name ?? "" : "")
+    : null;
   const handleCloseVault  = () => {
     // Single-tap exit straight to home. Rick: "Memory Vault back button
     // requires multiple taps and kills the camera." Old behavior hopped
@@ -19614,6 +19838,10 @@ export default function App() {
   // gets noisy we can split into a progress-only endpoint later.
   const lastBookmarkRef = useRef<{ bookId: string; page: number; off: number; ts: number } | null>(null);
   const saveProgressBookmark = () => {
+    // Nana's iPad keeps the place. The kids' iPad leaving the book (a
+    // switch, the end of a visit) would save it again under whichever
+    // child is next (Rick's Build 41 review: Perry's place became Cooper's).
+    if (deviceView === "perry") return;
     if (!connectionId) return;
     if (!selectedBookId) return;
     const pg = nanaPageRef.current;
@@ -19726,8 +19954,8 @@ export default function App() {
   const endVisit = (reason: "endcall" | "goodbye" | "childhangup") => {
     if (deviceView === "perry") return;
     if (visitEndCardRef.current) return; // already ended
-    const startPos = readingPosition(currentBook, displayPagePlan, sessionStartPageRef.current, 0, "L", pageMode);
-    const pagesRead = Math.max(0, nanaReadingPos.pageNum - startPos.pageNum);
+    setAwaitingReader(null);
+    const pagesRead = pagesTurnedRef.current;
     const childLabel = (activeChild?.name || dashboardPerryName || "").trim() || getRoleLabel("child");
     const accepted = scheduleProposal && nanaScheduleAccepted && perryScheduleAccepted
       ? scheduleStartsAt(scheduleProposal.date, scheduleProposal.time)
@@ -20193,7 +20421,7 @@ export default function App() {
           walkthrough. When source='diane' and steps has 2+ entries,
           the card shows one step at a time with Prev/Next controls
           and a step-count chip. Single-step cards render unchanged. */}
-      {selPhonicsCard && deviceView !== "perry" && (() => {
+      {selPhonicsCard && deviceView !== "perry" && mode === "reading" && (() => {
         // Steps for any answer that has them (Diane's list, and the AI
         // since Build 39 F4); the green chip only for teacher-checked ones.
         const isDiane = Array.isArray(selPhonicsCard.steps) && selPhonicsCard.steps.length > 0;
@@ -20337,6 +20565,7 @@ export default function App() {
                 >Next →</button>
               ) : (
                 <button
+                  data-testid="phonics-done"
                   onClick={() => { setSelPhonicsCard(null); setSelPhonicsStep(0); }}
                   style={{
                     background: "rgba(34,197,94,0.18)",
@@ -20357,13 +20586,32 @@ export default function App() {
               For {(dashboardPerryName || "Perry")}: {selPhonicsCard.perryHint}
             </div>
           )}
+          {!(isDiane && totalSteps > 1) && (
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
+              <button
+                data-testid="phonics-done"
+                onClick={() => { setSelPhonicsCard(null); setSelPhonicsStep(0); }}
+                style={{
+                  background: "rgba(34,197,94,0.18)",
+                  color: "#166534",
+                  border: "1px solid rgba(34,197,94,0.55)",
+                  borderRadius: 999,
+                  padding: "7px 16px",
+                  minHeight: 36,
+                  fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 800,
+                  cursor: "pointer",
+                  touchAction: "manipulation",
+                }}
+              >✓ Done</button>
+            </div>
+          )}
         </div>
         );
       })()}
       {/* Phonics on its way, or it didn't work (Rick's Build 40 review: a
           new word can take the AI a few seconds; before, only a "…" on the
           button showed, and an error showed nothing). */}
-      {phoPending && selPhoState && deviceView !== "perry" && (
+      {phoPending && selPhoState && deviceView !== "perry" && mode === "reading" && (
         <div
           role="status"
           aria-live="polite"
@@ -20393,13 +20641,17 @@ export default function App() {
               <span aria-hidden style={{ width: 22, height: 22, borderRadius: "50%", border: "3px solid rgba(201,146,42,0.3)", borderTopColor: "#C9922A", animation: "nm-word-spin 0.9s linear infinite", flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 17, fontWeight: 800 }}>Working out how to sound out “{selPhoState.word}”…</div>
-                <div style={{ fontSize: 13, color: "#5C3A1E", marginTop: 2 }}>A new word can take a few seconds.</div>
+                <PhonicsWaitNote key={selPhoState.word} />
               </div>
             </>
           ) : (
             <>
               <span aria-hidden style={{ fontSize: 20 }}>⚠️</span>
-              <div style={{ flex: 1, minWidth: 0, fontSize: 16, fontWeight: 700 }}>Couldn't get the sounds for “{selPhoState.word}”. Check the internet and try again.</div>
+              <div data-testid="phonics-error" style={{ flex: 1, minWidth: 0, fontSize: 16, fontWeight: 700 }}>
+                {selPhoState.reason === "slow"
+                  ? <>“{selPhoState.word}” is taking longer than usual. Try again in a moment.</>
+                  : <>Couldn't reach NeverMiss for “{selPhoState.word}”. Check the internet and try again.</>}
+              </div>
               <button type="button" data-testid="phonics-retry" onClick={() => void handleSelectionPhonics(selPhoState.word)} style={{ minHeight: 44, padding: "0 14px", borderRadius: 999, border: "none", background: "#C9922A", color: "#F7F0E3", fontWeight: 800, cursor: "pointer" }}>Try again</button>
               <button type="button" aria-label="Close" onClick={() => setSelPhoState(null)} style={{ minWidth: 44, minHeight: 44, borderRadius: 999, border: "1px solid rgba(92,58,30,0.3)", background: "transparent", color: "#5C3A1E", fontWeight: 800, cursor: "pointer" }}>✕</button>
             </>
@@ -20410,7 +20662,7 @@ export default function App() {
       {/* Definition card (Rick's Build 39 G1): what the word means in its
           sentence, said simply, inside NeverMiss. Nana's iPad only, in the
           same spot as the phonics card. */}
-      {selDefinition && deviceView !== "perry" && (
+      {selDefinition && deviceView !== "perry" && mode === "reading" && (
         <div
           role="dialog"
           aria-live="polite"
@@ -20583,25 +20835,19 @@ export default function App() {
         /* Page turn (child's iPad): the old page lifts at the spine and
            is gone by the time it stands upright, so its back (which
            WebKit would draw mirrored over the new page) never shows.
-           Forward turns lift the right page, backward the left. */
+           Forward turns lift the right page, backward the left. Standing
+           on edge WebKit still draws a thin strip, so the page fades in
+           the last moment, while it is moving fastest. */
         @keyframes nm-leaf {
           0%   { transform: perspective(1600px) rotateY(0deg);   opacity: 1; }
-          80%  { opacity: 1; }
+          90%  { opacity: 1; }
           100% { transform: perspective(1600px) rotateY(-90deg); opacity: 0; }
         }
         @keyframes nm-leaf-back {
           0%   { transform: perspective(1600px) rotateY(0deg);  opacity: 1; }
-          80%  { opacity: 1; }
+          90%  { opacity: 1; }
           100% { transform: perspective(1600px) rotateY(90deg); opacity: 0; }
         }
-        /* Two-page turn: the turning half lifts to upright at the spine
-           (up), then the new page comes down on the other half (down). */
-        /* Upright, WebKit's perspective still draws a page as a thin
-           slanted strip: each half is hidden while it stands on edge. */
-        @keyframes nm-turn-up-r   { 0% { transform: perspective(1800px) rotateY(0deg); opacity: 1; }  96% { opacity: 1; } 100% { transform: perspective(1800px) rotateY(-90deg); opacity: 0; } }
-        @keyframes nm-turn-up-l   { 0% { transform: perspective(1800px) rotateY(0deg); opacity: 1; }  96% { opacity: 1; } 100% { transform: perspective(1800px) rotateY(90deg); opacity: 0; } }
-        @keyframes nm-turn-down-l { 0% { transform: perspective(1800px) rotateY(90deg); opacity: 0; }  4% { opacity: 1; } 100% { transform: perspective(1800px) rotateY(0deg); opacity: 1; } }
-        @keyframes nm-turn-down-r { 0% { transform: perspective(1800px) rotateY(-90deg); opacity: 0; } 4% { opacity: 1; } 100% { transform: perspective(1800px) rotateY(0deg); opacity: 1; } }
 
         /* ── Filter emoji animations ── */
         @keyframes wiggle-l   { 0%,100%{transform:rotate(-20deg)} 50%{transform:rotate(-34deg)} }
@@ -20909,6 +21155,8 @@ export default function App() {
           onNavBack={canNavBack ? handleNavBack : undefined}
           onCloseLearnedWords={handleCloseLearnedWords}
           visitActive={visitActive}
+          onSwitchVisitTo={(id: string) => void switchVisitTo(id)}
+          awaitingReaderName={awaitingReaderName}
           onOpenBookRequest={openBookRequest}
           onOpenFeedback={() => setFeedbackModalOpen(true)}
           readingFullscreen={readingFullscreen}
@@ -20919,10 +21167,13 @@ export default function App() {
           role="perry"
           // Only while a child is logged in and Nana has started the visit:
           // the PIN keypad and the waiting screen keep the camera and
-          // microphone off (Build 38; Rick's Build 40 review).
-          enabled={connectionId !== null && perryAuthenticated && childVisitLive}
+          // microphone off (Build 38; Rick's Build 40 review). The one
+          // exception is a handover mid-visit, so everyone can still talk
+          // (Rick's Build 41 review).
+          enabled={connectionId !== null && childVisitLive && (perryAuthenticated || switchingReader)}
         ><DeviceFrame
-          onSwitchReader={perryAuthenticated ? sendChildToPin : undefined}
+          onSwitchReader={perryAuthenticated ? () => handOverReader(true) : undefined}
+          handoverCall={switchingReader}
           label={deviceView === "both" ? "PERRY'S iPAD" : ""}
           isNana={false}
           onSwitchDevice={handleSwitchDevice}

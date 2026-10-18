@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ChevronLeft, ChevronRight, PhoneOff, X as XIcon } from "lucide-react";
+import { ChevronLeft, ChevronRight, PhoneOff, Users, X as XIcon } from "lucide-react";
 import { useVideoSession } from "../video/VideoSessionProvider";
 import { READING_THEMES, READING_THEME_LABEL, type ReadingTheme } from "../reading/themes";
 
@@ -96,6 +96,8 @@ export function MenuDrawer({
   autoCloseMs,
   onBack,
   onEndCall,
+  switchTargets = [],
+  onSwitchTo,
 }: {
   open: boolean;
   onClose: () => void;
@@ -103,8 +105,13 @@ export function MenuDrawer({
   autoCloseMs?: number;
   /** One meaningful screen back. Omit when there is nowhere to go. */
   onBack?: () => void;
-  /** Pinned red End Call (Nana, while a visit is live). */
+  /** Pinned red End Visit (Nana, while a visit is live). */
   onEndCall?: () => void;
+  /** Nana, mid-visit: the other grandchildren, to switch to while the call
+   *  keeps going (Rick's Build 41 review). Pinned beside End Visit, so the
+   *  visit's two controls sit together, apart from Sign Out. */
+  switchTargets?: Array<{ id: string; name: string }>;
+  onSwitchTo?: (childId: string) => void;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   // Remember which panel is open, not a copy of it: the panel is drawn
@@ -116,8 +123,10 @@ export function MenuDrawer({
     : null;
   const setPanel = (p: { key: string } | null) => setPanelKey(p ? p.key : null);
   const compact = useShortScreen();
+  const [choosing, setChoosing] = useState(false);
   useIdleAutoClose(open, onClose, autoCloseMs, panelRef);
-  useEffect(() => { if (!open) setPanelKey(null); }, [open]);
+  useEffect(() => { if (!open) { setPanelKey(null); setChoosing(false); } }, [open]);
+  const canSwitch = !!onSwitchTo && switchTargets.length > 0;
   if (!open) return null;
   return (
     <>
@@ -218,41 +227,93 @@ export function MenuDrawer({
           )}
         </div>
 
-        {/* Pinned End Call (Master Plan §4) */}
-        {onEndCall && !panel && (
+        {/* Pinned visit controls (Master Plan §4): Switch to another
+            grandchild (the call keeps going) and End Visit, side by side. */}
+        {(onEndCall || canSwitch) && !panel && (
           <div style={{ flexShrink: 0, padding: compact ? "8px 12px 10px" : "10px 12px 14px", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
-            <button
-              type="button"
-              data-testid="menu-end-call"
-              onClick={() => { onEndCall(); onClose(); }}
-              style={{
-                width: "100%", minHeight: compact ? 58 : 64,
-                display: "flex", alignItems: "center", gap: 14,
-                padding: "10px 16px", borderRadius: 16,
-                background: "linear-gradient(135deg, #ef4444 0%, #dc2626 100%)",
-                border: "none", color: "#fff",
-                fontFamily: FONT, textAlign: "left", cursor: "pointer",
-                boxShadow: "0 8px 22px rgba(239,68,68,0.35)",
-                touchAction: "manipulation",
-              }}
-            >
-              <span aria-hidden style={{
-                width: 40, height: 40, borderRadius: 12, flexShrink: 0,
-                background: "rgba(255,255,255,0.18)",
-                display: "inline-flex", alignItems: "center", justifyContent: "center",
-              }}>
-                <PhoneOff size={20} strokeWidth={2.4} />
-              </span>
-              <span style={{ display: "flex", flexDirection: "column" }}>
-                <span style={{ fontSize: 18, fontWeight: 800 }}>End Call</span>
-                <span style={{ fontSize: 13, fontWeight: 600, opacity: 0.9 }}>End the call now.</span>
-              </span>
-            </button>
+            {choosing ? (
+              <div data-testid="menu-switch-choose" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {switchTargets.map(c => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    data-testid={`menu-switch-${c.id}`}
+                    onClick={() => { onSwitchTo?.(c.id); onClose(); }}
+                    style={{ ...pinnedBtn(compact), flex: "1 1 140px", background: "rgba(201,146,42,0.16)", border: `1.5px solid ${AMBER}`, color: CREAM, justifyContent: "center" }}
+                  >
+                    <span style={{ fontSize: 17, fontWeight: 800 }}>{c.name}</span>
+                  </button>
+                ))}
+                <button type="button" onClick={() => setChoosing(false)} style={{ ...pinnedBtn(compact), flex: "0 0 auto", background: "transparent", border: "1px solid rgba(255,255,255,0.25)", color: CREAM, justifyContent: "center" }}>
+                  <span style={{ fontSize: 15, fontWeight: 700 }}>Cancel</span>
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 10 }}>
+                {canSwitch && (
+                  <button
+                    type="button"
+                    data-testid="menu-switch"
+                    onClick={() => {
+                      if (switchTargets.length === 1) { onSwitchTo?.(switchTargets[0].id); onClose(); }
+                      else setChoosing(true);
+                    }}
+                    style={{ ...pinnedBtn(compact), flex: "1.45 1 0", background: "rgba(201,146,42,0.16)", border: `1.5px solid ${AMBER}`, color: CREAM }}
+                  >
+                    <Users size={20} strokeWidth={2.4} aria-hidden style={{ flexShrink: 0, color: AMBER }} />
+                    <span style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+                      <span style={{ fontSize: 16, fontWeight: 800, lineHeight: 1.2 }}>{switchTargets.length === 1 ? `Switch to ${switchTargets[0].name}` : "Switch Grandchild"}</span>
+                      <span style={{ fontSize: 12, fontWeight: 600, opacity: 0.8 }}>The call keeps going</span>
+                    </span>
+                  </button>
+                )}
+                {onEndCall && (
+                  <button
+                    type="button"
+                    data-testid="menu-end-call"
+                    onClick={() => { onEndCall(); onClose(); }}
+                    style={{
+                      ...pinnedBtn(compact), flex: "1 1 0",
+                      background: "linear-gradient(135deg, #ef4444 0%, #dc2626 100%)",
+                      border: "none", color: "#fff",
+                      boxShadow: "0 8px 22px rgba(239,68,68,0.35)",
+                    }}
+                  >
+                    {canSwitch ? (
+                      <PhoneOff size={20} strokeWidth={2.4} aria-hidden style={{ flexShrink: 0 }} />
+                    ) : (
+                      <span aria-hidden style={{
+                        width: 40, height: 40, borderRadius: 12, flexShrink: 0,
+                        background: "rgba(255,255,255,0.18)",
+                        display: "inline-flex", alignItems: "center", justifyContent: "center",
+                      }}>
+                        <PhoneOff size={20} strokeWidth={2.4} />
+                      </span>
+                    )}
+                    <span style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+                      <span style={{ fontSize: canSwitch ? 16 : 18, fontWeight: 800, lineHeight: 1.2 }}>End Visit</span>
+                      {!canSwitch && <span style={{ fontSize: 13, fontWeight: 600, opacity: 0.9 }}>Ends the call and shows your visit summary.</span>}
+                    </span>
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
     </>
   );
+}
+
+/** The pinned visit buttons' shared shape. */
+function pinnedBtn(compact: boolean): React.CSSProperties {
+  return {
+    minHeight: compact ? 58 : 64,
+    display: "flex", alignItems: "center", gap: 10,
+    padding: "10px 14px", borderRadius: 16,
+    fontFamily: FONT, textAlign: "left", cursor: "pointer",
+    touchAction: "manipulation",
+  };
 }
 
 function MenuRow({ entry, onActivate, compact = false }: { entry: MenuItem; onActivate: () => void; compact?: boolean }) {
@@ -656,12 +717,12 @@ function PageSlider({ pageNum, pageTotal, onGo }: { pageNum: number; pageTotal: 
   );
 }
 
-/** "End this call?" confirm (Master Plan §4): Cancel / End Call. */
+/** "End your visit?" confirm (Master Plan §4): Cancel / End Visit. */
 export function EndCallConfirm({
   onCancel, onConfirm,
-  title = "End this call?",
-  body = "The video call ends on both iPads. Your place in the book is saved.",
-  confirmLabel = "End Call",
+  title = "End this visit?",
+  body = "The call ends on both iPads and you'll see your visit summary. Your place in the book is saved.",
+  confirmLabel = "End Visit",
   cancelLabel = "Cancel",
   testId = "end-call-confirm",
 }: {

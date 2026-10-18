@@ -88,6 +88,8 @@ export interface Child {
   photoUrl?: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Shares its PIN with a brother or sister (Build 42; never the PIN). */
+  pinShared?: boolean;
 }
 
 export interface ReadingSession {
@@ -199,8 +201,10 @@ export const api = {
     list: (connectionId: string) => req<Child[]>("GET", `/children/${connectionId}`),
     /** With `childId` (the picture the child tapped) the PIN is checked
      *  for that child only. */
-    pinLogin: (connectionId: string, pin: string, childId?: string | null) =>
-      req<{ child: Child; nanaName: string; connectionId: string }>("POST", "/children/pin-login", { connectionId, pin, ...(childId ? { childId } : {}) }),
+    /** `unique`: a PIN only one grandchild has signs that child in even
+     *  if another picture (or none) was tapped (Build 42). */
+    pinLogin: (connectionId: string, pin: string, childId?: string | null, unique = false) =>
+      req<{ child: Child; nanaName: string; connectionId: string }>("POST", "/children/pin-login", { connectionId, pin, ...(childId ? { childId } : {}), ...(unique ? { unique: true } : {}) }),
   },
   sessions: {
     publishEvent: (connectionId: string, type: string, payload: unknown) =>
