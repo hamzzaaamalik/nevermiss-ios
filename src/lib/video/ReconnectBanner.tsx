@@ -104,7 +104,7 @@ export function ReconnectBanner() {
         backgroundColor: config.bg,
         border: `1px solid ${config.border}`,
         backdropFilter: "blur(10px)",
-        boxShadow: "0 6px 24px rgba(0,0,0,0.35)",
+        boxShadow: "0 6px 24px var(--lk-shadow-350, rgba(0,0,0,0.35))",
         color: "#fff",
         fontFamily: "Inter, DM Sans, sans-serif",
         fontSize: 12,

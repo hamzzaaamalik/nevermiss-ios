@@ -75,6 +75,9 @@ export interface Connection {
   status: "pending" | "active";
   inviteToken: string;
   inviteEmail: string | null;
+  /** Build 43: the family's look and Library style (older servers send neither). */
+  look?: string | null;
+  libraryStyle?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -169,6 +172,12 @@ export const api = {
     lookup: (token: string) =>
       req<{ valid: boolean; connectionId: string; nanaName: string; needsPin: boolean }>("GET", `/connections/lookup/${token}`),
     list: () => req<{ connections: Array<{ connection: Connection; nana: SafeUser | null; childCount?: number }> }>("GET", "/connections"),
+    /** Build 43: the family's colours and Library style (null = the app's default). */
+    getLook: (connectionId: string) =>
+      req<{ look: string | null; libraryStyle: string | null }>("GET", `/connections/${encodeURIComponent(connectionId)}/look`),
+    /** Build 43: Nana changes the family's look; the kids' iPad hears "look_change". */
+    setLook: (connectionId: string, body: { look?: string; libraryStyle?: string }) =>
+      req<{ look: string | null; libraryStyle: string | null }>("PUT", `/connections/${encodeURIComponent(connectionId)}/look`, body),
     activate: (token: string) => req<{ connection: Connection }>("POST", `/connections/activate/${token}`),
     /** `perryOnline` is real presence: a child's iPad has the session
      *  stream open right now. `perryChildId` is who is logged in there. */
@@ -373,7 +382,8 @@ export const api = {
   catalog: {
     listBooks: () => req<{ books: CatalogBook[] }>("GET", "/books").then(r => r.books),
     /** Which books families can read and when each last changed (Build 40). */
-    index: () => req<{ books: Array<{ id: string; updatedAt: string }> }>("GET", "/books/index").then(r => r.books),
+    /** `cover` (Build 43): the book's small cover picture, when the admin has made one. */
+    index: () => req<{ books: Array<{ id: string; updatedAt: string; cover?: string }> }>("GET", "/books/index").then(r => r.books),
     /** Just these books. */
     byIds: (ids: string[]) => req<{ books: CatalogBook[] }>("GET", `/books?ids=${ids.map(encodeURIComponent).join(",")}`).then(r => r.books),
   },

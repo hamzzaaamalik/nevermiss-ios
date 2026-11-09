@@ -1,7 +1,7 @@
 import type { VideoProblem } from "./types";
 
-const NAVY = "#1B2B4B";
-const CREAM = "#F7F0E3";
+const NAVY = "var(--lk-navy, #1B2B4B)";
+const CREAM = "var(--lk-ink, #F7F0E3)";
 
 function platform(): "ipad-app" | "ios" | "mac-safari" | "mac-other" | "other" {
   if (typeof navigator === "undefined") return "other";
@@ -92,7 +92,7 @@ export function VideoHelpCard({ problem, onRetry, onDismiss }: { problem: VideoP
         position: "fixed", inset: 0, zIndex: 8500,
         display: "flex", alignItems: "center", justifyContent: "center",
         padding: 16,
-        background: "rgba(8,15,30,0.72)",
+        background: "var(--lk-deep-720, rgba(8,15,30,0.72))",
         backdropFilter: "blur(3px)",
       }}
     >
@@ -100,10 +100,10 @@ export function VideoHelpCard({ problem, onRetry, onDismiss }: { problem: VideoP
         width: "min(560px, 100%)",
         maxHeight: "calc(100% - 16px)", overflowY: "auto",
         background: "linear-gradient(180deg, #16264a 0%, #0f1d38 100%)",
-        border: "1px solid rgba(201,146,42,0.45)",
+        border: "1px solid var(--lk-accent-450, rgba(201,146,42,0.45))",
         borderRadius: 22,
         padding: "26px 26px 22px",
-        boxShadow: "0 24px 70px rgba(0,0,0,0.6)",
+        boxShadow: "0 24px 70px var(--lk-shadow-600, rgba(0,0,0,0.6))",
         fontFamily: "DM Sans, sans-serif",
         color: CREAM,
       }}>
@@ -118,7 +118,7 @@ export function VideoHelpCard({ problem, onRetry, onDismiss }: { problem: VideoP
             {c.title}
           </div>
         </div>
-        <div style={{ fontSize: 18, lineHeight: 1.5, color: "rgba(247,240,227,0.85)", marginBottom: 14 }}>{c.lead}</div>
+        <div style={{ fontSize: 18, lineHeight: 1.5, color: "var(--lk-ink-850, rgba(247,240,227,0.85))", marginBottom: 14 }}>{c.lead}</div>
         <ol style={{ margin: "0 0 20px", paddingLeft: 24, display: "flex", flexDirection: "column", gap: 10 }}>
           {c.steps.map((s, i) => (
             <li key={i} style={{ fontSize: 18, lineHeight: 1.45 }}>{s}</li>
@@ -130,9 +130,9 @@ export function VideoHelpCard({ problem, onRetry, onDismiss }: { problem: VideoP
             onClick={onRetry}
             style={{
               flex: "1 1 200px", minHeight: 60, borderRadius: 999, border: "none",
-              background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 60%, #d97706 100%)",
+              background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 60%, var(--lk-accent-2, #d97706) 100%)",
               color: NAVY, fontSize: 20, fontWeight: 800, cursor: "pointer", touchAction: "manipulation",
-              boxShadow: "0 8px 24px rgba(201,146,42,0.4)",
+              boxShadow: "0 8px 24px var(--lk-accent-400, rgba(201,146,42,0.4))",
             }}
           >
             Try again
@@ -142,7 +142,7 @@ export function VideoHelpCard({ problem, onRetry, onDismiss }: { problem: VideoP
             onClick={onDismiss}
             style={{
               flex: "1 1 200px", minHeight: 60, borderRadius: 999,
-              background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.25)",
+              background: "var(--lk-fill-060, rgba(255,255,255,0.06))", border: "1px solid var(--lk-line-250, rgba(255,255,255,0.25))",
               color: CREAM, fontSize: 18, fontWeight: 700, cursor: "pointer", touchAction: "manipulation",
             }}
           >

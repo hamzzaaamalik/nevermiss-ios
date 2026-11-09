@@ -227,21 +227,21 @@ function BlurDesktopOnlyNotice() {
         transform: "translateX(-50%)",
         zIndex: 9999,
         padding: "8px 14px",
-        background: "rgba(11,23,46,0.92)",
+        background: "var(--lk-bg-920, rgba(11,23,46,0.92))",
         border: "1px solid rgba(96,165,250,0.45)",
         borderRadius: 999,
-        color: "rgba(247,240,227,0.92)",
+        color: "var(--lk-ink-920, rgba(247,240,227,0.92))",
         fontFamily: "Inter, DM Sans, sans-serif",
         fontSize: 12,
         fontWeight: 600,
         letterSpacing: "0.01em",
-        boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+        boxShadow: "0 8px 24px var(--lk-shadow-400, rgba(0,0,0,0.4))",
         maxWidth: "min(92vw, 460px)",
         textAlign: "center",
         pointerEvents: "none",
       }}
     >
-      <span style={{ color: "#60a5fa", marginRight: 6 }}>✨</span>
+      <span style={{ color: "var(--lk-info-t, #60a5fa)", marginRight: 6 }}>✨</span>
       Background blur is only available on Chrome or Edge (desktop).
     </div>
   );
@@ -277,9 +277,9 @@ function ControlButton({
 }) {
   const label = on ? labelOn : labelOff;
   const Icon = on ? IconOn : IconOff;
-  const tone = on ? accent : "rgba(255,255,255,0.7)";
-  const bg = on ? `color-mix(in srgb, ${accent} 18%, transparent)` : "rgba(255,255,255,0.06)";
-  const border = on ? accent : "rgba(255,255,255,0.18)";
+  const tone = on ? accent : "var(--lk-glass-700, rgba(255,255,255,0.7))";
+  const bg = on ? `color-mix(in srgb, ${accent} 18%, transparent)` : "var(--lk-fill-060, rgba(255,255,255,0.06))";
+  const border = on ? accent : "var(--lk-line-180, rgba(255,255,255,0.18))";
 
   return (
     <button

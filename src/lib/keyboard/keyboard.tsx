@@ -182,10 +182,10 @@ export function KeyboardDoneButton({ open }: { open: boolean }) {
       style={{
         position: "fixed", right: 16, bottom: "calc(var(--nm-kb, 0px) + 12px)", zIndex: 10050,
         minHeight: 48, padding: "0 22px", borderRadius: 999,
-        border: "1.5px solid rgba(247,201,93,0.8)",
-        background: "#162240", color: "#F7F0E3",
+        border: "1.5px solid var(--lk-accent-hi-800, rgba(247,201,93,0.8))",
+        background: "var(--lk-n-162240, #162240)", color: "var(--lk-ink, #F7F0E3)",
         fontFamily: "DM Sans, sans-serif", fontSize: 17, fontWeight: 800,
-        boxShadow: "0 8px 24px rgba(0,0,0,0.45)",
+        boxShadow: "0 8px 24px var(--lk-shadow-450, rgba(0,0,0,0.45))",
         cursor: "pointer", touchAction: "manipulation",
       }}
     >

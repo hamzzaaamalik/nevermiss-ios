@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
-const AMBER = "#C9922A";
-const CREAM = "#F7F0E3";
+const AMBER = "var(--lk-accent, #C9922A)";
+const CREAM = "var(--lk-ink, #F7F0E3)";
 const FONT = "DM Sans, sans-serif";
 
 /**
@@ -70,8 +70,8 @@ export function PinPad({
   const gap = Math.round(keySize * 0.2);
   const keyStyle = {
     width: keySize, height: keySize, borderRadius: "50%",
-    border: "1.5px solid rgba(247,201,93,0.45)",
-    background: "rgba(255,255,255,0.07)",
+    border: "1.5px solid var(--lk-accent-hi-450, rgba(247,201,93,0.45))",
+    background: "var(--lk-fill-070, rgba(255,255,255,0.07))",
     color: CREAM, fontFamily: FONT, fontSize: Math.round(keySize * 0.42), fontWeight: 700,
     cursor: disabled ? "default" : "pointer",
     opacity: disabled ? 0.4 : 1,
@@ -84,10 +84,10 @@ export function PinPad({
     <div data-testid={testId} data-disabled={disabled ? "true" : "false"} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: Math.round(keySize * 0.28) }}>
       <style>{`
         @keyframes nm-pin-shake { 0%,100% { transform: translateX(0); } 20%,60% { transform: translateX(-10px); } 40%,80% { transform: translateX(10px); } }
-        .nm-pin-key:active { background: rgba(247,201,93,0.28) !important; transform: scale(0.96); }
+        .nm-pin-key:active { background: var(--lk-accent-hi-280, rgba(247,201,93,0.28)) !important; transform: scale(0.96); }
       `}</style>
       {label && (
-        <div style={{ color: "rgba(247,240,227,0.85)", fontFamily: FONT, fontSize: 17, fontWeight: 700, textAlign: "center" }}>{label}</div>
+        <div style={{ color: "var(--lk-ink-850, rgba(247,240,227,0.85))", fontFamily: FONT, fontSize: 17, fontWeight: 700, textAlign: "center" }}>{label}</div>
       )}
       <div
         key={shakeKey}
@@ -99,7 +99,7 @@ export function PinPad({
           <span key={i} data-filled={i < value.length ? "true" : "false"} style={{
             width: 20, height: 20, borderRadius: "50%",
             background: i < value.length ? (error ? "#f87171" : AMBER) : "transparent",
-            border: `2px solid ${error ? "#f87171" : "rgba(247,201,93,0.75)"}`,
+            border: `2px solid ${error ? "#f87171" : "var(--lk-accent-hi-750, rgba(247,201,93,0.75))"}`,
             transition: "background 120ms ease",
           }} />
         ))}

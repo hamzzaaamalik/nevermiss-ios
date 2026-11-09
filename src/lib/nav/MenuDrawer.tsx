@@ -3,9 +3,10 @@ import { ChevronLeft, ChevronRight, PhoneOff, Users, X as XIcon } from "lucide-r
 import { useVideoSession } from "../video/VideoSessionProvider";
 import { READING_THEMES, READING_THEME_LABEL, type ReadingTheme } from "../reading/themes";
 
-const NAVY = "#1B2B4B";
-const AMBER = "#C9922A";
-const CREAM = "#F7F0E3";
+const NAVY = "var(--lk-navy, #1B2B4B)";
+const AMBER = "var(--lk-accent, #C9922A)";
+const AMBER_T = "var(--lk-accent-t, #C9922A)";  // amber used as text
+const CREAM = "var(--lk-ink, #F7F0E3)";
 const FONT = "DM Sans, sans-serif";
 
 export type PointerMode = "finger" | "ruler" | "off";
@@ -61,8 +62,8 @@ export function useIdleAutoClose(open: boolean, onClose: () => void, ms: number 
 
 const headerBtn: React.CSSProperties = {
   minWidth: 44, height: 44, borderRadius: 999,
-  background: "rgba(255,255,255,0.06)",
-  border: "1px solid rgba(255,255,255,0.16)",
+  background: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+  border: "1px solid var(--lk-line-160, rgba(255,255,255,0.16))",
   color: CREAM,
   display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 4,
   cursor: "pointer", padding: "0 12px",
@@ -139,7 +140,7 @@ export function MenuDrawer({
         aria-hidden
         style={{
           position: "absolute", inset: 0, zIndex: 60,
-          backgroundColor: "rgba(8,15,30,0.55)",
+          backgroundColor: "var(--lk-deep-550, rgba(8,15,30,0.55))",
           backdropFilter: "blur(2px)",
           animation: "phase-intro-fade 0.2s ease-out",
         }}
@@ -154,9 +155,9 @@ export function MenuDrawer({
           position: "absolute", top: 0, right: 0, bottom: 0,
           width: "min(380px, 90%)",
           zIndex: 70,
-          background: "linear-gradient(180deg, #14223e 0%, #0b172e 100%)",
-          borderLeft: "1px solid rgba(201,146,42,0.35)",
-          boxShadow: "-8px 0 32px rgba(0,0,0,0.65)",
+          background: "linear-gradient(180deg, var(--lk-n-14223e, #14223e) 0%, var(--lk-bg, #0b172e) 100%)",
+          borderLeft: "1px solid var(--lk-accent-350, rgba(201,146,42,0.35))",
+          boxShadow: "-8px 0 32px var(--lk-shadow-650, rgba(0,0,0,0.65))",
           display: "flex", flexDirection: "column",
           animation: "nm-drawer-slide 0.24s cubic-bezier(0.22,1,0.36,1)",
         }}
@@ -165,7 +166,7 @@ export function MenuDrawer({
         <div style={{
           display: "grid", gridTemplateColumns: "1fr auto 1fr", alignItems: "center",
           padding: "12px 12px 10px", gap: 8, flexShrink: 0,
-          borderBottom: "1px solid rgba(255,255,255,0.08)",
+          borderBottom: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))",
         }}>
           <div style={{ justifySelf: "start" }}>
             {panel ? (
@@ -179,7 +180,7 @@ export function MenuDrawer({
             ) : null}
           </div>
           <span style={{
-            color: AMBER, fontFamily: FONT, fontSize: panel ? 15 : 13, fontWeight: 800,
+            color: AMBER_T, fontFamily: FONT, fontSize: panel ? 15 : 13, fontWeight: 800,
             letterSpacing: panel ? "0.02em" : "0.16em", textTransform: panel ? "none" : "uppercase",
             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 170,
           }}>
@@ -203,7 +204,7 @@ export function MenuDrawer({
                   return (
                     <div key={entry.key} style={{ margin: compact ? "7px 6px 2px" : "12px 6px 4px", lineHeight: compact ? 1.3 : undefined }}>
                       {entry.label && (
-                        <span style={{ color: "rgba(201,146,42,0.85)", fontFamily: FONT, fontSize: 12, fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase" }}>
+                        <span style={{ color: "var(--lk-accent-t-850, rgba(201,146,42,0.85))", fontFamily: FONT, fontSize: 12, fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase" }}>
                           {entry.label}
                         </span>
                       )}
@@ -230,7 +231,7 @@ export function MenuDrawer({
         {/* Pinned visit controls (Master Plan §4): Switch to another
             grandchild (the call keeps going) and End Visit, side by side. */}
         {(onEndCall || canSwitch) && !panel && (
-          <div style={{ flexShrink: 0, padding: compact ? "8px 12px 10px" : "10px 12px 14px", borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+          <div style={{ flexShrink: 0, padding: compact ? "8px 12px 10px" : "10px 12px 14px", borderTop: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))" }}>
             {choosing ? (
               <div data-testid="menu-switch-choose" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 {switchTargets.map(c => (
@@ -239,12 +240,12 @@ export function MenuDrawer({
                     type="button"
                     data-testid={`menu-switch-${c.id}`}
                     onClick={() => { onSwitchTo?.(c.id); onClose(); }}
-                    style={{ ...pinnedBtn(compact), flex: "1 1 140px", background: "rgba(201,146,42,0.16)", border: `1.5px solid ${AMBER}`, color: CREAM, justifyContent: "center" }}
+                    style={{ ...pinnedBtn(compact), flex: "1 1 140px", background: "var(--lk-accent-160, rgba(201,146,42,0.16))", border: `1.5px solid ${AMBER}`, color: CREAM, justifyContent: "center" }}
                   >
                     <span style={{ fontSize: 17, fontWeight: 800 }}>{c.name}</span>
                   </button>
                 ))}
-                <button type="button" onClick={() => setChoosing(false)} style={{ ...pinnedBtn(compact), flex: "0 0 auto", background: "transparent", border: "1px solid rgba(255,255,255,0.25)", color: CREAM, justifyContent: "center" }}>
+                <button type="button" onClick={() => setChoosing(false)} style={{ ...pinnedBtn(compact), flex: "0 0 auto", background: "transparent", border: "1px solid var(--lk-line-250, rgba(255,255,255,0.25))", color: CREAM, justifyContent: "center" }}>
                   <span style={{ fontSize: 15, fontWeight: 700 }}>Cancel</span>
                 </button>
               </div>
@@ -258,9 +259,9 @@ export function MenuDrawer({
                       if (switchTargets.length === 1) { onSwitchTo?.(switchTargets[0].id); onClose(); }
                       else setChoosing(true);
                     }}
-                    style={{ ...pinnedBtn(compact), flex: "1.45 1 0", background: "rgba(201,146,42,0.16)", border: `1.5px solid ${AMBER}`, color: CREAM }}
+                    style={{ ...pinnedBtn(compact), flex: "1.45 1 0", background: "var(--lk-accent-160, rgba(201,146,42,0.16))", border: `1.5px solid ${AMBER}`, color: CREAM }}
                   >
-                    <Users size={20} strokeWidth={2.4} aria-hidden style={{ flexShrink: 0, color: AMBER }} />
+                    <Users size={20} strokeWidth={2.4} aria-hidden style={{ flexShrink: 0, color: AMBER_T }} />
                     <span style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
                       <span style={{ fontSize: 16, fontWeight: 800, lineHeight: 1.2 }}>{switchTargets.length === 1 ? `Switch to ${switchTargets[0].name}` : "Switch Grandchild"}</span>
                       <span style={{ fontSize: 12, fontWeight: 600, opacity: 0.8 }}>The call keeps going</span>
@@ -284,7 +285,7 @@ export function MenuDrawer({
                     ) : (
                       <span aria-hidden style={{
                         width: 40, height: 40, borderRadius: 12, flexShrink: 0,
-                        background: "rgba(255,255,255,0.18)",
+                        background: "var(--lk-fill-180, rgba(255,255,255,0.18))",
                         display: "inline-flex", alignItems: "center", justifyContent: "center",
                       }}>
                         <PhoneOff size={20} strokeWidth={2.4} />
@@ -327,9 +328,9 @@ function MenuRow({ entry, onActivate, compact = false }: { entry: MenuItem; onAc
         display: "flex", alignItems: "center", gap: 14,
         padding: compact ? "6px 12px" : "10px 12px", minHeight: compact ? 52 : 58,
         borderRadius: 14,
-        backgroundColor: entry.active ? "rgba(201,146,42,0.14)" : "transparent",
-        border: `1px solid ${entry.active ? "rgba(201,146,42,0.45)" : "transparent"}`,
-        color: entry.destructive ? "#f87171" : (entry.active ? AMBER : CREAM),
+        backgroundColor: entry.active ? "var(--lk-accent-140, rgba(201,146,42,0.14))" : "transparent",
+        border: `1px solid ${entry.active ? "var(--lk-accent-450, rgba(201,146,42,0.45))" : "transparent"}`,
+        color: entry.destructive ? "var(--lk-bad-t2, #f87171)" : (entry.active ? AMBER_T : CREAM),
         fontFamily: FONT, textAlign: "left", cursor: "pointer",
         touchAction: "manipulation",
         transition: "background-color 140ms ease, transform 100ms ease",
@@ -337,7 +338,7 @@ function MenuRow({ entry, onActivate, compact = false }: { entry: MenuItem; onAc
     >
       <span aria-hidden style={{
         width: 36, height: 36, borderRadius: 10, flexShrink: 0,
-        backgroundColor: entry.active ? "rgba(201,146,42,0.2)" : "rgba(255,255,255,0.07)",
+        backgroundColor: entry.active ? "var(--lk-accent-200, rgba(201,146,42,0.2))" : "var(--lk-fill-070, rgba(255,255,255,0.07))",
         display: "inline-flex", alignItems: "center", justifyContent: "center",
       }}>
         {entry.icon}
@@ -358,7 +359,7 @@ function MenuRow({ entry, onActivate, compact = false }: { entry: MenuItem; onAc
 export function PanelSection({ title, children }: { title: string; children: ReactNode }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      <span style={{ color: "rgba(247,240,227,0.7)", fontFamily: FONT, fontSize: 14, fontWeight: 800 }}>{title}</span>
+      <span style={{ color: "var(--lk-ink-700, rgba(247,240,227,0.7))", fontFamily: FONT, fontSize: 14, fontWeight: 800 }}>{title}</span>
       {children}
     </div>
   );
@@ -374,7 +375,7 @@ export function Segmented<T extends string | number>({
   testId?: string;
 }) {
   return (
-    <div role="radiogroup" data-testid={testId} style={{ display: "flex", gap: 6, background: "rgba(255,255,255,0.05)", padding: 4, borderRadius: 14, border: "1px solid rgba(255,255,255,0.1)" }}>
+    <div role="radiogroup" data-testid={testId} style={{ display: "flex", gap: 6, background: "var(--lk-fill-050, rgba(255,255,255,0.05))", padding: 4, borderRadius: 14, border: "1px solid var(--lk-line-100, rgba(255,255,255,0.1))" }}>
       {options.map(o => {
         const on = o.value === value;
         return (
@@ -418,7 +419,7 @@ export function ToggleRow({ label, sub, on, onChange, icon, disabled, testId }: 
       style={{
         display: "flex", alignItems: "center", gap: 12, width: "100%",
         minHeight: 60, padding: "10px 14px", borderRadius: 14,
-        background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
+        background: "var(--lk-fill-050, rgba(255,255,255,0.05))", border: "1px solid var(--lk-line-100, rgba(255,255,255,0.1))",
         color: CREAM, fontFamily: FONT, textAlign: "left",
         cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.45 : 1,
         touchAction: "manipulation",
@@ -431,12 +432,12 @@ export function ToggleRow({ label, sub, on, onChange, icon, disabled, testId }: 
       </span>
       <span aria-hidden style={{
         width: 54, height: 32, borderRadius: 999, flexShrink: 0, position: "relative",
-        background: on ? "#22c55e" : "rgba(255,255,255,0.18)",
+        background: on ? "#22c55e" : "var(--lk-fill-180, rgba(255,255,255,0.18))",
         transition: "background-color 160ms ease",
       }}>
         <span style={{
           position: "absolute", top: 3, left: on ? 25 : 3, width: 26, height: 26, borderRadius: "50%",
-          background: "#fff", boxShadow: "0 2px 6px rgba(0,0,0,0.35)", transition: "left 160ms ease",
+          background: "#fff", boxShadow: "0 2px 6px var(--lk-shadow-350, rgba(0,0,0,0.35))", transition: "left 160ms ease",
         }} />
       </span>
     </button>
@@ -455,9 +456,9 @@ export function PanelAction({ label, sub, icon, onClick, active, testId }: {
       style={{
         display: "flex", alignItems: "center", gap: 12, width: "100%",
         minHeight: 56, padding: "10px 14px", borderRadius: 14,
-        background: active ? "rgba(201,146,42,0.16)" : "rgba(255,255,255,0.05)",
-        border: `1px solid ${active ? "rgba(201,146,42,0.55)" : "rgba(255,255,255,0.1)"}`,
-        color: active ? AMBER : CREAM, fontFamily: FONT, textAlign: "left",
+        background: active ? "var(--lk-accent-160, rgba(201,146,42,0.16))" : "var(--lk-fill-050, rgba(255,255,255,0.05))",
+        border: `1px solid ${active ? "var(--lk-accent-550, rgba(201,146,42,0.55))" : "var(--lk-line-100, rgba(255,255,255,0.1))"}`,
+        color: active ? AMBER_T : CREAM, fontFamily: FONT, textAlign: "left",
         cursor: "pointer", touchAction: "manipulation",
       }}
     >
@@ -527,7 +528,7 @@ export function ReadingSetupPanel({
                   style={{
                     minHeight: 64, borderRadius: 12,
                     background: c.page, color: c.text,
-                    border: on ? `3px solid ${AMBER}` : "1px solid rgba(255,255,255,0.25)",
+                    border: on ? `3px solid ${AMBER}` : "1px solid var(--lk-line-250, rgba(255,255,255,0.25))",
                     fontFamily: FONT, fontSize: 13, fontWeight: 800,
                     cursor: "pointer", touchAction: "manipulation",
                     display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2,
@@ -553,7 +554,7 @@ export function ReadingSetupPanel({
               { value: "off", label: "Off" },
             ]}
           />
-          <span style={{ color: "rgba(247,240,227,0.6)", fontFamily: FONT, fontSize: 13, lineHeight: 1.4 }}>
+          <span style={{ color: "var(--lk-ink-600, rgba(247,240,227,0.6))", fontFamily: FONT, fontSize: 13, lineHeight: 1.4 }}>
             Slide your finger slowly along the words; the child sees it move. A quick flick still turns the page.
           </span>
         </PanelSection>
@@ -579,7 +580,7 @@ export function CameraMicPanel() {
         />
       )}
       {!live && (
-        <span style={{ color: "rgba(247,240,227,0.6)", fontFamily: FONT, fontSize: 14 }}>
+        <span style={{ color: "var(--lk-ink-600, rgba(247,240,227,0.6))", fontFamily: FONT, fontSize: 14 }}>
           Video isn't connected right now.
         </span>
       )}
@@ -683,14 +684,14 @@ function PageSlider({ pageNum, pageTotal, onGo }: { pageNum: number; pageTotal: 
     <div data-testid="page-slider" style={{
       position: "sticky", bottom: -12, zIndex: 1,
       margin: "4px -12px -12px", padding: "14px 18px 18px",
-      background: "linear-gradient(180deg, rgba(15,27,50,0.94) 0%, #0f1b32 30%)",
-      borderTop: "1px solid rgba(255,255,255,0.10)",
+      background: "linear-gradient(180deg, var(--lk-n-0f1b32-940, rgba(15,27,50,0.94)) 0%, var(--lk-n-0f1b32, #0f1b32) 30%)",
+      borderTop: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))",
     }}>
       <style>{`
         .nm-page-slider { -webkit-appearance: none; appearance: none; width: 100%; height: 40px; background: transparent; margin: 0; touch-action: none; }
-        .nm-page-slider::-webkit-slider-runnable-track { height: 8px; border-radius: 999px; background: linear-gradient(90deg, ${AMBER} 0%, ${AMBER} var(--nm-pct), rgba(255,255,255,0.18) var(--nm-pct)); }
-        .nm-page-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 34px; height: 34px; margin-top: -13px; border-radius: 50%; background: ${AMBER}; border: 3px solid ${CREAM}; box-shadow: 0 3px 10px rgba(0,0,0,0.45); }
-        .nm-page-slider::-moz-range-track { height: 8px; border-radius: 999px; background: rgba(255,255,255,0.18); }
+        .nm-page-slider::-webkit-slider-runnable-track { height: 8px; border-radius: 999px; background: linear-gradient(90deg, ${AMBER} 0%, ${AMBER} var(--nm-pct), var(--lk-glass-180, rgba(255,255,255,0.18)) var(--nm-pct)); }
+        .nm-page-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 34px; height: 34px; margin-top: -13px; border-radius: 50%; background: ${AMBER}; border: 3px solid ${CREAM}; box-shadow: 0 3px 10px var(--lk-shadow-450, rgba(0,0,0,0.45)); }
+        .nm-page-slider::-moz-range-track { height: 8px; border-radius: 999px; background: var(--lk-fill-180, rgba(255,255,255,0.18)); }
         .nm-page-slider::-moz-range-thumb { width: 30px; height: 30px; border-radius: 50%; background: ${AMBER}; border: 3px solid ${CREAM}; }
       `}</style>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", fontFamily: FONT, color: CREAM, marginBottom: 2 }}>
@@ -738,26 +739,26 @@ export function EndCallConfirm({
       data-testid={testId}
       style={{
         position: "absolute", inset: 0, zIndex: 80,
-        backgroundColor: "rgba(8,15,30,0.78)",
+        backgroundColor: "var(--lk-deep-780, rgba(8,15,30,0.78))",
         display: "flex", alignItems: "center", justifyContent: "center",
         padding: 20,
         animation: "phase-intro-fade 0.2s ease-out",
       }}
     >
       <div style={{
-        backgroundColor: "#162240",
+        backgroundColor: "var(--lk-n-162240, #162240)",
         border: "1px solid rgba(248,113,113,0.45)",
         borderRadius: 22,
         padding: "26px 24px 22px",
         width: "100%", maxWidth: 420,
         textAlign: "center",
-        boxShadow: "0 18px 60px rgba(0,0,0,0.55)",
+        boxShadow: "0 18px 60px var(--lk-shadow-550, rgba(0,0,0,0.55))",
         animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
       }}>
         <div id="end-call-title" style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 28, fontWeight: 700 }}>
           {title}
         </div>
-        <div style={{ color: "rgba(247,240,227,0.78)", fontFamily: FONT, fontSize: 17, lineHeight: 1.5, marginTop: 8, marginBottom: 22 }}>
+        <div style={{ color: "var(--lk-ink-780, rgba(247,240,227,0.78))", fontFamily: FONT, fontSize: 17, lineHeight: 1.5, marginTop: 8, marginBottom: 22 }}>
           {body}
         </div>
         <div style={{ display: "flex", gap: 12 }}>
@@ -765,8 +766,8 @@ export function EndCallConfirm({
             type="button"
             onClick={onCancel}
             style={{
-              flex: 1, minHeight: 58, backgroundColor: "rgba(255,255,255,0.07)", color: CREAM,
-              border: "1px solid rgba(255,255,255,0.2)", borderRadius: 999,
+              flex: 1, minHeight: 58, backgroundColor: "var(--lk-fill-070, rgba(255,255,255,0.07))", color: CREAM,
+              border: "1px solid var(--lk-line-200, rgba(255,255,255,0.2))", borderRadius: 999,
               fontFamily: FONT, fontWeight: 800, fontSize: 18, cursor: "pointer", touchAction: "manipulation",
             }}
           >

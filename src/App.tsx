@@ -19,6 +19,7 @@ import {
   MicOff,
   Settings as SettingsIcon,
   SlidersHorizontal,
+  Palette,
   Library as LibraryIcon,
   LogOut as LogOutIcon,
   Mail,
@@ -63,6 +64,11 @@ import { NEXT_THEME, READING_THEMES, READING_THEME_LABEL, isReadingTheme, type R
 import { PARA_INDENT_EM, tokenizeHalf, type WordTok } from "./lib/reading/words";
 import { spokenPrompt } from "./lib/reading/spokenPrompt";
 import { ClosingPage } from "./lib/reading/ClosingPage";
+import { useLooks } from "./lib/theme/useLooks";
+import { applyFamilyLook, chooseFamilyLook, fetchFamilyLook, setLookFamily, syncFamilyLookOnOpen } from "./lib/theme/familyLook";
+import { LookPicker } from "./lib/theme/LookPicker";
+import { LooksIntro } from "./lib/theme/LooksIntro";
+import { ShelfStyle, StorefrontStyle, CleanListStyle, groupBooks, readAnchor, applyAnchor, type LibraryAnchor } from "./lib/library/LibraryStyles";
 import { APP_BUILD } from "./lib/build";
 import { pointerBus, type PointerMsg } from "./lib/reading/pointerBus";
 import { ReadingPointerLayer, localPointer } from "./lib/reading/ReadingPointer";
@@ -120,9 +126,11 @@ import { FaceTrackedOverlay } from "./lib/face-tracking/FaceTrackedOverlay";
 import * as FaceTracker from "./lib/face-tracking/FaceTracker";
 import { loadCatalog, saveCatalog } from "./lib/catalogCache";
 
-const NAVY      = "#1B2B4B";
-const AMBER     = "#C9922A";
-const CREAM     = "#F7F0E3";
+const NAVY      = "var(--lk-navy, #1B2B4B)";
+const AMBER     = "var(--lk-accent, #C9922A)";
+const CREAM     = "var(--lk-ink, #F7F0E3)";
+const AMBER_T   = "var(--lk-accent-t, #C9922A)";   // amber used as text
+const NAVY_FILL = "var(--lk-navy-fill, #1B2B4B)";  // navy used as a background
 const PARCHMENT = "#F2E4C4";
 const LEATHER   = "#5C3A1E";
 const BOOK_TEXT = "#2D1A08";
@@ -189,7 +197,7 @@ const PAGE_TURN_MS = 400;
  *  reader mid-visit (the PIN pad is up and the call stays on). */
 const HANDOVER_EVENTS = new Set([
   "active_child_change", "session_end", "session_reset", "session_complete",
-  "child_removed", "child_added", "child_updated", "presence", "nana_name",
+  "child_removed", "child_added", "child_updated", "presence", "nana_name", "look_change",
 ]);
 
 const FEATURES = {
@@ -628,6 +636,8 @@ interface Book {
   readingLevel: string;
   lexile?: string;
   coverUrl: string;
+  /** Build 43: the small cover picture the admin made, for the cover Library styles. */
+  coverThumbUrl?: string;
   gutenbergUrl: string;
   standardEbooksUrl: string;
   tier?: number;
@@ -1210,6 +1220,21 @@ const booksLibrary: Record<string, Book> = {
  * Mutates the `booksLibrary` object in place — the calling component
  * bumps a version counter so React re-renders every consumer.
  */
+/** Small cover pictures by book id, from /api/books/index (Build 43). Kept on
+ *  this iPad so covers show at once on the next launch. */
+const catalogCovers = new Map<string, string>(((): Array<[string, string]> => {
+  try {
+    const raw = JSON.parse(localStorage.getItem("nm_covers_v1") ?? "{}") as Record<string, unknown>;
+    return Object.entries(raw).filter((e): e is [string, string] => typeof e[1] === "string");
+  } catch { return []; }
+})());
+function rememberCovers(index: Array<{ id: string; cover?: string }>): void {
+  catalogCovers.clear();
+  for (const e of index) if (typeof e.cover === "string" && /^https?:\/\//.test(e.cover)) catalogCovers.set(e.id, e.cover);
+  try { localStorage.setItem("nm_covers_v1", JSON.stringify(Object.fromEntries(catalogCovers))); } catch { /* not kept */ }
+  for (const [id, b] of Object.entries(booksLibrary)) if (b.fromCatalog) b.coverThumbUrl = catalogCovers.get(id);
+}
+
 function mergeServerCatalog(serverBooks: unknown[]): void {
   for (const raw of serverBooks) {
     if (!raw || typeof raw !== "object") continue;
@@ -1362,6 +1387,8 @@ function mergeServerCatalog(serverBooks: unknown[]): void {
       readingLevel: (existing?.readingLevel && existing.readingLevel.length > 0) ? existing.readingLevel : derivedReadingLevel,
       pages,
       chapters,
+      // From the book index first (always current); a whole-book download carries it too.
+      coverThumbUrl: catalogCovers.get(id) ?? (typeof b.coverThumbUrl === "string" && /^https?:\/\//.test(b.coverThumbUrl) ? b.coverThumbUrl : undefined),
       fromCatalog: true,
     };
   }
@@ -1453,12 +1480,12 @@ function WordWrapped({
         data-wid={wid}
         style={{
           backgroundColor: active ? "rgba(255,201,80,0.85)" : "transparent",
-          color: active ? "#1B2B4B" : undefined,
+          color: active ? "var(--lk-navy, #1B2B4B)" : undefined,
           // The highlight reaches past the letters with shadows, not side
           // padding, and a word never breaks inside itself (Safari may
           // break before an em dash): either could leave part of a page's
           // last word on a line of its own, which the planner can't see.
-          boxShadow: active ? "0 0 0 3px rgba(255,201,80,0.85), 0 0 0 5px rgba(201,146,42,0.55)" : undefined,
+          boxShadow: active ? "0 0 0 3px rgba(255,201,80,0.85), 0 0 0 5px var(--lk-accent-550, rgba(201,146,42,0.55))" : undefined,
           whiteSpace: "nowrap",
           borderRadius: 4,
           transition: "background-color 180ms ease, color 180ms ease",
@@ -1568,9 +1595,9 @@ function WordActionMenu({
         display: "inline-flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
         gap: 3, flex: 1, minWidth: 0, minHeight: 52,
         padding: "6px 4px",
-        background: "rgba(255,255,255,0.06)",
+        background: "var(--lk-fill-060, rgba(255,255,255,0.06))",
         color: CREAM,
-        border: "1px solid rgba(255,255,255,0.10)",
+        border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))",
         borderRadius: 10,
         fontFamily: "DM Sans, sans-serif",
         fontSize: 12, fontWeight: 700, letterSpacing: "0.02em",
@@ -1604,11 +1631,11 @@ function WordActionMenu({
         gap: 6,
         padding: "6px 8px 8px",
         background: fromChild
-          ? "linear-gradient(180deg, rgba(34,58,110,0.98), rgba(11,23,46,0.97))"
-          : "linear-gradient(180deg, rgba(11,23,46,0.98), rgba(11,23,46,0.95))",
-        border: `1px solid ${fromChild ? "rgba(134,239,172,0.65)" : "rgba(247,201,93,0.55)"}`,
+          ? "linear-gradient(180deg, var(--lk-n-223a6e-980, rgba(34,58,110,0.98)), var(--lk-bg-970, rgba(11,23,46,0.97)))"
+          : "linear-gradient(180deg, var(--lk-bg-980, rgba(11,23,46,0.98)), var(--lk-bg-950, rgba(11,23,46,0.95)))",
+        border: `1px solid ${fromChild ? "rgba(134,239,172,0.65)" : "var(--lk-accent-hi-550, rgba(247,201,93,0.55))"}`,
         borderRadius: 14,
-        boxShadow: "0 12px 30px rgba(0,0,0,0.55)",
+        boxShadow: "0 12px 30px var(--lk-shadow-550, rgba(0,0,0,0.55))",
         animation: "phase-card-up 0.20s cubic-bezier(0.22,1,0.36,1)",
         WebkitUserSelect: "none",
         userSelect: "none",
@@ -1617,7 +1644,7 @@ function WordActionMenu({
       <div style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 28 }}>
         <div style={{ flex: 1, minWidth: 0, textAlign: "center", lineHeight: 1.2 }}>
           {fromChild && (
-            <div style={{ fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 800, letterSpacing: "0.08em", color: "#86efac", textTransform: "uppercase" }}>
+            <div style={{ fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 800, letterSpacing: "0.08em", color: "var(--lk-ok-t, #86efac)", textTransform: "uppercase" }}>
               {childName || "Your grandchild"} picked this word
             </div>
           )}
@@ -1630,8 +1657,8 @@ function WordActionMenu({
           aria-label="Close word actions"
           style={{
             flexShrink: 0, width: 32, height: 32, borderRadius: "50%",
-            background: "rgba(255,255,255,0.10)", color: CREAM,
-            border: "1px solid rgba(255,255,255,0.18)",
+            background: "var(--lk-fill-100, rgba(255,255,255,0.10))", color: CREAM,
+            border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))",
             fontSize: 15, fontWeight: 800, lineHeight: 1,
             cursor: "pointer", touchAction: "manipulation",
           }}
@@ -1954,8 +1981,8 @@ function BookContent({
       <div style={{
         display: "flex", flexDirection: "column",
         width: "100%", height: "100%",
-        backgroundColor: "#0b172e",
-        boxShadow: "0 8px 32px rgba(0,0,0,0.55), 0 1px 4px rgba(0,0,0,0.3)",
+        backgroundColor: "var(--lk-bg, #0b172e)",
+        boxShadow: "0 8px 32px var(--lk-shadow-550, rgba(0,0,0,0.55)), 0 1px 4px var(--lk-shadow-300, rgba(0,0,0,0.3))",
         position: "relative",
       }}>
         <div style={{
@@ -2030,7 +2057,7 @@ function BookContent({
       display: "flex", width: "100%", height: "100%",
       justifyContent: "center",
       ...(single ? { backgroundColor: themeColors.page, transition: "background-color 240ms ease" } : {}),
-      boxShadow: "0 8px 32px rgba(0,0,0,0.55), 0 1px 4px rgba(0,0,0,0.3)",
+      boxShadow: "0 8px 32px var(--lk-shadow-550, rgba(0,0,0,0.55)), 0 1px 4px var(--lk-shadow-300, rgba(0,0,0,0.3))",
       position: "relative",
     }}>
       {/* Premium book typography settings — applied via class so both
@@ -2066,14 +2093,14 @@ function BookContent({
           transform: translateX(-50%);
           padding: 3px 10px;
           border-radius: 999px;
-          background: rgba(201,146,42,0.90);
-          color: #1B2B4B;
+          background: var(--lk-accent-900, rgba(201,146,42,0.90));
+          color: var(--lk-navy, #1B2B4B);
           font-family: "DM Sans", sans-serif;
           font-size: 10px;
           font-weight: 800;
           letter-spacing: 0.06em;
           text-transform: uppercase;
-          box-shadow: 0 4px 12px rgba(0,0,0,0.35);
+          box-shadow: 0 4px 12px var(--lk-shadow-350, rgba(0,0,0,0.35));
           z-index: 3;
           pointer-events: none;
           animation: scroll-cue-bob 1.8s ease-in-out infinite;
@@ -2278,7 +2305,7 @@ function BookContent({
                       minHeight: 0,
                       objectFit: "contain",
                       borderRadius: 6,
-                      boxShadow: "0 4px 14px rgba(0,0,0,0.18)",
+                      boxShadow: "0 4px 14px var(--lk-shadow-180, rgba(0,0,0,0.18))",
                     }}
                   />
                 );
@@ -2345,7 +2372,7 @@ function BookContent({
       <div style={{
         width: "4px", flexShrink: 0,
         backgroundColor: themeColors.spine,
-        boxShadow: "-3px 0 8px rgba(0,0,0,0.18), 3px 0 8px rgba(0,0,0,0.18)",
+        boxShadow: "-3px 0 8px var(--lk-shadow-180, rgba(0,0,0,0.18)), 3px 0 8px var(--lk-shadow-180, rgba(0,0,0,0.18))",
         transition: "background-color 240ms ease",
       }} />
       )}
@@ -2410,7 +2437,7 @@ function BookContent({
             <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative", zIndex: 1 }}>
               {pictureSpread && images?.[1] && (
                 <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 6, overflow: "hidden" }}>
-                  <img src={images[1]} alt="" style={{ maxWidth: "100%", maxHeight: "100%", minHeight: 0, objectFit: "contain", borderRadius: 6, boxShadow: "0 4px 14px rgba(0,0,0,0.18)" }} />
+                  <img src={images[1]} alt="" style={{ maxWidth: "100%", maxHeight: "100%", minHeight: 0, objectFit: "contain", borderRadius: 6, boxShadow: "0 4px 14px var(--lk-shadow-180, rgba(0,0,0,0.18))" }} />
                   {p.imageCaptions?.[1] && <div style={pictureCaptionStyle(themeColors.muted)}>{p.imageCaptions[1]}</div>}
                 </div>
               )}
@@ -2475,7 +2502,7 @@ function ChatModePrompt({ text, fontScale = 1 }: { text: string; fontScale?: num
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: "14px", overflow: "auto" }}>
       {prefix && (
-        <span style={{ color: "rgba(201,146,42,0.45)", fontFamily: "Merriweather, serif", fontSize: baseSize, fontWeight: 600, fontStyle: "italic" }}>
+        <span style={{ color: "var(--lk-accent-t-450, rgba(201,146,42,0.45))", fontFamily: "Merriweather, serif", fontSize: baseSize, fontWeight: 600, fontStyle: "italic" }}>
           {prefix}
         </span>
       )}
@@ -2519,9 +2546,9 @@ function ProminentHomePill({
       type="button"
       onClick={onClick}
       style={{
-        background: "rgba(247,201,93,0.10)",
-        color: AMBER,
-        border: "1px solid rgba(247,201,93,0.45)",
+        background: "var(--lk-accent-hi-100, rgba(247,201,93,0.10))",
+        color: AMBER_T,
+        border: "1px solid var(--lk-accent-hi-450, rgba(247,201,93,0.45))",
         borderRadius: 999,
         padding: "11px 20px",
         fontFamily: "DM Sans, sans-serif",
@@ -2582,7 +2609,7 @@ function ChatModeView({
   return (
     <div style={{
       flex: 1, display: "flex", flexDirection: "column",
-      backgroundColor: "#000", overflow: "hidden",
+      backgroundColor: "var(--lk-stage, #000)", overflow: "hidden",
     }}>
       {/* ── TOP: Big video ─── */}
       <div style={{ flex: "1 1 0", minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", padding: 12, position: "relative", overflow: "hidden" }}>
@@ -2601,10 +2628,10 @@ function ChatModeView({
             position: "absolute", top: 12, left: 12, zIndex: 4,
             display: "inline-flex", alignItems: "center", gap: 6,
             padding: "5px 10px", borderRadius: 999,
-            backgroundColor: "rgba(11,23,46,0.7)",
-            border: "1px solid rgba(201,146,42,0.45)",
+            backgroundColor: "var(--lk-bg-700, rgba(11,23,46,0.7))",
+            border: "1px solid var(--lk-accent-450, rgba(201,146,42,0.45))",
             backdropFilter: "blur(6px)",
-            color: AMBER,
+            color: AMBER_T,
             fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800,
             letterSpacing: "0.16em",
           }}>
@@ -2616,8 +2643,8 @@ function ChatModeView({
       {/* ── BOTTOM: Prompt + actions ─── */}
       <div style={{
         flexShrink: 0,
-        backgroundColor: "#0b172e",
-        borderTop: "1px solid rgba(255,255,255,0.08)",
+        backgroundColor: "var(--lk-bg, #0b172e)",
+        borderTop: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))",
         padding: "12px 14px 14px",
         display: "flex", flexDirection: "column", gap: 10,
       }}>
@@ -2625,7 +2652,7 @@ function ChatModeView({
           <>
             {/* Prompt card — same amber treatment as the READING PROMPT card */}
             <div style={{
-              backgroundColor: "rgba(201,146,42,0.10)",
+              backgroundColor: "var(--lk-accent-100, rgba(201,146,42,0.10))",
               border: `1px solid ${AMBER}`,
               borderRadius: 14,
               padding: "10px 14px",
@@ -2639,11 +2666,11 @@ function ChatModeView({
                 >
                   <span style={{ fontSize: 14, lineHeight: 1 }} aria-hidden>📖</span>
                 </div>
-                <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 800, letterSpacing: "0.14em" }}>
+                <span style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 800, letterSpacing: "0.14em" }}>
                   ASK {otherName.toUpperCase()}
                 </span>
                 {list.length > 1 && (
-                  <span style={{ marginLeft: "auto", color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700 }}>
+                  <span style={{ marginLeft: "auto", color: "var(--lk-ink-500, rgba(247,240,227,0.5))", fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700 }}>
                     {(qIdx % list.length) + 1} of {list.length}
                   </span>
                 )}
@@ -2661,9 +2688,9 @@ function ChatModeView({
                 data-testid="talk-back"
                 style={{
                   minHeight: 58, padding: "0 26px", borderRadius: 999, border: "none",
-                  background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 60%, #d97706 100%)",
+                  background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 60%, var(--lk-accent-2, #d97706) 100%)",
                   color: NAVY, fontFamily: "DM Sans, sans-serif", fontSize: 18, fontWeight: 800,
-                  boxShadow: "0 6px 20px rgba(201,146,42,0.4)", cursor: "pointer", touchAction: "manipulation",
+                  boxShadow: "0 6px 20px var(--lk-accent-400, rgba(201,146,42,0.4))", cursor: "pointer", touchAction: "manipulation",
                 }}
               >
                 ← Back to the Book
@@ -2675,7 +2702,7 @@ function ChatModeView({
                   data-testid="talk-another"
                   style={{
                     minHeight: 58, padding: "0 24px", borderRadius: 999,
-                    background: "rgba(255,255,255,0.07)", border: "1.5px solid rgba(201,146,42,0.55)",
+                    background: "var(--lk-fill-070, rgba(255,255,255,0.07))", border: "1.5px solid var(--lk-accent-550, rgba(201,146,42,0.55))",
                     color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 18, fontWeight: 800,
                     cursor: "pointer", touchAction: "manipulation",
                   }}
@@ -2695,10 +2722,10 @@ function ChatModeView({
             display: "flex", flexDirection: "column", gap: 6, alignItems: "center",
           }}>
             <span style={{ fontSize: 26 * Math.max(1, fontScale), textAlign: "center" }}>👂</span>
-            <p style={{ color: "rgba(134,239,172,0.95)", fontFamily: "Merriweather, serif", fontSize: 15 * Math.max(1, fontScale), fontWeight: 700, lineHeight: 1.5, margin: 0, textAlign: "center" }}>
+            <p style={{ color: "var(--lk-lt-86efac-950, rgba(134,239,172,0.95))", fontFamily: "Merriweather, serif", fontSize: 15 * Math.max(1, fontScale), fontWeight: 700, lineHeight: 1.5, margin: 0, textAlign: "center" }}>
               {nanaName || getRoleLabel("nana")} has a question about the story!
             </p>
-            <p style={{ color: "rgba(255,255,255,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 11 * Math.max(1, fontScale), margin: 0, textAlign: "center", lineHeight: 1.4 }}>
+            <p style={{ color: "var(--lk-glass-550, rgba(255,255,255,0.55))", fontFamily: "DM Sans, sans-serif", fontSize: 11 * Math.max(1, fontScale), margin: 0, textAlign: "center", lineHeight: 1.4 }}>
               Listen carefully and say what you think.
             </p>
           </div>
@@ -2730,9 +2757,9 @@ function GreetingChoice({ testId, icon, label, onClick }: { testId: string; icon
       onClick={onClick}
       style={{
         flex: "1 1 0", minWidth: 200, maxWidth: 300, minHeight: 58,
-        background: "rgba(247,201,93,0.10)",
+        background: "var(--lk-accent-hi-100, rgba(247,201,93,0.10))",
         color: CREAM,
-        border: "1.5px solid rgba(247,201,93,0.7)",
+        border: "1.5px solid var(--lk-accent-hi-700, rgba(247,201,93,0.7))",
         borderRadius: 18,
         padding: "10px 16px",
         fontFamily: "DM Sans, sans-serif",
@@ -2808,7 +2835,7 @@ function GreetingView({
     <div style={{
       flex: 1,
       display: "flex", flexDirection: "column",
-      backgroundColor: "#080f1e",
+      backgroundColor: "var(--lk-deep, #080f1e)",
       overflow: "hidden",
     }}>
       {/* Contain mode shows face at natural framing — bigger tile OK now. */}
@@ -2831,7 +2858,7 @@ function GreetingView({
           position: "absolute", top: 16, left: "50%",
           transform: "translateX(-50%)",
           zIndex: 5,
-          background: "linear-gradient(135deg, rgba(201,146,42,0.95), rgba(141,98,28,0.95))",
+          background: "linear-gradient(135deg, var(--lk-accent-950, rgba(201,146,42,0.95)), rgba(141,98,28,0.95))",
           color: NAVY,
           fontFamily: "Playfair Display, serif",
           fontSize: "clamp(15px, 2vw, 19px)",
@@ -2839,7 +2866,7 @@ function GreetingView({
           letterSpacing: "0.02em",
           padding: "9px 18px",
           borderRadius: 999,
-          boxShadow: "0 8px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(247,201,93,0.45)",
+          boxShadow: "0 8px 24px var(--lk-shadow-450, rgba(0,0,0,0.45)), 0 0 0 1px var(--lk-accent-hi-450, rgba(247,201,93,0.45))",
           animation: "phase-card-up 0.4s cubic-bezier(0.22,1,0.36,1)",
           display: "inline-flex", alignItems: "center", gap: 10,
           maxWidth: "calc(100% - 32px)",
@@ -2864,10 +2891,10 @@ function GreetingView({
                 onClick={() => onSwitchTo(c.id)}
                 style={{
                   minHeight: 48, padding: "0 18px", borderRadius: 999,
-                  background: "rgba(11,23,46,0.82)", border: "1.5px solid rgba(201,146,42,0.65)",
+                  background: "var(--lk-bg-820, rgba(11,23,46,0.82))", border: "1.5px solid var(--lk-accent-650, rgba(201,146,42,0.65))",
                   color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 16, fontWeight: 800,
                   cursor: "pointer", touchAction: "manipulation",
-                  boxShadow: "0 6px 18px rgba(0,0,0,0.4)",
+                  boxShadow: "0 6px 18px var(--lk-shadow-400, rgba(0,0,0,0.4))",
                   display: "inline-flex", alignItems: "center", gap: 8,
                 }}
               >
@@ -2884,8 +2911,8 @@ function GreetingView({
           waiting message. No timer/countdown anywhere. */}
       <div style={{
         flexShrink: 0,
-        backgroundColor: "#0b172e",
-        borderTop: "1px solid rgba(255,255,255,0.08)",
+        backgroundColor: "var(--lk-bg, #0b172e)",
+        borderTop: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))",
         padding: "12px 16px 14px",
         display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
         flexWrap: "wrap",
@@ -2916,7 +2943,7 @@ function GreetingView({
           // she can nudge Nana. Rick's Build 30 review #2.
           <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
             <div style={{
-              color: "rgba(247,240,227,0.7)",
+              color: "var(--lk-ink-700, rgba(247,240,227,0.7))",
               fontFamily: "Merriweather, serif",
               fontSize: 14,
               fontStyle: "italic",
@@ -2931,7 +2958,7 @@ function GreetingView({
                   <button
                     onClick={onPerryPickBook}
                     style={{
-                      background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+                      background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)",
                       color: NAVY,
                       border: "none",
                       borderRadius: 999,
@@ -2939,7 +2966,7 @@ function GreetingView({
                       fontFamily: "DM Sans, sans-serif",
                       fontSize: 13, fontWeight: 800, letterSpacing: "0.03em",
                       cursor: "pointer",
-                      boxShadow: "0 6px 16px rgba(201,146,42,0.42)",
+                      boxShadow: "0 6px 16px var(--lk-accent-420, rgba(201,146,42,0.42))",
                       display: "inline-flex", alignItems: "center", gap: 6,
                       touchAction: "manipulation",
                       minHeight: 40,
@@ -2953,9 +2980,9 @@ function GreetingView({
                   <button
                     onClick={onPerryAskNana}
                     style={{
-                      background: "rgba(255,255,255,0.06)",
+                      background: "var(--lk-fill-060, rgba(255,255,255,0.06))",
                       color: CREAM,
-                      border: "1px solid rgba(255,255,255,0.20)",
+                      border: "1px solid var(--lk-line-200, rgba(255,255,255,0.20))",
                       borderRadius: 999,
                       padding: "10px 18px",
                       fontFamily: "DM Sans, sans-serif",
@@ -3014,7 +3041,7 @@ function IcebreakerView({
       flex: 1,
       display: "flex",
       flexDirection: "column",
-      backgroundColor: "#080f1e",
+      backgroundColor: "var(--lk-deep, #080f1e)",
       overflow: "hidden",
     }}>
       {/* Centered video tile with contain mode — face shows at natural
@@ -3035,20 +3062,20 @@ function IcebreakerView({
       {/* Bottom strip */}
       {isNana ? (
         <div style={{
-          backgroundColor: "#0b172e",
+          backgroundColor: "var(--lk-bg, #0b172e)",
           padding: "12px 14px 14px",
           display: "flex", flexDirection: "column", gap: "10px",
-          borderTop: "1px solid rgba(255,255,255,0.08)",
+          borderTop: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))",
           flex: 1, overflow: "hidden auto",
         }}>
           {/* Prompt */}
           <div style={{
-            backgroundColor: "rgba(201,146,42,0.12)",
+            backgroundColor: "var(--lk-accent-120, rgba(201,146,42,0.12))",
             border: `1px solid ${AMBER}`,
             borderRadius: "10px",
             padding: "10px 12px",
           }}>
-            <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: "12px", fontWeight: 800, letterSpacing: "0.08em", marginBottom: "6px" }}>
+            <div style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: "12px", fontWeight: 800, letterSpacing: "0.08em", marginBottom: "6px" }}>
               💬 CONVERSATION STARTER
             </div>
             {/* Rick's Build 38 review #2: was 12px. */}
@@ -3070,7 +3097,7 @@ function IcebreakerView({
                 flex: 1,
                 backgroundColor: "transparent",
                 color: CREAM,
-                border: `1px solid rgba(255,255,255,0.25)`,
+                border: `1px solid var(--lk-line-250, rgba(255,255,255,0.25))`,
                 borderRadius: "24px", padding: "12px 14px",
                 fontSize: "14px", fontFamily: "DM Sans, sans-serif", fontWeight: 700,
                 cursor: "pointer",
@@ -3088,7 +3115,7 @@ function IcebreakerView({
                 borderRadius: "24px", padding: "12px 14px",
                 fontSize: "14px", fontFamily: "DM Sans, sans-serif", fontWeight: 800,
                 cursor: "pointer",
-                boxShadow: "0 4px 14px rgba(201,146,42,0.45)",
+                boxShadow: "0 4px 14px var(--lk-accent-450, rgba(201,146,42,0.45))",
                 minHeight: 44,
                 touchAction: "manipulation",
               }}
@@ -3102,7 +3129,7 @@ function IcebreakerView({
             {icebreakerPrompts.map((_, i) => (
               <div key={i} style={{
                 width: "5px", height: "5px", borderRadius: "50%",
-                backgroundColor: i === promptIndex ? AMBER : "rgba(255,255,255,0.2)",
+                backgroundColor: i === promptIndex ? AMBER : "var(--lk-fill-200, rgba(255,255,255,0.2))",
                 transition: "background-color 0.3s",
               }} />
             ))}
@@ -3120,9 +3147,9 @@ function IcebreakerView({
             <button
               onClick={onToggleChildPrompts}
               style={{
-                backgroundColor: showChildPrompts ? "rgba(201,146,42,0.15)" : "transparent",
-                color: showChildPrompts ? AMBER : "rgba(247,240,227,0.55)",
-                border: `1px solid ${showChildPrompts ? AMBER : "rgba(255,255,255,0.20)"}`,
+                backgroundColor: showChildPrompts ? "var(--lk-accent-150, rgba(201,146,42,0.15))" : "transparent",
+                color: showChildPrompts ? AMBER_T : "var(--lk-ink-550, rgba(247,240,227,0.55))",
+                border: `1px solid ${showChildPrompts ? AMBER : "var(--lk-line-200, rgba(255,255,255,0.20))"}`,
                 borderRadius: "20px", padding: "8px 16px",
                 fontSize: "12px", fontFamily: "DM Sans, sans-serif", fontWeight: 700,
                 cursor: "pointer", letterSpacing: "0.04em", transition: "all 0.2s",
@@ -3131,7 +3158,7 @@ function IcebreakerView({
             >
               {showChildPrompts ? `✓ ${childName || "Perry"} can ask questions` : `Let ${childName || "Perry"} ask questions`}
             </button>
-            <span style={{ color: "rgba(247,240,227,0.42)", fontFamily: "DM Sans, sans-serif", fontSize: 10, textAlign: "center" }}>
+            <span style={{ color: "var(--lk-ink-420, rgba(247,240,227,0.42))", fontFamily: "DM Sans, sans-serif", fontSize: 10, textAlign: "center" }}>
               Shows an "Ask {nanaName || "Nana"}" prompt on {childName || "Perry"}'s screen
             </span>
           </div>}
@@ -3146,11 +3173,11 @@ function IcebreakerView({
       ) : (
         /* Perry's iPad: "Ask Nana" questions — only if Nana has enabled them */
         <div style={{
-          backgroundColor: "#0b172e",
+          backgroundColor: "var(--lk-bg, #0b172e)",
           padding: showChildPrompts ? "12px 14px 14px" : "14px",
           display: "flex", flexDirection: "column", gap: "10px",
           justifyContent: showChildPrompts ? "flex-start" : "center",
-          borderTop: "1px solid rgba(255,255,255,0.08)",
+          borderTop: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))",
           flex: 1, overflow: "hidden auto",
         }}>
           {showChildPrompts ? (
@@ -3161,7 +3188,7 @@ function IcebreakerView({
                 borderRadius: "10px",
                 padding: "10px 12px",
               }}>
-                <div style={{ color: "#63b3ed", fontFamily: "DM Sans, sans-serif", fontSize: "12px", fontWeight: 800, letterSpacing: "0.08em", marginBottom: "6px" }}>
+                <div style={{ color: "var(--lk-lt-63b3ed, #63b3ed)", fontFamily: "DM Sans, sans-serif", fontSize: "12px", fontWeight: 800, letterSpacing: "0.08em", marginBottom: "6px" }}>
                   🌟 ASK {(nanaName || getRoleLabel("nana")).toUpperCase()}
                 </div>
                 <p style={{
@@ -3178,7 +3205,7 @@ function IcebreakerView({
                     flex: 1,
                     backgroundColor: "transparent",
                     color: CREAM,
-                    border: "1px solid rgba(255,255,255,0.25)",
+                    border: "1px solid var(--lk-line-250, rgba(255,255,255,0.25))",
                     borderRadius: "24px", padding: "12px 14px",
                     fontSize: "14px", fontFamily: "DM Sans, sans-serif", fontWeight: 700,
                     cursor: "pointer",
@@ -3193,7 +3220,7 @@ function IcebreakerView({
                 {childIcebreakerPrompts.map((_, i) => (
                   <div key={i} style={{
                     width: "5px", height: "5px", borderRadius: "50%",
-                    backgroundColor: i === childPromptIndex ? "#63b3ed" : "rgba(255,255,255,0.2)",
+                    backgroundColor: i === childPromptIndex ? "#63b3ed" : "var(--lk-fill-200, rgba(255,255,255,0.2))",
                     transition: "background-color 0.3s",
                   }} />
                 ))}
@@ -3201,7 +3228,7 @@ function IcebreakerView({
             </>
           ) : (
             <p style={{
-              color: "rgba(247,240,227,0.32)", fontFamily: "DM Sans, sans-serif",
+              color: "var(--lk-ink-320, rgba(247,240,227,0.32))", fontFamily: "DM Sans, sans-serif",
               fontSize: "10px", textAlign: "center", margin: 0, lineHeight: 1.6,
             }}>
               Chat with {nanaName || getRoleLabel("nana")}! Reading starts soon.
@@ -3258,7 +3285,7 @@ function ShowAndTellView({
   return (
     <div style={{
       flex: 1, display: "flex", flexDirection: "column",
-      backgroundColor: "#000", overflow: "hidden",
+      backgroundColor: "var(--lk-stage, #000)", overflow: "hidden",
     }}>
       <style>{`
         @keyframes sat-rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
@@ -3293,13 +3320,13 @@ function ShowAndTellView({
               style={{
                 position: "absolute", right: 14, bottom: 14, zIndex: 12,
                 minHeight: 56, padding: "0 20px", borderRadius: 999,
-                background: flipOn ? AMBER : "rgba(11,23,46,0.82)",
+                background: flipOn ? AMBER : "var(--lk-bg-820, rgba(11,23,46,0.82))",
                 color: flipOn ? NAVY : CREAM,
-                border: `1.5px solid ${flipOn ? AMBER : "rgba(255,255,255,0.35)"}`,
+                border: `1.5px solid ${flipOn ? AMBER : "var(--lk-line-350, rgba(255,255,255,0.35))"}`,
                 fontFamily: "DM Sans, sans-serif", fontSize: 17, fontWeight: 800,
                 display: "inline-flex", alignItems: "center", gap: 8,
                 backdropFilter: "blur(6px)", cursor: "pointer", touchAction: "manipulation",
-                boxShadow: "0 6px 20px rgba(0,0,0,0.45)",
+                boxShadow: "0 6px 20px var(--lk-shadow-450, rgba(0,0,0,0.45))",
               }}
             >
               <span aria-hidden style={{ fontSize: 20 }}>🔄</span>
@@ -3314,10 +3341,10 @@ function ShowAndTellView({
             position: "absolute", top: 12, left: 12, zIndex: 4,
             display: "inline-flex", alignItems: "center", gap: 6,
             padding: "5px 10px", borderRadius: 999,
-            backgroundColor: "rgba(11,23,46,0.7)",
-            border: "1px solid rgba(247,201,93,0.45)",
+            backgroundColor: "var(--lk-bg-700, rgba(11,23,46,0.7))",
+            border: "1px solid var(--lk-accent-hi-450, rgba(247,201,93,0.45))",
             backdropFilter: "blur(6px)",
-            color: AMBER,
+            color: AMBER_T,
             fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800,
             letterSpacing: "0.16em",
           }}>
@@ -3333,16 +3360,16 @@ function ShowAndTellView({
       {isNana ? (
         <div style={{
           flexShrink: 0,
-          backgroundColor: "#0b172e",
-          backgroundImage: "radial-gradient(560px 280px at 80% 120%, rgba(201,146,42,0.22), transparent 70%), radial-gradient(420px 260px at -10% 120%, rgba(167,139,250,0.18), transparent 70%)",
+          backgroundColor: "var(--lk-bg, #0b172e)",
+          backgroundImage: "radial-gradient(560px 280px at 80% 120%, var(--lk-accent-220, rgba(201,146,42,0.22)), transparent 70%), radial-gradient(420px 260px at -10% 120%, rgba(167,139,250,0.18), transparent 70%)",
           padding: "12px 14px 14px",
           display: "flex", flexDirection: "column", gap: 10,
-          borderTop: "1px solid rgba(255,255,255,0.08)",
+          borderTop: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))",
         }}>
           {/* Animated prompt card */}
           <div style={{
             position: "relative",
-            backgroundImage: "linear-gradient(135deg, rgba(247,201,93,0.18) 0%, rgba(201,146,42,0.10) 100%)",
+            backgroundImage: "linear-gradient(135deg, var(--lk-accent-hi-180, rgba(247,201,93,0.18)) 0%, var(--lk-accent-100, rgba(201,146,42,0.10)) 100%)",
             border: `1px solid ${AMBER}`,
             borderRadius: 14,
             padding: "12px 16px",
@@ -3354,8 +3381,8 @@ function ShowAndTellView({
             <span style={{ position: "absolute", bottom: -3, left: 22, fontSize: 9, animation: "sat-twinkle 2.4s 1.1s ease-in-out infinite" }}>💫</span>
 
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-              <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: "0.16em" }}>🎭 REACTION PROMPT</span>
-              <span style={{ color: "rgba(247,240,227,0.45)", fontFamily: "DM Sans, sans-serif", fontSize: 10 }}>· {showAndTellPromptIndex + 1} / {totalPrompts}</span>
+              <span style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: "0.16em" }}>🎭 REACTION PROMPT</span>
+              <span style={{ color: "var(--lk-ink-450, rgba(247,240,227,0.45))", fontFamily: "DM Sans, sans-serif", fontSize: 10 }}>· {showAndTellPromptIndex + 1} / {totalPrompts}</span>
             </div>
             <p style={{
               color: CREAM,
@@ -3435,7 +3462,7 @@ function ShowAndTellView({
               <div key={i} style={{
                 width: i === showAndTellPromptIndex ? 16 : 5,
                 height: 5, borderRadius: 999,
-                backgroundColor: i === showAndTellPromptIndex ? AMBER : "rgba(255,255,255,0.2)",
+                backgroundColor: i === showAndTellPromptIndex ? AMBER : "var(--lk-fill-200, rgba(255,255,255,0.2))",
                 transition: "all 0.3s",
               }} />
             ))}
@@ -3443,11 +3470,11 @@ function ShowAndTellView({
         </div>
       ) : (
         <div style={{
-          backgroundColor: "#0b172e",
+          backgroundColor: "var(--lk-bg, #0b172e)",
           backgroundImage: "radial-gradient(560px 280px at 50% 130%, rgba(34,197,94,0.18), transparent 70%)",
           padding: "14px 18px 16px",
           display: "flex", alignItems: "center", justifyContent: "center", gap: 16,
-          borderTop: "1px solid rgba(255,255,255,0.08)",
+          borderTop: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))",
           flexShrink: 0,
         }}>
           <div style={{ fontSize: 40, animation: "sat-mascot-bob 2.2s ease-in-out infinite", filter: "drop-shadow(0 6px 14px rgba(34,197,94,0.35))" }}>🌟</div>
@@ -3458,7 +3485,7 @@ function ShowAndTellView({
                 {otherName} can see you!
               </span>
             </div>
-            <span style={{ color: "rgba(255,255,255,0.7)", fontFamily: "Merriweather, serif", fontSize: 16, fontStyle: "italic", lineHeight: 1.45 }}>
+            <span style={{ color: "var(--lk-glass-700, rgba(255,255,255,0.7))", fontFamily: "Merriweather, serif", fontSize: 16, fontStyle: "italic", lineHeight: 1.45 }}>
               Show {otherName} something special{canFlipCamera ? ". Tap Flip camera to use the back camera." : " from your room."}
             </span>
           </div>
@@ -3956,9 +3983,9 @@ function BookSpread({
               width: 64,
               height: 64,
               borderRadius: "50%",
-              border: "3px solid #C9922A",
-              boxShadow: "0 0 0 3px rgba(201,146,42,0.30), 0 0 24px rgba(201,146,42,0.65)",
-              backgroundColor: "rgba(201,146,42,0.08)",
+              border: "3px solid var(--lk-accent, #C9922A)",
+              boxShadow: "0 0 0 3px var(--lk-accent-300, rgba(201,146,42,0.30)), 0 0 24px var(--lk-accent-650, rgba(201,146,42,0.65))",
+              backgroundColor: "var(--lk-accent-080, rgba(201,146,42,0.08))",
               animation: "pointer-highlight 2.4s ease-out forwards",
               pointerEvents: "none",
               zIndex: 30,
@@ -4148,6 +4175,14 @@ function BookSpread({
 
 /** Nana's library search and filters, mirrored on the child's iPad
  *  (Rick's Build 38 review #3). */
+/** A library_scroll anchor from the other iPad, checked (it arrives over the network). */
+function parseLibraryAnchor(v: unknown): LibraryAnchor | null {
+  if (!v || typeof v !== "object") return null;
+  const a = v as Record<string, unknown>;
+  return typeof a.id === "string" && a.id.length <= 200 && typeof a.off === "number" && Number.isFinite(a.off)
+    ? { id: a.id, off: Math.max(-5000, Math.min(5000, a.off)) } : null;
+}
+
 type LibraryFilters = {
   q: string;
   status: "all" | "in-progress" | "not-started" | "finished";
@@ -4163,6 +4198,7 @@ function LibraryView({
   readOnly = false,
   onScroll,
   scrollTop,
+  scrollAnchor = null,
   onFindMoreBooks,
   onFiltersChange,
   mirroredFilters = null,
@@ -4188,10 +4224,13 @@ function LibraryView({
   readOnly?: boolean;
   /** Nana-side: fired on every scroll of the bookshelf (rAF-throttled
    *  in the parent) so the position can be published over SSE to Perry. */
-  onScroll?: (top: number) => void;
+  onScroll?: (top: number, anchor?: LibraryAnchor | null) => void;
   /** Perry-side: incoming scrollTop from Nana — applied imperatively to
    *  the bookshelf scroll container so her view tracks Nana's scrolling. */
   scrollTop?: number;
+  /** The book at the top of the other iPad's Library (cover styles). The Pro
+   *  and the mini lay covers out differently, so pixels alone drift. */
+  scrollAnchor?: LibraryAnchor | null;
   /** Nana: open Request a Book searching free classics (Build 33). */
   onFindMoreBooks?: (query: string) => void;
   /** Nana: her search and filters, sent to the child's iPad. */
@@ -4216,14 +4255,24 @@ function LibraryView({
   // and dropped. User gestures beyond the window publish normally.
   const shelfRef = useRef<HTMLDivElement | null>(null);
   const suppressUntilRef = useRef<number>(0);
+  // Library style (Classic list, Bookshelf, Storefront, Clean List): one per family.
+  const { style: libraryStyle } = useLooks();
+  const coverStyle = libraryStyle !== "today";
   useEffect(() => {
     const el = shelfRef.current;
     if (!el) return;
     if (typeof scrollTop !== "number") return;
+    // Cover styles follow the other iPad by book; the Classic list keeps following by pixels.
+    if (coverStyle && scrollAnchor) {
+      const before = el.scrollTop;
+      suppressUntilRef.current = performance.now() + 400;
+      if (applyAnchor(el, scrollAnchor)) return;
+      el.scrollTop = before;
+    }
     if (Math.abs(el.scrollTop - scrollTop) < 1) return;
     suppressUntilRef.current = performance.now() + 400;
     el.scrollTop = scrollTop;
-  }, [scrollTop]);
+  }, [scrollTop, scrollAnchor, coverStyle]);
   // Search + status filter — Rick: "The library is growing, so we'll
   // eventually need a search and/or filter function to keep it
   // manageable." Filters apply locally over Object.values(booksLibrary);
@@ -4295,6 +4344,27 @@ function LibraryView({
     }).length,
   };
 
+  // Child's iPad: Nana's scroll can arrive before her search or filter has
+  // reached this iPad, while the list is still short, so it was lost (the
+  // child's list stayed at the top after Nana cleared a search). Put it back
+  // once the list has changed.
+  const shownKey = filteredBooks.map(b => b.id).join(",");
+  useEffect(() => {
+    if (!readOnly) return;
+    const el = shelfRef.current;
+    if (!el) return;
+    if (coverStyle && scrollAnchor) {
+      suppressUntilRef.current = performance.now() + 400;
+      if (applyAnchor(el, scrollAnchor)) return;
+    }
+    if (typeof scrollTop === "number" && Math.abs(el.scrollTop - scrollTop) >= 1) {
+      suppressUntilRef.current = performance.now() + 400;
+      el.scrollTop = scrollTop;
+    }
+    // Only when the shown books change; new positions are handled above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shownKey]);
+
   const STATUS_CHIPS: Array<{ key: typeof statusFilter; label: string; icon: string }> = [
     { key: "all",          label: "All",         icon: "📚" },
     { key: "in-progress",  label: "Reading",     icon: "📖" },
@@ -4303,29 +4373,29 @@ function LibraryView({
   ];
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#0b172e", overflow: "hidden" }}>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "var(--lk-bg, #0b172e)", overflow: "hidden" }}>
       {/* Header — back chevron on the left, centered title, balance spacer right.
           In readOnly (Perry's mirrored view) the back button disappears
           and the subtitle changes to a "Watching with Nana" hint. */}
-      <div style={{ padding: "10px 14px 10px", borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0, display: "grid", gridTemplateColumns: "32px 1fr 32px", alignItems: "center" }}>
+      <div style={{ padding: "10px 14px 10px", borderBottom: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))", flexShrink: 0, display: "grid", gridTemplateColumns: "32px 1fr 32px", alignItems: "center" }}>
         {(!readOnly && onCancel) ? (
           <button
             onClick={onCancel}
             aria-label="Back"
             title="Back"
-            style={{ width: 28, height: 28, borderRadius: "50%", backgroundColor: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.10)", color: "rgba(247,240,227,0.7)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", padding: 0 }}
+            style={{ width: 28, height: 28, borderRadius: "50%", backgroundColor: "var(--lk-fill-060, rgba(255,255,255,0.06))", border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))", color: "var(--lk-ink-700, rgba(247,240,227,0.7))", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", padding: 0 }}
           >
             <ChevronLeft size={15} strokeWidth={2.2} aria-hidden />
           </button>
         ) : <span />}
         <div style={{ textAlign: "center" }}>
-          <div style={{ display: "inline-flex", color: AMBER }} aria-hidden>
+          <div style={{ display: "inline-flex", color: AMBER_T }} aria-hidden>
             <LibraryIcon size={20} strokeWidth={1.6} />
           </div>
           <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 15, fontWeight: 700, marginTop: 2 }}>
             {readOnly ? "Picking a Book Together" : "Choose Your Book"}
           </div>
-          <div style={{ color: "rgba(247,240,227,0.45)", fontFamily: "Inter, DM Sans, sans-serif", fontSize: 11, marginTop: 2, letterSpacing: "0.04em" }}>
+          <div style={{ color: "var(--lk-ink-450, rgba(247,240,227,0.45))", fontFamily: "Inter, DM Sans, sans-serif", fontSize: 11, marginTop: 2, letterSpacing: "0.04em" }}>
             {readOnly ? `👀 Watching with ${nanaName || getRoleLabel("nana")}` : "Tap to select · both sides see your choice"}
           </div>
         </div>
@@ -4341,14 +4411,14 @@ function LibraryView({
       {readOnly && (searchQuery.trim() || statusFilter !== "all" || ageFilter !== "any") && (
         <div data-testid="library-mirror-filter" style={{
           margin: "10px 12px 4px", padding: "10px 16px", borderRadius: 999, flexShrink: 0,
-          background: "rgba(201,146,42,0.10)", border: "1px solid rgba(201,146,42,0.40)",
+          background: "var(--lk-accent-100, rgba(201,146,42,0.10))", border: "1px solid var(--lk-accent-400, rgba(201,146,42,0.40))",
           color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 16, fontWeight: 700,
           display: "flex", alignItems: "center", gap: 10,
         }}>
           <span aria-hidden>🔎</span>
           <span>
             {nanaName || getRoleLabel("nana")} is looking
-            {searchQuery.trim() ? <> for <span style={{ color: AMBER }}>“{searchQuery.trim()}”</span></> : null}
+            {searchQuery.trim() ? <> for <span style={{ color: AMBER_T }}>“{searchQuery.trim()}”</span></> : null}
             {ageFilter !== "any" ? <> · Ages {ageFilter.replace("-", "–")}</> : null}
             {statusFilter !== "all" ? <> · {statusFilter === "in-progress" ? "Reading" : statusFilter === "not-started" ? "New" : "Finished"}</> : null}
           </span>
@@ -4359,7 +4429,7 @@ function LibraryView({
         <div style={{ position: "relative" }}>
           <span aria-hidden style={{
             position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)",
-            color: "rgba(247,240,227,0.45)", fontSize: 14, lineHeight: 1, pointerEvents: "none",
+            color: "var(--lk-ink-450, rgba(247,240,227,0.45))", fontSize: 14, lineHeight: 1, pointerEvents: "none",
           }}>🔎</span>
           <input
             type="search"
@@ -4371,8 +4441,8 @@ function LibraryView({
               width: "100%",
               padding: "10px 36px 10px 36px",
               borderRadius: 999,
-              border: "1px solid rgba(255,255,255,0.14)",
-              backgroundColor: "rgba(255,255,255,0.05)",
+              border: "1px solid var(--lk-line-140, rgba(255,255,255,0.14))",
+              backgroundColor: "var(--lk-fill-050, rgba(255,255,255,0.05))",
               color: CREAM,
               fontFamily: "DM Sans, sans-serif",
               fontSize: 13,
@@ -4380,7 +4450,7 @@ function LibraryView({
               boxSizing: "border-box",
             }}
             onFocus={(e) => { e.currentTarget.style.borderColor = `${AMBER}`; }}
-            onBlur={(e) => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.14)"; }}
+            onBlur={(e) => { e.currentTarget.style.borderColor = "var(--lk-line-140, rgba(255,255,255,0.14))"; }}
           />
           {searchQuery && (
             <button
@@ -4390,8 +4460,8 @@ function LibraryView({
               style={{
                 position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)",
                 width: 22, height: 22, borderRadius: "50%",
-                background: "rgba(255,255,255,0.10)", border: "1px solid rgba(255,255,255,0.14)",
-                color: "rgba(247,240,227,0.7)", fontSize: 13, lineHeight: 1, fontWeight: 700,
+                background: "var(--lk-fill-100, rgba(255,255,255,0.10))", border: "1px solid var(--lk-line-140, rgba(255,255,255,0.14))",
+                color: "var(--lk-ink-700, rgba(247,240,227,0.7))", fontSize: 13, lineHeight: 1, fontWeight: 700,
                 cursor: "pointer", padding: 0,
                 display: "inline-flex", alignItems: "center", justifyContent: "center",
               }}
@@ -4414,9 +4484,9 @@ function LibraryView({
                   display: "inline-flex", alignItems: "center", gap: 6,
                   padding: "6px 12px",
                   borderRadius: 999,
-                  background: active ? "rgba(201,146,42,0.18)" : "rgba(255,255,255,0.05)",
-                  border: `1px solid ${active ? "rgba(201,146,42,0.55)" : "rgba(255,255,255,0.10)"}`,
-                  color: active ? AMBER : "rgba(247,240,227,0.75)",
+                  background: active ? "var(--lk-accent-180, rgba(201,146,42,0.18))" : "var(--lk-fill-050, rgba(255,255,255,0.05))",
+                  border: `1px solid ${active ? "var(--lk-accent-550, rgba(201,146,42,0.55))" : "var(--lk-line-100, rgba(255,255,255,0.10))"}`,
+                  color: active ? AMBER_T : "var(--lk-ink-750, rgba(247,240,227,0.75))",
                   fontFamily: "DM Sans, sans-serif", fontSize: 11.5, fontWeight: 700,
                   cursor: "pointer", letterSpacing: "0.02em",
                   touchAction: "manipulation",
@@ -4426,8 +4496,8 @@ function LibraryView({
                 <span>{chip.label}</span>
                 <span style={{
                   fontSize: 10, fontWeight: 700,
-                  color: active ? NAVY : "rgba(247,240,227,0.55)",
-                  background: active ? AMBER : "rgba(255,255,255,0.08)",
+                  color: active ? NAVY : "var(--lk-ink-550, rgba(247,240,227,0.55))",
+                  background: active ? AMBER : "var(--lk-fill-080, rgba(255,255,255,0.08))",
                   borderRadius: 999,
                   padding: "1px 6px",
                   minWidth: 16, textAlign: "center",
@@ -4460,9 +4530,9 @@ function LibraryView({
                   display: "inline-flex", alignItems: "center", gap: 6,
                   padding: "5px 11px",
                   borderRadius: 999,
-                  background: active ? "rgba(96,165,250,0.18)" : "rgba(255,255,255,0.04)",
-                  border: `1px solid ${active ? "rgba(96,165,250,0.55)" : "rgba(255,255,255,0.10)"}`,
-                  color: active ? "#93c5fd" : "rgba(247,240,227,0.68)",
+                  background: active ? "rgba(96,165,250,0.18)" : "var(--lk-fill-040, rgba(255,255,255,0.04))",
+                  border: `1px solid ${active ? "rgba(96,165,250,0.55)" : "var(--lk-line-100, rgba(255,255,255,0.10))"}`,
+                  color: active ? "var(--lk-info-t2, #93c5fd)" : "var(--lk-ink-680, rgba(247,240,227,0.68))",
                   fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700,
                   cursor: "pointer", letterSpacing: "0.02em",
                   touchAction: "manipulation",
@@ -4485,10 +4555,37 @@ function LibraryView({
           // Drop echoes from a just-applied incoming scroll — see
           // suppressUntilRef in the useEffect above.
           if (performance.now() < suppressUntilRef.current) return;
-          onScroll((e.currentTarget as HTMLDivElement).scrollTop);
+          const el = e.currentTarget as HTMLDivElement;
+          onScroll(el.scrollTop, coverStyle ? readAnchor(el) : null);
         }}
-        style={{ flex: 1, padding: "0 10px 0", overflow: "auto", display: "flex", flexDirection: "column", gap: "12px" }}
+        style={{ flex: 1, padding: coverStyle ? "8px 16px 12px" : "0 10px 0", overflow: "auto", display: "flex", flexDirection: "column", gap: "12px" }}
       >
+        {/* Bookshelf, Storefront and Clean List: covers grouped as "Continue
+            reading", then by age. The Classic list below is unchanged. */}
+        {coverStyle && filteredBooks.length > 0 && (() => {
+          const groups = groupBooks(filteredBooks, progressByBookId);
+          const pick = readOnly ? undefined : onSelectBook;
+          if (libraryStyle === "shelf") return <ShelfStyle groups={groups} selectedId={selectedBookId} onSelect={pick} progressById={progressByBookId} />;
+          if (libraryStyle === "list") return <CleanListStyle groups={groups} selectedId={selectedBookId} onSelect={pick} progressById={progressByBookId} />;
+          const featured = filteredBooks.find(b => b.id === selectedBookId) ?? groups[0]?.books[0] ?? null;
+          const fp = featured ? progressByBookId.get(featured.id) : undefined;
+          const resume = !!(featured && fp && fp.currentPage > 1 && fp.currentPage < featured.pages.length);
+          return (
+            <StorefrontStyle groups={groups} selectedId={selectedBookId} onSelect={pick} progressById={progressByBookId} featured={featured}
+              featuredAction={readOnly || !featured ? undefined : (
+                <button
+                  type="button"
+                  data-testid="storefront-start"
+                  onClick={() => { onSelectBook(featured.id); onConfirmBook(resume ? fp!.currentPage : 1, resume ? fp!.currentOff ?? 0 : undefined); }}
+                  style={{
+                    display: "inline-block", padding: "13px 34px", minHeight: 48, borderRadius: 999, border: "none",
+                    background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)",
+                    color: NAVY, fontFamily: "DM Sans, sans-serif", fontSize: 17, fontWeight: 800, cursor: "pointer", touchAction: "manipulation",
+                  }}
+                >{resume ? `Continue, page ${fp!.currentPage} →` : "Start Reading →"}</button>
+              )} />
+          );
+        })()}
         {/* Continue Reading hero — Rick's Build 28 #6/#9: the
             in-progress book is Nana's first tap target when she opens
             the library. Instead of forcing her to scroll to the yellow
@@ -4497,7 +4594,7 @@ function LibraryView({
             of the shelf. One tap = jumps straight into the book at
             the saved page. Hidden in readOnly (Perry) and when there's
             no in-progress book. */}
-        {!readOnly && (() => {
+        {!readOnly && !coverStyle && (() => {
           // Pick the most recently read book that isn't finished.
           const inProgress = progress
             .filter(pr => {
@@ -4524,7 +4621,7 @@ function LibraryView({
               aria-label={`Continue reading ${b.title}, ${chapterLabel}`}
               style={{
                 display: "flex", alignItems: "center", gap: 16,
-                background: "linear-gradient(135deg, rgba(247,201,93,0.20) 0%, rgba(201,146,42,0.12) 100%)",
+                background: "linear-gradient(135deg, var(--lk-accent-hi-200, rgba(247,201,93,0.20)) 0%, var(--lk-accent-120, rgba(201,146,42,0.12)) 100%)",
                 borderTop: `2px solid ${AMBER}`,
                 borderRight: `2px solid ${AMBER}`,
                 borderBottom: `2px solid ${AMBER}`,
@@ -4533,7 +4630,7 @@ function LibraryView({
                 padding: "18px 20px 18px 16px",
                 cursor: "pointer",
                 textAlign: "left",
-                boxShadow: "0 10px 28px rgba(201,146,42,0.28), 0 0 0 1px rgba(247,201,93,0.20)",
+                boxShadow: "0 10px 28px var(--lk-accent-280, rgba(201,146,42,0.28)), 0 0 0 1px var(--lk-accent-hi-200, rgba(247,201,93,0.20))",
                 width: "100%",
                 flexShrink: 0,
                 touchAction: "manipulation",
@@ -4543,7 +4640,7 @@ function LibraryView({
               <div style={{
                 position: "relative",
                 width: 72, height: 100, flexShrink: 0,
-                borderRadius: 8, boxShadow: "3px 4px 12px rgba(0,0,0,0.55)",
+                borderRadius: 8, boxShadow: "3px 4px 12px var(--lk-shadow-550, rgba(0,0,0,0.55))",
                 border: `2px solid ${b.spineColor}`,
                 backgroundColor: b.spineColor,
                 display: "flex", alignItems: "center", justifyContent: "center",
@@ -4558,28 +4655,28 @@ function LibraryView({
                     backgroundColor: AMBER, color: NAVY,
                     fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800,
                     letterSpacing: "0.10em",
-                    boxShadow: "0 2px 8px rgba(0,0,0,0.45), 0 0 0 2px rgba(11,23,46,0.85)",
+                    boxShadow: "0 2px 8px var(--lk-shadow-450, rgba(0,0,0,0.45)), 0 0 0 2px var(--lk-bg-850, rgba(11,23,46,0.85))",
                   }}
                 >
                   RESUME
                 </div>
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: "0.16em", marginBottom: 4 }}>
+                <div style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: "0.16em", marginBottom: 4 }}>
                   📖 CONTINUE READING
                 </div>
                 <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 22, fontWeight: 700, lineHeight: 1.15, marginBottom: 4 }}>
                   {b.title}
                 </div>
-                <div style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: 12, marginBottom: 8 }}>
+                <div style={{ color: "var(--lk-ink-750, rgba(247,240,227,0.75))", fontFamily: "DM Sans, sans-serif", fontSize: 12, marginBottom: 8 }}>
                   {chapterLabel}
                 </div>
                 {/* Slim progress bar */}
-                <div style={{ width: "100%", height: 4, borderRadius: 999, backgroundColor: "rgba(255,255,255,0.10)", overflow: "hidden" }}>
+                <div style={{ width: "100%", height: 4, borderRadius: 999, backgroundColor: "var(--lk-fill-100, rgba(255,255,255,0.10))", overflow: "hidden" }}>
                   <div style={{
                     width: `${Math.min(100, Math.round((top.currentPage / b.pages.length) * 100))}%`,
                     height: "100%",
-                    background: `linear-gradient(90deg, ${AMBER} 0%, #f7c95d 100%)`,
+                    background: `linear-gradient(90deg, ${AMBER} 0%, var(--lk-accent-hi, #f7c95d) 100%)`,
                     transition: "width 240ms ease",
                   }} />
                 </div>
@@ -4588,10 +4685,10 @@ function LibraryView({
                 flexShrink: 0,
                 display: "inline-flex", alignItems: "center", justifyContent: "center",
                 width: 44, height: 44, borderRadius: "50%",
-                background: "linear-gradient(135deg, #f7c95d, #C9922A)",
+                background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d), var(--lk-accent, #C9922A))",
                 color: NAVY,
                 fontSize: 20, fontWeight: 800,
-                boxShadow: "0 4px 12px rgba(0,0,0,0.35)",
+                boxShadow: "0 4px 12px var(--lk-shadow-350, rgba(0,0,0,0.35))",
               }}>
                 →
               </div>
@@ -4605,12 +4702,12 @@ function LibraryView({
             margin: "32px auto",
             maxWidth: 320,
             textAlign: "center",
-            color: "rgba(247,240,227,0.55)",
+            color: "var(--lk-ink-550, rgba(247,240,227,0.55))",
             fontFamily: "DM Sans, sans-serif",
             padding: "20px 16px",
-            border: "1px dashed rgba(255,255,255,0.14)",
+            border: "1px dashed var(--lk-line-140, rgba(255,255,255,0.14))",
             borderRadius: 14,
-            background: "rgba(255,255,255,0.025)",
+            background: "var(--lk-fill-025, rgba(255,255,255,0.025))",
           }}>
             <div style={{ fontSize: 32, marginBottom: 8 }}>{catalogLoading ? "📚" : "🔍"}</div>
             <div data-testid="library-empty" style={{ color: CREAM, fontSize: 14, fontWeight: 700, marginBottom: 4 }}>
@@ -4618,24 +4715,24 @@ function LibraryView({
             </div>
             {catalogLoading && (
               <div style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 12 }}>
-                {q ? <>“<span style={{ color: AMBER }}>{searchQuery}</span>” may appear in a moment. No need to search again.</> : "They will appear here in a moment."}
+                {q ? <>“<span style={{ color: AMBER_T }}>{searchQuery}</span>” may appear in a moment. No need to search again.</> : "They will appear here in a moment."}
               </div>
             )}
             {!catalogLoading && (
             <div style={{ fontSize: 12, lineHeight: 1.5, marginBottom: 12 }}>
-              {q ? <>Nothing matches "<span style={{ color: AMBER }}>{searchQuery}</span>"</> : "Try a different filter"}
-              {q && statusFilter !== "all" ? <> in <span style={{ color: AMBER }}>{statusFilter.replace("-", " ")}</span></> : null}
+              {q ? <>Nothing matches "<span style={{ color: AMBER_T }}>{searchQuery}</span>"</> : "Try a different filter"}
+              {q && statusFilter !== "all" ? <> in <span style={{ color: AMBER_T }}>{statusFilter.replace("-", " ")}</span></> : null}
               .
             </div>
             )}
             <button
               onClick={() => { setSearchQuery(""); setStatusFilter("all"); }}
               style={{
-                background: "rgba(201,146,42,0.18)",
+                background: "var(--lk-accent-180, rgba(201,146,42,0.18))",
                 border: `1px solid ${AMBER}`,
                 borderRadius: 999,
                 padding: "6px 14px",
-                color: AMBER,
+                color: AMBER_T,
                 fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700,
                 cursor: "pointer",
               }}
@@ -4645,7 +4742,7 @@ function LibraryView({
                 onClick={() => onFindMoreBooks(searchQuery.trim())}
                 style={{
                   display: "block", width: "100%", marginTop: 10,
-                  background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+                  background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)",
                   border: "none", borderRadius: 999,
                   padding: "12px 16px", minHeight: 48,
                   color: NAVY, fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 800,
@@ -4655,7 +4752,7 @@ function LibraryView({
             )}
           </div>
         )}
-        {filteredBooks.map(book => {
+        {!coverStyle && filteredBooks.map(book => {
           const sel = book.id === selectedBookId;
           // Per-card progress: small bar + "Chapter 3 of 12" (chapter books)
           // or "Page 47 of 80" (flat books) + relative date. ✓ when finished.
@@ -4690,16 +4787,16 @@ function LibraryView({
               aria-disabled={readOnly}
               style={{
                 display: "flex", alignItems: "center", gap: "14px",
-                backgroundColor: sel ? "rgba(201,146,42,0.10)" : "rgba(255,255,255,0.035)",
-                borderTop: `1px solid ${sel ? AMBER : "rgba(255,255,255,0.10)"}`,
-                borderRight: `1px solid ${sel ? AMBER : "rgba(255,255,255,0.10)"}`,
-                borderBottom: `1px solid ${sel ? AMBER : "rgba(255,255,255,0.10)"}`,
+                backgroundColor: sel ? "var(--lk-accent-100, rgba(201,146,42,0.10))" : "var(--lk-fill-035, rgba(255,255,255,0.035))",
+                borderTop: `1px solid ${sel ? AMBER : "var(--lk-line-100, rgba(255,255,255,0.10))"}`,
+                borderRight: `1px solid ${sel ? AMBER : "var(--lk-line-100, rgba(255,255,255,0.10))"}`,
+                borderBottom: `1px solid ${sel ? AMBER : "var(--lk-line-100, rgba(255,255,255,0.10))"}`,
                 borderLeft: `6px solid ${book.spineColor}`,
                 borderRadius: "10px",
                 padding: "16px 18px 16px 14px",
                 cursor: readOnly ? "default" : "pointer",
                 textAlign: "left",
-                boxShadow: sel ? `0 0 18px rgba(201,146,42,0.22)` : "none",
+                boxShadow: sel ? `0 0 18px var(--lk-accent-220, rgba(201,146,42,0.22))` : "none",
                 transition: "all 0.15s",
                 width: "100%",
                 flexShrink: 0,
@@ -4708,7 +4805,7 @@ function LibraryView({
               <div style={{
                 position: "relative",
                 width: "64px", height: "88px", flexShrink: 0,
-                borderRadius: "6px", boxShadow: "2px 3px 10px rgba(0,0,0,0.5)",
+                borderRadius: "6px", boxShadow: "2px 3px 10px var(--lk-shadow-500, rgba(0,0,0,0.5))",
                 border: `2px solid ${book.spineColor}`,
                 backgroundColor: book.spineColor,
                 display: "flex", alignItems: "center", justifyContent: "center",
@@ -4724,10 +4821,10 @@ function LibraryView({
                     style={{
                       position: "absolute", top: "-7px", right: "-7px",
                       width: "26px", height: "26px", borderRadius: "50%",
-                      backgroundColor: AMBER, color: "#1B2B4B",
+                      backgroundColor: AMBER, color: "var(--lk-navy, #1B2B4B)",
                       display: "flex", alignItems: "center", justifyContent: "center",
                       fontSize: "15px", fontWeight: 800,
-                      boxShadow: "0 2px 8px rgba(0,0,0,0.45), 0 0 0 2px rgba(11,23,46,0.85)",
+                      boxShadow: "0 2px 8px var(--lk-shadow-450, rgba(0,0,0,0.45)), 0 0 0 2px var(--lk-bg-850, rgba(11,23,46,0.85))",
                     }}
                   >
                     ✓
@@ -4735,7 +4832,7 @@ function LibraryView({
                 )}
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "20px", fontWeight: 700, lineHeight: 1.2, marginBottom: "2px" }}>
+                <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: "20px", fontWeight: 700, lineHeight: 1.2, marginBottom: "2px" }}>
                   {book.title}
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}>
@@ -4745,16 +4842,16 @@ function LibraryView({
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: "5px", marginBottom: "4px", flexWrap: "wrap" }}>
                   <span style={{
-                    backgroundColor: sel ? "rgba(201,146,42,0.22)" : "rgba(255,255,255,0.08)",
-                    color: sel ? AMBER : "rgba(247,240,227,0.85)",
+                    backgroundColor: sel ? "var(--lk-accent-220, rgba(201,146,42,0.22))" : "var(--lk-fill-080, rgba(255,255,255,0.08))",
+                    color: sel ? AMBER_T : "var(--lk-ink-850, rgba(247,240,227,0.85))",
                     fontFamily: "DM Sans, sans-serif", fontSize: "11px", fontWeight: 700,
                     borderRadius: "8px", padding: "3px 9px", letterSpacing: "0.04em",
                   }}>
                     Ages {book.ageRange}
                   </span>
                   <span style={{
-                    backgroundColor: sel ? "rgba(192,132,252,0.18)" : "rgba(255,255,255,0.06)",
-                    color: sel ? "#c084fc" : "rgba(192,132,252,0.9)",
+                    backgroundColor: sel ? "rgba(192,132,252,0.18)" : "var(--lk-fill-060, rgba(255,255,255,0.06))",
+                    color: sel ? "var(--lk-purple-t, #c084fc)" : "var(--lk-lt-c084fc-900, rgba(192,132,252,0.9))",
                     fontFamily: "DM Sans, sans-serif", fontSize: "11px", fontWeight: 700,
                     borderRadius: "8px", padding: "3px 9px", letterSpacing: "0.04em",
                   }}>
@@ -4762,8 +4859,8 @@ function LibraryView({
                   </span>
                   {book.lexile && (
                     <span style={{
-                      backgroundColor: sel ? "rgba(20,184,166,0.2)" : "rgba(255,255,255,0.06)",
-                      color: sel ? "#2dd4bf" : "rgba(247,240,227,0.38)",
+                      backgroundColor: sel ? "rgba(20,184,166,0.2)" : "var(--lk-fill-060, rgba(255,255,255,0.06))",
+                      color: sel ? "var(--lk-lt-2dd4bf, #2dd4bf)" : "var(--lk-ink-380, rgba(247,240,227,0.38))",
                       fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700,
                       borderRadius: "8px", padding: "2px 7px", letterSpacing: "0.04em",
                     }}>
@@ -4774,7 +4871,7 @@ function LibraryView({
                 {/* Rick's Build 33 B-2: short blurbs stay one line, long
                     ones grow to at most three lines. */}
                 <div style={{
-                  color: "rgba(247,240,227,0.8)", fontFamily: "Merriweather, serif", fontSize: "13px", fontStyle: "italic", lineHeight: 1.55, marginBottom: "6px",
+                  color: "var(--lk-ink-800, rgba(247,240,227,0.8))", fontFamily: "Merriweather, serif", fontSize: "13px", fontStyle: "italic", lineHeight: 1.55, marginBottom: "6px",
                   display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden",
                 }}>
                   {book.tagline}
@@ -4786,7 +4883,7 @@ function LibraryView({
                   <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "5px" }}>
                     <div style={{
                       flex: "0 0 60px", height: "4px", borderRadius: "999px",
-                      backgroundColor: "rgba(255,255,255,0.08)",
+                      backgroundColor: "var(--lk-fill-080, rgba(255,255,255,0.08))",
                       overflow: "hidden",
                     }}>
                       <div style={{
@@ -4796,14 +4893,14 @@ function LibraryView({
                       }} />
                     </div>
                     <span style={{
-                      color: cardIsFinished ? "#86efac" : "rgba(201,146,42,0.85)",
+                      color: cardIsFinished ? "var(--lk-ok-t, #86efac)" : "var(--lk-accent-t-850, rgba(201,146,42,0.85))",
                       fontFamily: "DM Sans, sans-serif", fontSize: "9.5px", fontWeight: 700,
                       letterSpacing: "0.02em",
                     }}>
                       {cardIsFinished && "✓ "}{cardProgressLabel}
                     </span>
                     <span style={{
-                      color: "rgba(247,240,227,0.35)",
+                      color: "var(--lk-ink-350, rgba(247,240,227,0.35))",
                       fontFamily: "DM Sans, sans-serif", fontSize: "9px",
                     }}>
                       · {relTime(cardSaved!.lastReadAt)}
@@ -4811,11 +4908,11 @@ function LibraryView({
                   </div>
                 )}
                 <div style={{ display: "flex", alignItems: "center", gap: "5px", flexWrap: "wrap" }}>
-                  <span style={{ color: "rgba(247,240,227,0.32)", fontFamily: "DM Sans, sans-serif", fontSize: "10px" }}>Read free:</span>
+                  <span style={{ color: "var(--lk-ink-320, rgba(247,240,227,0.32))", fontFamily: "DM Sans, sans-serif", fontSize: "10px" }}>Read free:</span>
                   <a href={book.standardEbooksUrl} target="_blank" rel="noopener noreferrer"
                     onClick={e => e.stopPropagation()}
                     style={{
-                      color: sel ? "#60a5fa" : "rgba(147,197,253,0.7)",
+                      color: sel ? "var(--lk-info-t, #60a5fa)" : "var(--lk-lt-93c5fd-700, rgba(147,197,253,0.7))",
                       fontFamily: "DM Sans, sans-serif", fontSize: "10px", fontWeight: 700,
                       textDecoration: "none", letterSpacing: "0.03em",
                       backgroundColor: "rgba(96,165,250,0.10)", borderRadius: "5px", padding: "1px 5px",
@@ -4826,7 +4923,7 @@ function LibraryView({
                   <a href={book.gutenbergUrl} target="_blank" rel="noopener noreferrer"
                     onClick={e => e.stopPropagation()}
                     style={{
-                      color: sel ? "#86efac" : "rgba(134,239,172,0.65)",
+                      color: sel ? "var(--lk-ok-t, #86efac)" : "var(--lk-lt-86efac-650, rgba(134,239,172,0.65))",
                       fontFamily: "DM Sans, sans-serif", fontSize: "10px", fontWeight: 700,
                       textDecoration: "none", letterSpacing: "0.03em",
                       backgroundColor: "rgba(134,239,172,0.08)", borderRadius: "5px", padding: "1px 5px",
@@ -4852,11 +4949,11 @@ function LibraryView({
                         backgroundColor: AMBER, color: NAVY,
                         display: "inline-flex", alignItems: "center", justifyContent: "center",
                         fontSize: 20, fontWeight: 800,
-                        boxShadow: "0 4px 14px rgba(201,146,42,0.45)",
+                        boxShadow: "0 4px 14px var(--lk-accent-450, rgba(201,146,42,0.45))",
                       }}
                     >✓</div>
                   ) : (
-                    <span aria-hidden style={{ color: "rgba(247,240,227,0.35)", fontSize: 22, lineHeight: 1 }}>›</span>
+                    <span aria-hidden style={{ color: "var(--lk-ink-350, rgba(247,240,227,0.35))", fontSize: 22, lineHeight: 1 }}>›</span>
                   )}
                 </div>
               )}
@@ -4871,8 +4968,8 @@ function LibraryView({
             onClick={() => onFindMoreBooks("")}
             style={{
               display: "flex", alignItems: "center", gap: 12,
-              backgroundColor: "rgba(201,146,42,0.10)",
-              border: "1px dashed rgba(201,146,42,0.55)",
+              backgroundColor: "var(--lk-accent-100, rgba(201,146,42,0.10))",
+              border: "1px dashed var(--lk-accent-550, rgba(201,146,42,0.55))",
               borderRadius: 12,
               padding: "12px 14px",
               cursor: "pointer",
@@ -4884,10 +4981,10 @@ function LibraryView({
           >
             <span aria-hidden style={{ fontSize: 22, flexShrink: 0 }}>🔎</span>
             <div style={{ textAlign: "left" }}>
-              <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 800 }}>
+              <div style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 800 }}>
                 Can't find a book? Search free classics
               </div>
-              <div style={{ color: "rgba(247,240,227,0.6)", fontFamily: "DM Sans, sans-serif", fontSize: 12, marginTop: 2 }}>
+              <div style={{ color: "var(--lk-ink-600, rgba(247,240,227,0.6))", fontFamily: "DM Sans, sans-serif", fontSize: 12, marginTop: 2 }}>
                 Standard Ebooks · Project Gutenberg
               </div>
             </div>
@@ -4930,15 +5027,15 @@ function LibraryView({
           return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
         };
         return (
-          <div style={{ padding: "10px 12px 12px", borderTop: "1px solid rgba(255,255,255,0.07)", flexShrink: 0 }}>
+          <div style={{ padding: "10px 12px 12px", borderTop: "1px solid var(--lk-line-070, rgba(255,255,255,0.07))", flexShrink: 0 }}>
             {hasProgress && (
-              <div style={{ marginBottom: "8px", backgroundColor: "rgba(201,146,42,0.08)", border: "1px solid rgba(201,146,42,0.22)", borderRadius: "10px", padding: "8px 10px", display: "flex", alignItems: "center", gap: "8px" }}>
+              <div style={{ marginBottom: "8px", backgroundColor: "var(--lk-accent-080, rgba(201,146,42,0.08))", border: "1px solid var(--lk-accent-220, rgba(201,146,42,0.22))", borderRadius: "10px", padding: "8px 10px", display: "flex", alignItems: "center", gap: "8px" }}>
                 <span style={{ fontSize: "15px" }}>🔖</span>
                 <div style={{ flex: 1 }}>
-                  <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: "9.5px", fontWeight: 700 }}>
+                  <div style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: "9.5px", fontWeight: 700 }}>
                     {book?.title} · {chapterRef} · Page {savedPage} of {pagesTotal}
                   </div>
-                  <div style={{ color: "rgba(247,240,227,0.4)", fontFamily: "DM Sans, sans-serif", fontSize: "8px", marginTop: "1px" }}>
+                  <div style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))", fontFamily: "DM Sans, sans-serif", fontSize: "8px", marginTop: "1px" }}>
                     {chapterTitle && <span>{chapterTitle} · </span>}
                     {chapterCounter && <span>{chapterCounter} · </span>}
                     Last read {formatShort(saved!.lastReadAt)}
@@ -4958,14 +5055,14 @@ function LibraryView({
                 // gradient so it visually anchors the bottom of the
                 // library view.
                 width: "100%",
-                background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
-                color: "#1B2B4B",
+                background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)",
+                color: "var(--lk-navy, #1B2B4B)",
                 border: "none", borderRadius: "32px", padding: "20px",
                 fontSize: hasProgress ? "17px" : "20px",
                 fontFamily: "DM Sans, sans-serif", fontWeight: 800,
                 cursor: "pointer", letterSpacing: "0.02em",
                 marginBottom: hasProgress ? "10px" : 0,
-                boxShadow: "0 10px 28px rgba(201,146,42,0.55), 0 0 0 1px rgba(247,201,93,0.30)",
+                boxShadow: "0 10px 28px var(--lk-accent-550, rgba(201,146,42,0.55)), 0 0 0 1px var(--lk-accent-hi-300, rgba(247,201,93,0.30))",
                 minHeight: 64,
                 touchAction: "manipulation",
               }}
@@ -4980,8 +5077,8 @@ function LibraryView({
               <button
                 onClick={() => onConfirmBook(1)}
                 style={{
-                  width: "100%", backgroundColor: "transparent", color: "rgba(247,240,227,0.55)",
-                  border: "1px solid rgba(255,255,255,0.14)", borderRadius: "28px", padding: "12px",
+                  width: "100%", backgroundColor: "transparent", color: "var(--lk-ink-550, rgba(247,240,227,0.55))",
+                  border: "1px solid var(--lk-line-140, rgba(255,255,255,0.14))", borderRadius: "28px", padding: "12px",
                   fontSize: "12px", fontFamily: "DM Sans, sans-serif", fontWeight: 600,
                   cursor: "pointer", letterSpacing: "0.02em",
                   minHeight: 40,
@@ -5125,13 +5222,13 @@ function OnboardingView({
     <div style={{ display: "flex", flexDirection: "column", marginBottom: "10px", gap: 6 }}>
       <div style={{ display: "flex", alignItems: "center" }}>
         {onBack ? (
-          <button onClick={onBack} style={{ background: "none", border: "none", color: "rgba(247,240,227,0.45)", fontSize: "16px", cursor: "pointer", padding: "0 6px 0 0", lineHeight: 1, flexShrink: 0 }}>
+          <button onClick={onBack} style={{ background: "none", border: "none", color: "var(--lk-ink-450, rgba(247,240,227,0.45))", fontSize: "16px", cursor: "pointer", padding: "0 6px 0 0", lineHeight: 1, flexShrink: 0 }}>
             ←
           </button>
         ) : (
           <div style={{ width: "22px" }} />
         )}
-        <div style={{ flex: 1, textAlign: "center", color: "rgba(247,240,227,0.45)", fontFamily: "DM Sans, sans-serif", fontSize: "9px", letterSpacing: "0.12em", fontWeight: 700 }}>
+        <div style={{ flex: 1, textAlign: "center", color: "var(--lk-ink-450, rgba(247,240,227,0.45))", fontFamily: "DM Sans, sans-serif", fontSize: "9px", letterSpacing: "0.12em", fontWeight: 700 }}>
           STEP {stepNum} OF {total}
         </div>
         <div style={{ width: "22px" }} />
@@ -5148,9 +5245,9 @@ function OnboardingView({
                 flex: 1,
                 height: 4,
                 borderRadius: 999,
-                background: isDone ? AMBER : isCurrent ? "rgba(247,201,93,0.65)" : "rgba(255,255,255,0.10)",
+                background: isDone ? AMBER : isCurrent ? "var(--lk-accent-hi-650, rgba(247,201,93,0.65))" : "var(--lk-fill-100, rgba(255,255,255,0.10))",
                 transition: "background 240ms ease",
-                boxShadow: isCurrent ? "0 0 8px rgba(247,201,93,0.4)" : undefined,
+                boxShadow: isCurrent ? "0 0 8px var(--lk-accent-hi-400, rgba(247,201,93,0.4))" : undefined,
               }}
             />
           );
@@ -5160,13 +5257,13 @@ function OnboardingView({
   );
 
   const card: React.CSSProperties = {
-    backgroundColor: "rgba(255,255,255,0.04)",
-    border: "1px solid rgba(255,255,255,0.10)",
+    backgroundColor: "var(--lk-fill-040, rgba(255,255,255,0.04))",
+    border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))",
     borderRadius: "16px", padding: "18px 16px",
     display: "flex", flexDirection: "column", gap: "12px",
   };
   const inputStyle: React.CSSProperties = {
-    backgroundColor: "rgba(255,255,255,0.07)", border: "1px solid rgba(201,146,42,0.3)",
+    backgroundColor: "var(--lk-fill-070, rgba(255,255,255,0.07))", border: "1px solid var(--lk-accent-300, rgba(201,146,42,0.3))",
     borderRadius: "10px", padding: "10px 12px", color: CREAM,
     fontFamily: "DM Sans, sans-serif", fontSize: "11px", outline: "none",
     width: "100%", boxSizing: "border-box",
@@ -5183,8 +5280,8 @@ function OnboardingView({
       const canSubmitRegister = displayName.trim() && firstName.trim() && lastName.trim() && email.trim() && password.length >= 8;
       const canSubmitLogin = email.trim() && password.length >= 1;
       const polishedInput: React.CSSProperties = {
-        backgroundColor: "rgba(255,255,255,0.06)",
-        border: "1px solid rgba(201,146,42,0.32)",
+        backgroundColor: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+        border: "1px solid var(--lk-accent-320, rgba(201,146,42,0.32))",
         borderRadius: 12,
         padding: "9px 12px",
         color: CREAM,
@@ -5205,15 +5302,15 @@ function OnboardingView({
         fontSize: 16,
         display: "inline-flex", alignItems: "center", justifyContent: "center",
         padding: 0,
-        color: AMBER,
+        color: AMBER_T,
       };
       return (
         <div className="nm-kb-pad" data-kb-scope data-testid="nana-signin" style={{
           flex: 1,
           display: "flex",
           flexDirection: "column",
-          backgroundColor: "#0b172e",
-          backgroundImage: "radial-gradient(700px 380px at 80% -20%, rgba(201,146,42,0.20), transparent 70%), radial-gradient(560px 360px at -10% 110%, rgba(167,139,250,0.16), transparent 70%)",
+          backgroundColor: "var(--lk-bg, #0b172e)",
+          backgroundImage: "radial-gradient(700px 380px at 80% -20%, var(--lk-accent-200, rgba(201,146,42,0.20)), transparent 70%), radial-gradient(560px 360px at -10% 110%, rgba(167,139,250,0.16), transparent 70%)",
           // Tightened from 18×20×20 → 10×16×12 so the form fits the
           // iPad viewport without overflow on most device sizes. Rick:
           // "here why scroll? all screens should be properly fit."
@@ -5224,8 +5321,8 @@ function OnboardingView({
           <style>{`
             @keyframes onb-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
             @keyframes onb-mascot { 0%,100% { transform: translateY(0) rotate(-2deg); } 50% { transform: translateY(-6px) rotate(2deg); } }
-            .onb-input:focus { border-color: ${AMBER} !important; background-color: rgba(255,255,255,0.10) !important; box-shadow: 0 0 0 3px rgba(201,146,42,0.18) !important; }
-            .onb-cta { background: linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%) !important; box-shadow: 0 10px 28px rgba(201,146,42,0.45) !important; }
+            .onb-input:focus { border-color: ${AMBER} !important; background-color: var(--lk-fill-100, rgba(255,255,255,0.10)) !important; box-shadow: 0 0 0 3px var(--lk-accent-180, rgba(201,146,42,0.18)) !important; }
+            .onb-cta { background: linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%) !important; box-shadow: 0 10px 28px var(--lk-accent-450, rgba(201,146,42,0.45)) !important; }
             .onb-cta:not(:disabled):hover { transform: translateY(-1px); }
           `}</style>
 
@@ -5240,10 +5337,10 @@ function OnboardingView({
                 display: "inline-flex", alignItems: "center", gap: 6,
                 marginBottom: 6,
                 padding: "6px 12px",
-                background: "rgba(255,255,255,0.06)",
-                border: "1px solid rgba(247,201,93,0.45)",
+                background: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+                border: "1px solid var(--lk-accent-hi-450, rgba(247,201,93,0.45))",
                 borderRadius: 999,
-                color: AMBER,
+                color: AMBER_T,
                 fontFamily: "DM Sans, sans-serif",
                 fontSize: 11, fontWeight: 700,
                 letterSpacing: "0.02em",
@@ -5259,26 +5356,26 @@ function OnboardingView({
           {/* Hero illustration + welcome */}
           <div style={{ textAlign: "center", marginBottom: 8, animation: "onb-rise 0.5s both" }}>
             <div style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", animation: "onb-mascot 2.8s ease-in-out infinite", filter: "drop-shadow(0 8px 20px rgba(201,146,42,0.35))" }}>
-              <IllustReadStar color={AMBER} size={48} />
+              <IllustReadStar color={AMBER_T} size={48} />
             </div>
             <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 18, fontWeight: 700, marginTop: 2 }}>
-              Welcome to <span style={{ color: AMBER }}>NeverMiss</span>
+              Welcome to <span style={{ color: AMBER_T }}>NeverMiss</span>
             </div>
-            <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "Merriweather, serif", fontSize: 10, fontStyle: "italic", marginTop: 2 }}>
+            <div style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: "Merriweather, serif", fontSize: 10, fontStyle: "italic", marginTop: 2 }}>
               Reading together, across any distance
             </div>
           </div>
 
           {/* Auth mode toggle */}
-          <div style={{ display: "flex", backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 14, padding: 3, marginBottom: 8, animation: "onb-rise 0.55s 0.05s both" }}>
+          <div style={{ display: "flex", backgroundColor: "var(--lk-fill-050, rgba(255,255,255,0.05))", border: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))", borderRadius: 14, padding: 3, marginBottom: 8, animation: "onb-rise 0.55s 0.05s both" }}>
             {(["register", "login"] as const).map(m => (
               <button key={m} onClick={() => setAuthMode(m)} style={{
                 flex: 1, border: "none", borderRadius: 10, padding: "7px 6px",
                 fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 800,
                 cursor: "pointer", transition: "all 0.18s",
-                background: authMode === m ? "linear-gradient(135deg, #f7c95d, #C9922A)" : "transparent",
-                color: authMode === m ? NAVY : "rgba(247,240,227,0.6)",
-                boxShadow: authMode === m ? "0 4px 14px rgba(201,146,42,0.4)" : undefined,
+                background: authMode === m ? "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d), var(--lk-accent, #C9922A))" : "transparent",
+                color: authMode === m ? NAVY : "var(--lk-ink-600, rgba(247,240,227,0.6))",
+                boxShadow: authMode === m ? "0 4px 14px var(--lk-accent-400, rgba(201,146,42,0.4))" : undefined,
                 letterSpacing: "0.02em",
               }}>
                 {m === "register" ? "Create Account" : "Log In"}
@@ -5287,8 +5384,8 @@ function OnboardingView({
           </div>
 
           <div style={{
-            backgroundColor: "rgba(255,255,255,0.04)",
-            border: "1px solid rgba(255,255,255,0.10)",
+            backgroundColor: "var(--lk-fill-040, rgba(255,255,255,0.04))",
+            border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))",
             borderRadius: 16,
             padding: "12px 14px 12px",
             display: "flex",
@@ -5300,7 +5397,7 @@ function OnboardingView({
             {authMode === "register" ? (
               <>
                 <div>
-                  <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800, letterSpacing: "0.14em", marginBottom: 6 }}>WHAT DO YOUR GRANDCHILDREN CALL YOU?</div>
+                  <div style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800, letterSpacing: "0.14em", marginBottom: 6 }}>WHAT DO YOUR GRANDCHILDREN CALL YOU?</div>
                   <input className="onb-input" value={displayName} onChange={e => setDisplayName((e.target as HTMLInputElement).value)} placeholder="Nana, Grandma, Papa, Oma…" style={polishedInput} autoFocus />
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>
@@ -5352,7 +5449,7 @@ function OnboardingView({
             )}
             {authError && (
               <div style={{
-                color: "#fca5a5",
+                color: "var(--lk-bad-t, #fca5a5)",
                 fontFamily: "DM Sans, sans-serif", fontSize: 11, textAlign: "center", lineHeight: 1.45,
                 backgroundColor: "rgba(239,68,68,0.10)",
                 border: "1px solid rgba(239,68,68,0.35)",
@@ -5390,7 +5487,7 @@ function OnboardingView({
                 on register; logging in is a returning user. */}
             {authMode === "register" && (
               <div style={{
-                color: "rgba(247,240,227,0.5)",
+                color: "var(--lk-ink-500, rgba(247,240,227,0.5))",
                 fontFamily: "DM Sans, sans-serif",
                 fontSize: 10,
                 lineHeight: 1.55,
@@ -5402,7 +5499,7 @@ function OnboardingView({
                   href="https://nevermiss.family/data/NeverMiss_Terms_of_Use_v2%20(1).pdf"
                   target="_blank"
                   rel="noopener noreferrer"
-                  style={{ color: AMBER, textDecoration: "underline" }}
+                  style={{ color: AMBER_T, textDecoration: "underline" }}
                 >
                   Terms of Use
                 </a>{" "}
@@ -5411,7 +5508,7 @@ function OnboardingView({
                   href="https://nevermiss.family/data/NeverMiss_Privacy_Policy_v3.pdf"
                   target="_blank"
                   rel="noopener noreferrer"
-                  style={{ color: AMBER, textDecoration: "underline" }}
+                  style={{ color: AMBER_T, textDecoration: "underline" }}
                 >
                   Privacy Policy
                 </a>.
@@ -5421,11 +5518,11 @@ function OnboardingView({
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, marginTop: 4 }}>
                 <div style={{
                   width: 28, height: 28, borderRadius: '50%',
-                  border: '3px solid rgba(201,146,42,0.25)',
+                  border: '3px solid var(--lk-accent-250, rgba(201,146,42,0.25))',
                   borderTopColor: AMBER,
                   animation: 'spin 0.9s linear infinite',
                 }} />
-                <span style={{ color: 'rgba(247,240,227,0.65)', fontFamily: 'DM Sans, sans-serif', fontSize: 11, textAlign: 'center', lineHeight: 1.45 }}>
+                <span style={{ color: 'var(--lk-ink-650, rgba(247,240,227,0.65))', fontFamily: 'DM Sans, sans-serif', fontSize: 11, textAlign: 'center', lineHeight: 1.45 }}>
                   Creating your reading room…<br/>
                   <span style={{ fontSize: 10, opacity: 0.7 }}>This takes a moment on first visit</span>
                 </span>
@@ -5435,7 +5532,7 @@ function OnboardingView({
 
           {/* Trust strip + skip */}
           <div style={{ marginTop: 8, display: "flex", flexDirection: "column", alignItems: "center", gap: 6, animation: "onb-rise 0.65s 0.15s both" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, color: "rgba(247,240,227,0.45)", fontFamily: "DM Sans, sans-serif", fontSize: 9, letterSpacing: "0.08em" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--lk-ink-450, rgba(247,240,227,0.45))", fontFamily: "DM Sans, sans-serif", fontSize: 9, letterSpacing: "0.08em" }}>
               <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>🔒 Private to your family</span>
               <span style={{ opacity: 0.4 }}>·</span>
               <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>🇺🇸 Built for iPad</span>
@@ -5448,8 +5545,8 @@ function OnboardingView({
     if (step === 1) return (
       <div style={{
         flex: 1, display: "flex", flexDirection: "column",
-        backgroundColor: "#0b172e",
-        backgroundImage: "radial-gradient(700px 380px at 80% -20%, rgba(201,146,42,0.18), transparent 70%), radial-gradient(560px 360px at -10% 110%, rgba(96,165,250,0.14), transparent 70%)",
+        backgroundColor: "var(--lk-bg, #0b172e)",
+        backgroundImage: "radial-gradient(700px 380px at 80% -20%, var(--lk-accent-180, rgba(201,146,42,0.18)), transparent 70%), radial-gradient(560px 360px at -10% 110%, rgba(96,165,250,0.14), transparent 70%)",
         padding: "18px 20px 20px", overflow: "auto",
       }}>
         <style>{`
@@ -5459,12 +5556,12 @@ function OnboardingView({
         {renderStepNav(2, 3)}
         <div style={{ textAlign: "center", marginBottom: 14, animation: "onb-rise2 0.5s both" }}>
           <div style={{ display: "inline-flex", filter: "drop-shadow(0 8px 22px rgba(201,146,42,0.35))" }}>
-            <IllustPhone color={AMBER} size={56} />
+            <IllustPhone color={AMBER_T} size={56} />
           </div>
           <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 20, fontWeight: 700, marginTop: 4 }}>
-            Share this <span style={{ color: AMBER }}>code</span>
+            Share this <span style={{ color: AMBER_T }}>code</span>
           </div>
-          <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2 }}>
+          <div style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2 }}>
             {/* Pre-connection — we don't yet know the grandchild's name
                 (her parent enters it on the other iPad after they join).
                 Rick: "grandchild name can be anyone... at that screen it
@@ -5473,24 +5570,24 @@ function OnboardingView({
           </div>
         </div>
         <div style={{
-          backgroundColor: "rgba(255,255,255,0.04)",
-          border: "1px solid rgba(255,255,255,0.10)",
+          backgroundColor: "var(--lk-fill-040, rgba(255,255,255,0.04))",
+          border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))",
           borderRadius: 18,
           padding: "20px 18px 16px",
           display: "flex", flexDirection: "column", gap: 14,
           animation: "onb-rise2 0.55s 0.05s both",
         }}>
           <div style={{ textAlign: "center", position: "relative" }}>
-            <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 9, letterSpacing: "0.18em", fontWeight: 800, marginBottom: 10 }}>FAMILY INVITE CODE</div>
+            <div style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 9, letterSpacing: "0.18em", fontWeight: 800, marginBottom: 10 }}>FAMILY INVITE CODE</div>
             <div style={{
               position: "relative",
-              background: "linear-gradient(135deg, rgba(247,201,93,0.14) 0%, rgba(201,146,42,0.18) 100%)",
-              border: "2px solid rgba(201,146,42,0.55)",
+              background: "linear-gradient(135deg, var(--lk-accent-hi-140, rgba(247,201,93,0.14)) 0%, var(--lk-accent-180, rgba(201,146,42,0.18)) 100%)",
+              border: "2px solid var(--lk-accent-550, rgba(201,146,42,0.55))",
               borderRadius: 14,
               padding: "16px 14px",
               fontFamily: "DM Sans, sans-serif", fontSize: 30, fontWeight: 900,
-              color: AMBER, letterSpacing: "0.20em", fontVariantNumeric: "tabular-nums",
-              boxShadow: "0 8px 24px rgba(201,146,42,0.20), inset 0 1px 0 rgba(255,255,255,0.08)",
+              color: AMBER_T, letterSpacing: "0.20em", fontVariantNumeric: "tabular-nums",
+              boxShadow: "0 8px 24px var(--lk-accent-200, rgba(201,146,42,0.20)), inset 0 1px 0 var(--lk-glass-080, rgba(255,255,255,0.08))",
             }}>
               {/* Corner sparkles */}
               <span style={{ position: "absolute", top: -6, left: -6, fontSize: 12, animation: "nm-twinkle 2.4s ease-in-out infinite" }}>✨</span>
@@ -5505,8 +5602,8 @@ function OnboardingView({
                 disabled={!inviteToken}
                 style={{
                   flex: 1,
-                  backgroundColor: "rgba(255,255,255,0.06)",
-                  border: "1px solid rgba(255,255,255,0.18)",
+                  backgroundColor: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+                  border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))",
                   borderRadius: 10,
                   color: CREAM,
                   fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700,
@@ -5535,7 +5632,7 @@ function OnboardingView({
                   backgroundColor: "rgba(96,165,250,0.14)",
                   border: "1px solid rgba(96,165,250,0.55)",
                   borderRadius: 10,
-                  color: "#cfe3ff",
+                  color: "var(--lk-lt-cfe3ff, #cfe3ff)",
                   fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700,
                   padding: "9px 12px",
                   cursor: inviteToken ? "pointer" : "not-allowed",
@@ -5545,7 +5642,7 @@ function OnboardingView({
                 📤 Share
               </button>
             </div>
-            <div style={{ color: "rgba(247,240,227,0.38)", fontFamily: "DM Sans, sans-serif", fontSize: 9, marginTop: 8, lineHeight: 1.5 }}>
+            <div style={{ color: "var(--lk-ink-380, rgba(247,240,227,0.38))", fontFamily: "DM Sans, sans-serif", fontSize: 9, marginTop: 8, lineHeight: 1.5 }}>
               Text or share this code with your grandchild's family
             </div>
           </div>
@@ -5553,7 +5650,7 @@ function OnboardingView({
             onClick={onNanaCodeSent}
             style={{
               width: "100%",
-              background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+              background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)",
               color: NAVY,
               border: "none",
               borderRadius: 999,
@@ -5561,12 +5658,12 @@ function OnboardingView({
               fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 800,
               letterSpacing: "0.02em",
               cursor: "pointer",
-              boxShadow: "0 10px 28px rgba(201,146,42,0.42)",
+              boxShadow: "0 10px 28px var(--lk-accent-420, rgba(201,146,42,0.42))",
             }}
           >
             I've sent it! →
           </button>
-          <div style={{ color: "rgba(247,240,227,0.4)", fontFamily: "DM Sans, sans-serif", fontSize: 10, textAlign: "center", lineHeight: 1.5 }}>
+          <div style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))", fontFamily: "DM Sans, sans-serif", fontSize: 10, textAlign: "center", lineHeight: 1.5 }}>
             Read this code to your grandchild out loud, or copy and text it to their parent
           </div>
         </div>
@@ -5575,11 +5672,11 @@ function OnboardingView({
 
     // Perry step 2 — logged in via PIN, waiting for Nana to kick off the session
     if (!isNana && step === 2) return (
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#0b172e", padding: "20px 16px", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "var(--lk-bg, #0b172e)", padding: "20px 16px", alignItems: "center", justifyContent: "center" }}>
         <div style={{ textAlign: "center", maxWidth: "200px" }}>
           <div style={{ fontSize: "42px", marginBottom: "12px" }}>📚</div>
-          <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "15px", fontWeight: 700, marginBottom: "8px" }}>You're in!</div>
-          <div style={{ color: "rgba(247,240,227,0.4)", fontFamily: "DM Sans, sans-serif", fontSize: "9px", lineHeight: 1.6 }}>
+          <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: "15px", fontWeight: 700, marginBottom: "8px" }}>You're in!</div>
+          <div style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))", fontFamily: "DM Sans, sans-serif", fontSize: "9px", lineHeight: 1.6 }}>
             Waiting for {nanaDisplayName} to start the session…
           </div>
           <div style={{ marginTop: "14px", display: "flex", gap: "5px", justifyContent: "center" }}>
@@ -5594,8 +5691,8 @@ function OnboardingView({
     if (step === 2) return (
       <div style={{
         flex: 1, display: "flex", flexDirection: "column",
-        backgroundColor: "#0b172e",
-        backgroundImage: "radial-gradient(700px 400px at 50% -10%, rgba(201,146,42,0.16), transparent 70%), radial-gradient(560px 360px at -10% 110%, rgba(167,139,250,0.16), transparent 70%)",
+        backgroundColor: "var(--lk-bg, #0b172e)",
+        backgroundImage: "radial-gradient(700px 400px at 50% -10%, var(--lk-accent-160, rgba(201,146,42,0.16)), transparent 70%), radial-gradient(560px 360px at -10% 110%, rgba(167,139,250,0.16), transparent 70%)",
         padding: "18px 20px 20px", gap: 14,
       }}>
         <style>{`
@@ -5611,15 +5708,15 @@ function OnboardingView({
               <span style={{ position: "absolute", inset: 0, borderRadius: "50%", border: `2px solid ${AMBER}`, animation: "onb-pulse-ring 2.2s ease-out infinite" }} />
               <span style={{ position: "absolute", inset: 0, borderRadius: "50%", border: `2px solid ${AMBER}`, animation: "onb-pulse-ring 2.2s 1.1s ease-out infinite" }} />
               <div style={{ animation: "onb-mascot-float 2.6s ease-in-out infinite", filter: "drop-shadow(0 6px 18px rgba(201,146,42,0.35))" }}>
-                <IllustMail color={AMBER} size={62} />
+                <IllustMail color={AMBER_T} size={62} />
               </div>
             </div>
             <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 18, fontWeight: 700, marginTop: 12, marginBottom: 6 }}>
               {/* Pre-connection — grandchild's name isn't known yet, so
                   generic phrasing instead of the literal "Perry". */}
-              Waiting for <span style={{ color: AMBER }}>your grandchild's family</span>…
+              Waiting for <span style={{ color: AMBER_T }}>your grandchild's family</span>…
             </div>
-            <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 11, lineHeight: 1.55, maxWidth: 240, margin: "0 auto" }}>
+            <div style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: "DM Sans, sans-serif", fontSize: 11, lineHeight: 1.55, maxWidth: 240, margin: "0 auto" }}>
               Once they enter the code on their iPad, you'll be connected automatically.
             </div>
             <div style={{ marginTop: 14, display: "flex", gap: 6, justifyContent: "center" }}>
@@ -5629,25 +5726,25 @@ function OnboardingView({
             </div>
           </div>
           <div style={{
-            background: "linear-gradient(135deg, rgba(247,201,93,0.10) 0%, rgba(201,146,42,0.16) 100%)",
-            border: "1px dashed rgba(201,146,42,0.55)",
+            background: "linear-gradient(135deg, var(--lk-accent-hi-100, rgba(247,201,93,0.10)) 0%, var(--lk-accent-160, rgba(201,146,42,0.16)) 100%)",
+            border: "1px dashed var(--lk-accent-550, rgba(201,146,42,0.55))",
             borderRadius: 14, padding: "12px 18px",
             maxWidth: 240, textAlign: "center",
             animation: "onb-rise3 0.55s 0.05s both",
           }}>
-            <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800, letterSpacing: "0.16em", marginBottom: 6 }}>INVITE CODE</div>
+            <div style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800, letterSpacing: "0.16em", marginBottom: 6 }}>INVITE CODE</div>
             <div style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 20, fontWeight: 900, letterSpacing: "0.18em", fontVariantNumeric: "tabular-nums" }}>
               {inviteToken || "……"}
             </div>
-            <div style={{ color: "rgba(247,240,227,0.45)", fontFamily: "DM Sans, sans-serif", fontSize: 10, marginTop: 4 }}>
+            <div style={{ color: "var(--lk-ink-450, rgba(247,240,227,0.45))", fontFamily: "DM Sans, sans-serif", fontSize: 10, marginTop: 4 }}>
               Read this code to your grandchild out loud
             </div>
           </div>
           <button onClick={onSkip} style={{
             background: "none",
-            border: "1px solid rgba(247,240,227,0.22)",
+            border: "1px solid var(--lk-ink-220, rgba(247,240,227,0.22))",
             borderRadius: 999,
-            color: "rgba(247,240,227,0.55)",
+            color: "var(--lk-ink-550, rgba(247,240,227,0.55))",
             fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 600,
             cursor: "pointer", padding: "8px 18px",
           }}>
@@ -5668,11 +5765,11 @@ function OnboardingView({
         return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
       };
       return (
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#0b172e", padding: "16px", overflow: "auto", gap: "10px" }}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "var(--lk-bg, #0b172e)", padding: "16px", overflow: "auto", gap: "10px" }}>
           {/* Greeting */}
           <div style={{ textAlign: "center", paddingTop: "6px" }}>
-            <div style={{ color: "rgba(247,240,227,0.35)", fontFamily: "DM Sans, sans-serif", fontSize: "8px", letterSpacing: "0.1em", marginBottom: "2px" }}>NEVERMISS</div>
-            <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "15px", fontWeight: 700 }}>
+            <div style={{ color: "var(--lk-ink-350, rgba(247,240,227,0.35))", fontFamily: "DM Sans, sans-serif", fontSize: "8px", letterSpacing: "0.1em", marginBottom: "2px" }}>NEVERMISS</div>
+            <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: "15px", fontWeight: 700 }}>
               Welcome back, {nanaDisplayName}!
             </div>
           </div>
@@ -5682,13 +5779,13 @@ function OnboardingView({
               instead of a literal "Perry" so the label reads correctly
               for any grandchild name. */}
           {inviteToken && (
-            <div style={{ backgroundColor: "rgba(201,146,42,0.10)", border: "1px solid rgba(201,146,42,0.45)", borderRadius: "10px", padding: "10px 12px" }}>
-              <div style={{ color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: "8px", fontWeight: 700, letterSpacing: "0.09em", marginBottom: "6px" }}>{perryName.toUpperCase()}'S INVITE CODE — tell {perryName} this code</div>
+            <div style={{ backgroundColor: "var(--lk-accent-100, rgba(201,146,42,0.10))", border: "1px solid var(--lk-accent-450, rgba(201,146,42,0.45))", borderRadius: "10px", padding: "10px 12px" }}>
+              <div style={{ color: "var(--lk-ink-500, rgba(247,240,227,0.5))", fontFamily: "DM Sans, sans-serif", fontSize: "8px", fontWeight: 700, letterSpacing: "0.09em", marginBottom: "6px" }}>{perryName.toUpperCase()}'S INVITE CODE — tell {perryName} this code</div>
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: "22px", fontWeight: 900, letterSpacing: "0.22em", flex: 1 }}>{inviteToken}</div>
+                <div style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: "22px", fontWeight: 900, letterSpacing: "0.22em", flex: 1 }}>{inviteToken}</div>
                 <button
                   onClick={() => navigator.clipboard.writeText(inviteToken).catch(() => {})}
-                  style={{ backgroundColor: "rgba(201,146,42,0.2)", border: "1px solid rgba(201,146,42,0.5)", borderRadius: "8px", color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700, cursor: "pointer", padding: "5px 10px", flexShrink: 0 }}
+                  style={{ backgroundColor: "var(--lk-accent-200, rgba(201,146,42,0.2))", border: "1px solid var(--lk-accent-500, rgba(201,146,42,0.5))", borderRadius: "8px", color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700, cursor: "pointer", padding: "5px 10px", flexShrink: 0 }}
                 >
                   📋 Copy
                 </button>
@@ -5697,13 +5794,13 @@ function OnboardingView({
           )}
 
           {/* Perry connection card */}
-          <div style={{ backgroundColor: "rgba(247,240,227,0.04)", border: "1px solid rgba(247,240,227,0.10)", borderRadius: "12px", padding: "12px 14px", display: "flex", alignItems: "center", gap: "12px" }}>
-            <div style={{ width: "36px", height: "36px", borderRadius: "50%", backgroundColor: "rgba(201,146,42,0.18)", border: "2px solid rgba(201,146,42,0.4)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "18px", flexShrink: 0 }}>
+          <div style={{ backgroundColor: "var(--lk-inkfill-040, rgba(247,240,227,0.04))", border: "1px solid var(--lk-ink-100, rgba(247,240,227,0.10))", borderRadius: "12px", padding: "12px 14px", display: "flex", alignItems: "center", gap: "12px" }}>
+            <div style={{ width: "36px", height: "36px", borderRadius: "50%", backgroundColor: "var(--lk-accent-180, rgba(201,146,42,0.18))", border: "2px solid var(--lk-accent-400, rgba(201,146,42,0.4))", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "18px", flexShrink: 0 }}>
               👧
             </div>
             <div style={{ flex: 1 }}>
               <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: "13px", fontWeight: 700 }}>{perryName}</div>
-              <div style={{ color: "rgba(247,240,227,0.4)", fontFamily: "DM Sans, sans-serif", fontSize: "8px", marginTop: "2px" }}>
+              <div style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))", fontFamily: "DM Sans, sans-serif", fontSize: "8px", marginTop: "2px" }}>
                 {lastSession
                   ? `Last read ${formatDate(lastSession.lastReadAt)}`
                   : "Ready for your first session!"}
@@ -5714,7 +5811,7 @@ function OnboardingView({
 
           {/* Reading history */}
           <div>
-            <div style={{ color: "rgba(247,240,227,0.35)", fontFamily: "DM Sans, sans-serif", fontSize: "11px", fontWeight: 700, letterSpacing: "0.1em", marginBottom: "6px" }}>
+            <div style={{ color: "var(--lk-ink-350, rgba(247,240,227,0.35))", fontFamily: "DM Sans, sans-serif", fontSize: "11px", fontWeight: 700, letterSpacing: "0.1em", marginBottom: "6px" }}>
               READING HISTORY
             </div>
             {dashboardLoading ? (
@@ -5726,9 +5823,9 @@ function OnboardingView({
                 </div>
               </div>
             ) : sortedProgress.length === 0 ? (
-              <div style={{ textAlign: "center", padding: "14px", backgroundColor: "rgba(247,240,227,0.03)", border: "1px dashed rgba(247,240,227,0.12)", borderRadius: "10px" }}>
+              <div style={{ textAlign: "center", padding: "14px", backgroundColor: "var(--lk-inkfill-030, rgba(247,240,227,0.03))", border: "1px dashed var(--lk-ink-120, rgba(247,240,227,0.12))", borderRadius: "10px" }}>
                 <div style={{ fontSize: "22px", marginBottom: "5px" }}>📖</div>
-                <div style={{ color: "rgba(247,240,227,0.4)", fontFamily: "DM Sans, sans-serif", fontSize: "11px", lineHeight: 1.5 }}>
+                <div style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))", fontFamily: "DM Sans, sans-serif", fontSize: "11px", lineHeight: 1.5 }}>
                   This will be your first session together!<br />Choose a book below to get started.
                 </div>
               </div>
@@ -5747,8 +5844,8 @@ function OnboardingView({
                       key={p.bookId}
                       onClick={() => setDashSelectedBook(isSelected ? null : { bookId: p.bookId, startPage, startOff: p.currentOff ?? 0 })}
                       style={{
-                        backgroundColor: isSelected ? "rgba(201,146,42,0.10)" : "rgba(247,240,227,0.04)",
-                        border: isSelected ? `1px solid ${AMBER}` : "1px solid rgba(247,240,227,0.08)",
+                        backgroundColor: isSelected ? "var(--lk-accent-100, rgba(201,146,42,0.10))" : "var(--lk-inkfill-040, rgba(247,240,227,0.04))",
+                        border: isSelected ? `1px solid ${AMBER}` : "1px solid var(--lk-ink-080, rgba(247,240,227,0.08))",
                         borderRadius: "9px", padding: "8px 10px", cursor: "pointer",
                         transition: "border-color 0.2s, background-color 0.2s",
                       }}
@@ -5757,20 +5854,20 @@ function OnboardingView({
                         <div style={{ fontSize: "16px" }}>{book.emoji}</div>
                         <div style={{ flex: 1 }}>
                           <div style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700 }}>{book.title}</div>
-                          <div style={{ color: "rgba(247,240,227,0.35)", fontFamily: "DM Sans, sans-serif", fontSize: "11px" }}>
+                          <div style={{ color: "var(--lk-ink-350, rgba(247,240,227,0.35))", fontFamily: "DM Sans, sans-serif", fontSize: "11px" }}>
                             {isFinished
                               ? `Finished · ${formatDate(p.lastReadAt)}`
                               : `${bookPlaceLabel(book, p.currentPage)} · ${formatDate(p.lastReadAt)}`}
                           </div>
                         </div>
                         {isFinished
-                          ? <div style={{ color: "#22c55e", fontSize: "10px" }}>✓</div>
+                          ? <div style={{ color: "var(--lk-lt-22c55e, #22c55e)", fontSize: "10px" }}>✓</div>
                           : isSelected
-                            ? <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: "8px", fontWeight: 700 }}>Selected ✓</div>
-                            : <div style={{ color: "rgba(247,240,227,0.25)", fontFamily: "DM Sans, sans-serif", fontSize: "8px" }}>Tap to pick</div>
+                            ? <div style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: "8px", fontWeight: 700 }}>Selected ✓</div>
+                            : <div style={{ color: "var(--lk-ink-250, rgba(247,240,227,0.25))", fontFamily: "DM Sans, sans-serif", fontSize: "8px" }}>Tap to pick</div>
                         }
                       </div>
-                      <div style={{ height: "3px", backgroundColor: "rgba(247,240,227,0.08)", borderRadius: "2px", overflow: "hidden" }}>
+                      <div style={{ height: "3px", backgroundColor: "var(--lk-inkfill-080, rgba(247,240,227,0.08))", borderRadius: "2px", overflow: "hidden" }}>
                         <div style={{ height: "100%", width: `${pct}%`, backgroundColor: book.spineColor || AMBER, borderRadius: "2px", transition: "width 0.4s" }} />
                       </div>
                     </div>
@@ -5782,7 +5879,7 @@ function OnboardingView({
 
           {/* Tagline */}
           <div style={{ textAlign: "center", padding: "6px 0 2px" }}>
-            <div style={{ color: "rgba(247,240,227,0.38)", fontFamily: "Playfair Display, serif", fontSize: "9.5px", fontStyle: "italic", lineHeight: 1.55, letterSpacing: "0.01em" }}>
+            <div style={{ color: "var(--lk-ink-380, rgba(247,240,227,0.38))", fontFamily: "Playfair Display, serif", fontSize: "9.5px", fontStyle: "italic", lineHeight: 1.55, letterSpacing: "0.01em" }}>
               Reading is the vehicle.<br />Relationship is the destination.
             </div>
           </div>
@@ -5811,13 +5908,13 @@ function OnboardingView({
 
     // Perry's post-login waiting screen
     return (
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#0b172e", padding: "20px 16px", alignItems: "center", justifyContent: "center" }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "var(--lk-bg, #0b172e)", padding: "20px 16px", alignItems: "center", justifyContent: "center" }}>
         <div style={{ textAlign: "center", animation: "fade-in 0.5s ease-out", maxWidth: "220px" }}>
           <div style={{ fontSize: "40px", marginBottom: "14px" }}>📖</div>
-          <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "15px", fontWeight: 700, marginBottom: "8px" }}>
+          <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: "15px", fontWeight: 700, marginBottom: "8px" }}>
             Ready to read!
           </div>
-          <div style={{ color: "rgba(247,240,227,0.45)", fontFamily: "DM Sans, sans-serif", fontSize: "9px", lineHeight: 1.7, marginBottom: "18px" }}>
+          <div style={{ color: "var(--lk-ink-450, rgba(247,240,227,0.45))", fontFamily: "DM Sans, sans-serif", fontSize: "9px", lineHeight: 1.7, marginBottom: "18px" }}>
             Waiting for {nanaDisplayName} to start the session…
           </div>
           <div style={{ display: "flex", gap: "5px", justifyContent: "center" }}>
@@ -5848,7 +5945,7 @@ function OnboardingView({
         ? "Tap your picture, or enter your PIN"
         : pickedKid ? `Hi ${pickedKid.name}! Enter your PIN.` : "Enter your 4-digit PIN.";
     return (
-      <div data-testid="child-pin-screen" style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#0b172e", padding: "20px 16px", alignItems: "center", justifyContent: "center", position: "relative", overflowY: "auto" }}>
+      <div data-testid="child-pin-screen" style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "var(--lk-bg, #0b172e)", padding: "20px 16px", alignItems: "center", justifyContent: "center", position: "relative", overflowY: "auto" }}>
         {onSwitchUser && (
           <button
             onClick={onSwitchUser}
@@ -5856,10 +5953,10 @@ function OnboardingView({
               position: "absolute", top: 14, left: 14,
               display: "inline-flex", alignItems: "center", gap: 6,
               padding: "7px 13px",
-              background: "rgba(255,255,255,0.06)",
-              border: "1px solid rgba(247,201,93,0.45)",
+              background: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+              border: "1px solid var(--lk-accent-hi-450, rgba(247,201,93,0.45))",
               borderRadius: 999,
-              color: AMBER,
+              color: AMBER_T,
               fontFamily: "DM Sans, sans-serif",
               fontSize: 12, fontWeight: 700,
               cursor: "pointer",
@@ -5873,7 +5970,7 @@ function OnboardingView({
         <div style={{ width: "100%", maxWidth: 980, display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "center", columnGap: 56, rowGap: 22 }}>
           <div style={{ flex: "1 1 360px", maxWidth: 460, minWidth: 0 }}>
             {handoverCall && (
-              <div data-testid="handover-call" style={{ width: "100%", aspectRatio: "16 / 9", marginBottom: 14, borderRadius: 16, overflow: "hidden", boxShadow: "0 10px 30px rgba(0,0,0,0.45)", display: "flex" }}>
+              <div data-testid="handover-call" style={{ width: "100%", aspectRatio: "16 / 9", marginBottom: 14, borderRadius: 16, overflow: "hidden", boxShadow: "0 10px 30px var(--lk-shadow-450, rgba(0,0,0,0.45))", display: "flex" }}>
                 <FaceVideo person="nana" width="100%" height="100%" label={nanaDisplayName} showLabel borderRadius={16} objectFit="cover" objectPosition="center 35%" autoMirror={false} />
               </div>
             )}
@@ -5882,7 +5979,7 @@ function OnboardingView({
               <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: "28px", fontWeight: 700 }}>
                 Reading with {nanaDisplayName}
               </div>
-              <div style={{ color: "rgba(247,240,227,0.72)", fontFamily: "DM Sans, sans-serif", fontSize: "16px", marginTop: "8px", lineHeight: 1.5 }}>
+              <div style={{ color: "var(--lk-ink-720, rgba(247,240,227,0.72))", fontFamily: "DM Sans, sans-serif", fontSize: "16px", marginTop: "8px", lineHeight: 1.5 }}>
                 {pinScreenExpectedChild
                   ? <>It's <strong>{pinScreenExpectedChild.name}</strong>'s turn. Enter your PIN on the pad.</>
                   : kids.length > 1
@@ -5902,7 +5999,7 @@ function OnboardingView({
                   flexWrap: "wrap", marginBottom: 18,
                   padding: "0 4px",
                   borderRadius: 20,
-                  outline: needsPick ? "2px dashed rgba(247,201,93,0.45)" : "none",
+                  outline: needsPick ? "2px dashed var(--lk-accent-hi-450, rgba(247,201,93,0.45))" : "none",
                   outlineOffset: 6,
                 }}
               >
@@ -5934,7 +6031,7 @@ function OnboardingView({
                       <img src={c.photoUrl} alt="" draggable={false} style={{
                         width: 88, height: 88, borderRadius: "50%", objectFit: "cover",
                         border: picked ? `4px solid ${AMBER}` : `2px solid ${pal.border}`,
-                        boxShadow: picked ? "0 0 0 4px rgba(201,146,42,0.30)" : "0 6px 18px rgba(0,0,0,0.35)",
+                        boxShadow: picked ? "0 0 0 4px var(--lk-accent-300, rgba(201,146,42,0.30))" : "0 6px 18px var(--lk-shadow-350, rgba(0,0,0,0.35))",
                       }} />
                     ) : (
                     <span
@@ -5943,7 +6040,7 @@ function OnboardingView({
                         width: 88, height: 88, borderRadius: "50%",
                         backgroundColor: pal.bg,
                         border: picked ? `4px solid ${AMBER}` : `2px solid ${pal.border}`,
-                        boxShadow: picked ? "0 0 0 4px rgba(201,146,42,0.30)" : "none",
+                        boxShadow: picked ? "0 0 0 4px var(--lk-accent-300, rgba(201,146,42,0.30))" : "none",
                         color: pal.text,
                         display: "inline-flex", alignItems: "center", justifyContent: "center",
                         fontFamily: "DM Sans, sans-serif",
@@ -5952,7 +6049,7 @@ function OnboardingView({
                     >{initial}</span>
                     )}
                     <span style={{
-                      color: "rgba(247,240,227,0.9)",
+                      color: "var(--lk-ink-900, rgba(247,240,227,0.9))",
                       fontFamily: "DM Sans, sans-serif",
                       fontSize: 17, fontWeight: 800,
                       letterSpacing: "0.01em",
@@ -5976,7 +6073,7 @@ function OnboardingView({
                 background: "linear-gradient(135deg, rgba(34,197,94,0.18) 0%, rgba(34,197,94,0.08) 100%)",
                 border: "1.5px solid #22c55e",
                 borderRadius: 16,
-                color: "#dcfce7",
+                color: "var(--lk-lt-dcfce7, #dcfce7)",
                 fontFamily: "DM Sans, sans-serif",
                 cursor: "pointer",
                 padding: "12px 14px",
@@ -5989,14 +6086,14 @@ function OnboardingView({
             >
               <span aria-hidden style={{ fontSize: 28, lineHeight: 1, flexShrink: 0 }}>👥</span>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 15, fontWeight: 800, letterSpacing: "0.01em", color: "#86efac" }}>
+                <div style={{ fontSize: 15, fontWeight: 800, letterSpacing: "0.01em", color: "var(--lk-ok-t, #86efac)" }}>
                   Switch Reader
                 </div>
-                <div style={{ fontSize: 11, fontWeight: 500, marginTop: 2, color: "rgba(220,252,231,0.75)", lineHeight: 1.35 }}>
+                <div style={{ fontSize: 11, fontWeight: 500, marginTop: 2, color: "var(--lk-lt-dcfce7-750, rgba(220,252,231,0.75))", lineHeight: 1.35 }}>
                   Someone new reading? Set them up here.
                 </div>
               </div>
-              <span aria-hidden style={{ fontSize: 18, opacity: 0.7, color: "#86efac" }}>→</span>
+              <span aria-hidden style={{ fontSize: 18, opacity: 0.7, color: "var(--lk-ok-t, #86efac)" }}>→</span>
             </button>
             <button
               onClick={() => onUseDifferentInvite?.()}
@@ -6004,14 +6101,14 @@ function OnboardingView({
                 alignSelf: "center",
                 background: "none", border: "none",
                 borderRadius: 999,
-                color: "rgba(247,240,227,0.55)",
+                color: "var(--lk-ink-550, rgba(247,240,227,0.55))",
                 fontFamily: "DM Sans, sans-serif",
                 fontSize: 11, fontWeight: 600,
                 cursor: "pointer",
                 padding: "6px 12px",
                 textAlign: "center",
                 textDecoration: "underline",
-                textDecorationColor: "rgba(247,240,227,0.25)",
+                textDecorationColor: "var(--lk-ink-250, rgba(247,240,227,0.25))",
                 textUnderlineOffset: 3,
               }}
             >
@@ -6030,7 +6127,7 @@ function OnboardingView({
               testId="child-pin-pad"
             />
             {perryPinError && (
-              <div role="alert" style={{ color: "#fca5a5", fontFamily: "DM Sans, sans-serif", fontSize: "16px", textAlign: "center", maxWidth: 300 }}>
+              <div role="alert" style={{ color: "var(--lk-bad-t, #fca5a5)", fontFamily: "DM Sans, sans-serif", fontSize: "16px", textAlign: "center", maxWidth: 300 }}>
                 {perryPinError}
               </div>
             )}
@@ -6042,7 +6139,7 @@ function OnboardingView({
 
   // Perry's parent side
   if (step === 0) return (
-    <div className="nm-kb-pad" data-kb-scope data-testid="child-code-screen" style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#0b172e", padding: "20px 16px", overflow: "auto" }}>
+    <div className="nm-kb-pad" data-kb-scope data-testid="child-code-screen" style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "var(--lk-bg, #0b172e)", padding: "20px 16px", overflow: "auto" }}>
       {onSwitchUser && (
         <button
           onClick={onSwitchUser}
@@ -6051,10 +6148,10 @@ function OnboardingView({
             display: "inline-flex", alignItems: "center", gap: 6,
             marginBottom: 8,
             padding: "7px 13px",
-            background: "rgba(255,255,255,0.06)",
-            border: "1px solid rgba(247,201,93,0.45)",
+            background: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+            border: "1px solid var(--lk-accent-hi-450, rgba(247,201,93,0.45))",
             borderRadius: 999,
-            color: AMBER,
+            color: AMBER_T,
             fontFamily: "DM Sans, sans-serif",
             fontSize: 12, fontWeight: 700,
             cursor: "pointer",
@@ -6067,8 +6164,8 @@ function OnboardingView({
       )}
       <div style={{ textAlign: "center", marginBottom: "16px" }}>
         <div style={{ fontSize: "32px", marginBottom: "6px" }}>📬</div>
-        <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "14px", fontWeight: 700 }}>You've been invited!</div>
-        <div style={{ color: "rgba(247,240,227,0.45)", fontFamily: "DM Sans, sans-serif", fontSize: "9px", marginTop: "3px" }}>
+        <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: "14px", fontWeight: 700 }}>You've been invited!</div>
+        <div style={{ color: "var(--lk-ink-450, rgba(247,240,227,0.45))", fontFamily: "DM Sans, sans-serif", fontSize: "9px", marginTop: "3px" }}>
           {perryLookupNanaName ? `Connecting to ${perryLookupNanaName}'s family` : "Enter the code from your grandparent"}
         </div>
       </div>
@@ -6088,7 +6185,7 @@ function OnboardingView({
             ...inputStyle,
             textAlign: "center", fontSize: "20px", fontWeight: 800,
             letterSpacing: "0.15em",
-            borderColor: perryInviteError ? "#ef4444" : perryLookupNanaName ? "#22c55e" : "rgba(201,146,42,0.3)",
+            borderColor: perryInviteError ? "#ef4444" : perryLookupNanaName ? "#22c55e" : "var(--lk-accent-300, rgba(201,146,42,0.3))",
           }}
           autoFocus
         />
@@ -6098,7 +6195,7 @@ function OnboardingView({
           </div>
         )}
         {perryLookupNanaName && !perryInviteError && (
-          <div style={{ color: "#22c55e", fontFamily: "DM Sans, sans-serif", fontSize: "11px", textAlign: "center" }}>
+          <div style={{ color: "var(--lk-lt-22c55e, #22c55e)", fontFamily: "DM Sans, sans-serif", fontSize: "11px", textAlign: "center" }}>
             ✓ Connected to {perryLookupNanaName}'s family!
           </div>
         )}
@@ -6116,7 +6213,7 @@ function OnboardingView({
   );
 
   if (step === 1) return (
-    <div className="nm-kb-pad" data-testid="child-setup-screen" style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#0b172e", padding: "16px", overflow: "auto" }}>
+    <div className="nm-kb-pad" data-testid="child-setup-screen" style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "var(--lk-bg, #0b172e)", padding: "16px", overflow: "auto" }}>
       {/* Escape row — Rick: "when granchild goes to the screen where
           he adds the name age and pin etc, also he can't move." Adds
           Back (to invite-code entry) and Back to home (out of
@@ -6128,10 +6225,10 @@ function OnboardingView({
             style={{
               display: "inline-flex", alignItems: "center", gap: 6,
               padding: "7px 13px",
-              background: "rgba(255,255,255,0.06)",
-              border: "1px solid rgba(247,201,93,0.45)",
+              background: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+              border: "1px solid var(--lk-accent-hi-450, rgba(247,201,93,0.45))",
               borderRadius: 999,
-              color: AMBER,
+              color: AMBER_T,
               fontFamily: "DM Sans, sans-serif",
               fontSize: 12, fontWeight: 700,
               cursor: "pointer",
@@ -6149,9 +6246,9 @@ function OnboardingView({
               display: "inline-flex", alignItems: "center", gap: 6,
               padding: "7px 13px",
               background: "transparent",
-              border: "1px solid rgba(255,255,255,0.18)",
+              border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))",
               borderRadius: 999,
-              color: "rgba(247,240,227,0.7)",
+              color: "var(--lk-ink-700, rgba(247,240,227,0.7))",
               fontFamily: "DM Sans, sans-serif",
               fontSize: 12, fontWeight: 700,
               cursor: "pointer",
@@ -6170,7 +6267,7 @@ function OnboardingView({
       </div>
       <div style={card}>
         <div>
-          <div style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: "13px", fontWeight: 700, marginBottom: "6px" }}>Child's name</div>
+          <div style={{ color: "var(--lk-ink-750, rgba(247,240,227,0.75))", fontFamily: "DM Sans, sans-serif", fontSize: "13px", fontWeight: 700, marginBottom: "6px" }}>Child's name</div>
           <input value={childName} onChange={e => setChildName((e.target as HTMLInputElement).value)} placeholder="e.g. Perry" style={inputStyle}
             data-testid="child-setup-name" enterKeyHint="done" autoCapitalize="words" autoCorrect="off"
             onKeyDown={e => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }} />
@@ -6184,13 +6281,13 @@ function OnboardingView({
               onChange={e => setBirthdayOptOut((e.target as HTMLInputElement).checked)}
               style={{ accentColor: AMBER, width: "13px", height: "13px" }}
             />
-            <span style={{ color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: "8px", lineHeight: 1.4 }}>
+            <span style={{ color: "var(--lk-ink-500, rgba(247,240,227,0.5))", fontFamily: "DM Sans, sans-serif", fontSize: "8px", lineHeight: 1.4 }}>
               Skip birthday — don't show my child's age in the Memory Vault
             </span>
           </label>
           {!birthdayOptOut && (
             <>
-              <div style={{ color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: "8px", marginBottom: "5px" }}>DATE OF BIRTH</div>
+              <div style={{ color: "var(--lk-ink-500, rgba(247,240,227,0.5))", fontFamily: "DM Sans, sans-serif", fontSize: "8px", marginBottom: "5px" }}>DATE OF BIRTH</div>
               <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: "0 0 auto" }}>
                   <input
@@ -6205,9 +6302,9 @@ function OnboardingView({
                     maxLength={2}
                     style={{ ...inputStyle, width: "38px", textAlign: "center", padding: "10px 4px" }}
                   />
-                  <span style={{ color: "rgba(247,240,227,0.25)", fontFamily: "DM Sans, sans-serif", fontSize: "10px", marginTop: "2px" }}>Month</span>
+                  <span style={{ color: "var(--lk-ink-250, rgba(247,240,227,0.25))", fontFamily: "DM Sans, sans-serif", fontSize: "10px", marginTop: "2px" }}>Month</span>
                 </div>
-                <span style={{ color: "rgba(247,240,227,0.3)", fontSize: "14px", paddingBottom: "14px" }}>/</span>
+                <span style={{ color: "var(--lk-ink-300, rgba(247,240,227,0.3))", fontSize: "14px", paddingBottom: "14px" }}>/</span>
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: "0 0 auto" }}>
                   <input
                     ref={birthDayRef}
@@ -6222,9 +6319,9 @@ function OnboardingView({
                     maxLength={2}
                     style={{ ...inputStyle, width: "38px", textAlign: "center", padding: "10px 4px" }}
                   />
-                  <span style={{ color: "rgba(247,240,227,0.25)", fontFamily: "DM Sans, sans-serif", fontSize: "10px", marginTop: "2px" }}>Day</span>
+                  <span style={{ color: "var(--lk-ink-250, rgba(247,240,227,0.25))", fontFamily: "DM Sans, sans-serif", fontSize: "10px", marginTop: "2px" }}>Day</span>
                 </div>
-                <span style={{ color: "rgba(247,240,227,0.3)", fontSize: "14px", paddingBottom: "14px" }}>/</span>
+                <span style={{ color: "var(--lk-ink-300, rgba(247,240,227,0.3))", fontSize: "14px", paddingBottom: "14px" }}>/</span>
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flex: 1 }}>
                   <input
                     ref={birthYearRef}
@@ -6239,10 +6336,10 @@ function OnboardingView({
                     maxLength={4}
                     style={{ ...inputStyle, width: "56px", textAlign: "center", padding: "10px 4px" }}
                   />
-                  <span style={{ color: "rgba(247,240,227,0.25)", fontFamily: "DM Sans, sans-serif", fontSize: "10px", marginTop: "2px" }}>Year</span>
+                  <span style={{ color: "var(--lk-ink-250, rgba(247,240,227,0.25))", fontFamily: "DM Sans, sans-serif", fontSize: "10px", marginTop: "2px" }}>Year</span>
                 </div>
               </div>
-              <div style={{ color: "rgba(247,240,227,0.3)", fontFamily: "DM Sans, sans-serif", fontSize: "11px", marginTop: "4px" }}>
+              <div style={{ color: "var(--lk-ink-300, rgba(247,240,227,0.3))", fontFamily: "DM Sans, sans-serif", fontSize: "11px", marginTop: "4px" }}>
                 Used to show your child's age at the time of each reading in the Memory Vault.
               </div>
             </>
@@ -6250,7 +6347,7 @@ function OnboardingView({
         </div>
         )}
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
-          <div style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: "13px", fontWeight: 700 }}>4-digit PIN (your child signs in with it)</div>
+          <div style={{ color: "var(--lk-ink-750, rgba(247,240,227,0.75))", fontFamily: "DM Sans, sans-serif", fontSize: "13px", fontWeight: 700 }}>4-digit PIN (your child signs in with it)</div>
           <PinPad value={childPin} onChange={setChildPin} keySize={54} testId="child-setup-pin" />
         </div>
         {/* COPPA parental affirmation — required before child data can
@@ -6261,8 +6358,8 @@ function OnboardingView({
             display: "flex",
             alignItems: "flex-start",
             gap: 10,
-            backgroundColor: "rgba(247,201,93,0.06)",
-            border: parentalConsentChecked ? `1px solid ${AMBER}` : "1px solid rgba(247,201,93,0.30)",
+            backgroundColor: "var(--lk-accent-hi-060, rgba(247,201,93,0.06))",
+            border: parentalConsentChecked ? `1px solid ${AMBER}` : "1px solid var(--lk-accent-hi-300, rgba(247,201,93,0.30))",
             borderRadius: 12,
             padding: "10px 12px",
             cursor: "pointer",
@@ -6281,7 +6378,7 @@ function OnboardingView({
             }}
           />
           <div style={{
-            color: "rgba(247,240,227,0.75)",
+            color: "var(--lk-ink-750, rgba(247,240,227,0.75))",
             fontFamily: "DM Sans, sans-serif",
             fontSize: 13, lineHeight: 1.5,
           }}>
@@ -6292,7 +6389,7 @@ function OnboardingView({
               target="_blank"
               rel="noopener noreferrer"
               onClick={(e) => e.stopPropagation()}
-              style={{ color: AMBER, textDecoration: "underline" }}
+              style={{ color: AMBER_T, textDecoration: "underline" }}
             >
               Privacy Policy
             </a>.
@@ -6302,7 +6399,7 @@ function OnboardingView({
             show only on the invite-code step, so this button seemed to
             do nothing. */}
         {perryInviteError && (
-          <div role="alert" data-testid="child-setup-error" style={{ color: "#fca5a5", fontFamily: "DM Sans, sans-serif", fontSize: "15px", lineHeight: 1.4, textAlign: "center" }}>
+          <div role="alert" data-testid="child-setup-error" style={{ color: "var(--lk-bad-t, #fca5a5)", fontFamily: "DM Sans, sans-serif", fontSize: "15px", lineHeight: 1.4, textAlign: "center" }}>
             {perryInviteError}
           </div>
         )}
@@ -6328,13 +6425,13 @@ function OnboardingView({
   void onBeginSession;
   const nanaLabel = nanaDisplayName || getRoleLabel("nana");
   return (
-    <div data-testid="child-waiting" style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#0b172e", padding: "20px 16px", alignItems: "center", justifyContent: "center" }}>
+    <div data-testid="child-waiting" style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "var(--lk-bg, #0b172e)", padding: "20px 16px", alignItems: "center", justifyContent: "center" }}>
       <div style={{ textAlign: "center", animation: "fade-in 0.5s ease-out", maxWidth: 460 }}>
         <div style={{ fontSize: "56px", marginBottom: "12px" }}>🎉</div>
         <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: "30px", fontWeight: 700, marginBottom: "10px", lineHeight: 1.2 }}>
           You're connected with {nanaLabel}!
         </div>
-        <div style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: "18px", lineHeight: 1.5 }}>
+        <div style={{ color: "var(--lk-ink-750, rgba(247,240,227,0.75))", fontFamily: "DM Sans, sans-serif", fontSize: "18px", lineHeight: 1.5 }}>
           Waiting for {nanaLabel} to start reading…
         </div>
         <div style={{ marginTop: "20px", display: "flex", gap: "8px", justifyContent: "center" }}>
@@ -6424,7 +6521,7 @@ function PerryAwaitingView({
     <div data-testid="child-waiting" style={{
       flex: 1,
       display: "flex", flexDirection: "column",
-      backgroundColor: "#0b172e",
+      backgroundColor: "var(--lk-bg, #0b172e)",
       padding: "20px 16px",
       alignItems: "center", justifyContent: "center",
     }}>
@@ -6436,7 +6533,7 @@ function PerryAwaitingView({
         {/* Top line: what Nana is doing right now — gives Perry awareness
             of the off-screen activity she can't drive. */}
         <div style={{
-          color: AMBER,
+          color: AMBER_T,
           fontFamily: "Playfair Display, serif",
           fontSize: "16px", fontWeight: 700,
           marginBottom: "12px",
@@ -6450,7 +6547,7 @@ function PerryAwaitingView({
             isn't sure whether to tap anything — making the wait
             requirement explicit removes that ambiguity. */}
         <div style={{
-          color: "rgba(247,240,227,0.7)",
+          color: "var(--lk-ink-700, rgba(247,240,227,0.7))",
           fontFamily: "DM Sans, sans-serif",
           fontSize: "12px", fontWeight: 500,
           lineHeight: 1.55,
@@ -6462,10 +6559,10 @@ function PerryAwaitingView({
           marginTop: 14,
           display: "inline-flex", alignItems: "center", gap: 8,
           padding: "6px 12px",
-          background: "rgba(247,201,93,0.08)",
-          border: "1px solid rgba(247,201,93,0.22)",
+          background: "var(--lk-accent-hi-080, rgba(247,201,93,0.08))",
+          border: "1px solid var(--lk-accent-hi-220, rgba(247,201,93,0.22))",
           borderRadius: 999,
-          color: "rgba(247,201,93,0.85)",
+          color: "var(--lk-accent-hi-t-850, rgba(247,201,93,0.85))",
           fontFamily: "DM Sans, sans-serif",
           fontSize: 10, fontWeight: 700,
           letterSpacing: "0.08em", textTransform: "uppercase",
@@ -6486,9 +6583,9 @@ function PerryAwaitingView({
               type="button"
               onClick={onExit}
               style={{
-                background: "rgba(255,255,255,0.06)",
-                color: AMBER,
-                border: "1px solid rgba(247,201,93,0.45)",
+                background: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+                color: AMBER_T,
+                border: "1px solid var(--lk-accent-hi-450, rgba(247,201,93,0.45))",
                 borderRadius: 999,
                 padding: "10px 18px",
                 fontFamily: "DM Sans, sans-serif",
@@ -6546,7 +6643,7 @@ function SayHelloView({
   return (
     <div style={{
       flex: 1, display: "flex", flexDirection: "column",
-      backgroundColor: "#000", overflow: "hidden",
+      backgroundColor: "var(--lk-stage, #000)", overflow: "hidden",
     }}>
       <style>{`
         @keyframes nm-hello-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
@@ -6567,7 +6664,7 @@ function SayHelloView({
             position: "absolute", top: 16, left: "50%",
             transform: "translateX(-50%)",
             zIndex: 5,
-            background: "linear-gradient(135deg, rgba(201,146,42,0.95), rgba(141,98,28,0.95))",
+            background: "linear-gradient(135deg, var(--lk-accent-950, rgba(201,146,42,0.95)), rgba(141,98,28,0.95))",
             color: NAVY,
             fontFamily: "Playfair Display, serif",
             fontSize: "clamp(15px, 2vw, 20px)",
@@ -6575,7 +6672,7 @@ function SayHelloView({
             letterSpacing: "0.02em",
             padding: "9px 20px",
             borderRadius: 999,
-            boxShadow: "0 8px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(247,201,93,0.45)",
+            boxShadow: "0 8px 24px var(--lk-shadow-450, rgba(0,0,0,0.45)), 0 0 0 1px var(--lk-accent-hi-450, rgba(247,201,93,0.45))",
             animation: "nm-hello-rise 0.4s cubic-bezier(0.22,1,0.36,1)",
             display: "inline-flex", alignItems: "center", gap: 10,
             maxWidth: "calc(100% - 32px)",
@@ -6590,8 +6687,8 @@ function SayHelloView({
       {/* Bottom action strip */}
       <div style={{
         flexShrink: 0,
-        backgroundColor: "#0b172e",
-        borderTop: "1px solid rgba(255,255,255,0.08)",
+        backgroundColor: "var(--lk-bg, #0b172e)",
+        borderTop: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))",
         padding: "14px 16px 16px",
         display: "flex", alignItems: "center", justifyContent: "center",
         gap: 10, flexWrap: "wrap",
@@ -6602,9 +6699,9 @@ function SayHelloView({
               <button
                 onClick={onContinueHome}
                 style={{
-                  background: "rgba(255,255,255,0.06)",
+                  background: "var(--lk-fill-060, rgba(255,255,255,0.06))",
                   color: CREAM,
-                  border: "1px solid rgba(255,255,255,0.22)",
+                  border: "1px solid var(--lk-line-220, rgba(255,255,255,0.22))",
                   borderRadius: 999,
                   padding: "12px 22px",
                   fontFamily: "DM Sans, sans-serif",
@@ -6624,7 +6721,7 @@ function SayHelloView({
               <button
                 onClick={onStartReading}
                 style={{
-                  background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+                  background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)",
                   color: NAVY,
                   border: "none",
                   borderRadius: 999,
@@ -6634,7 +6731,7 @@ function SayHelloView({
                   fontWeight: 800,
                   letterSpacing: "0.04em",
                   cursor: "pointer",
-                  boxShadow: "0 6px 18px rgba(201,146,42,0.42)",
+                  boxShadow: "0 6px 18px var(--lk-accent-420, rgba(201,146,42,0.42))",
                   display: "inline-flex", alignItems: "center", gap: 8,
                   minHeight: 48,
                   touchAction: "manipulation",
@@ -6648,7 +6745,7 @@ function SayHelloView({
           </>
         ) : (
           <div style={{
-            color: "rgba(247,240,227,0.75)",
+            color: "var(--lk-ink-750, rgba(247,240,227,0.75))",
             fontFamily: "Merriweather, serif",
             fontSize: 15, fontStyle: "italic",
             textAlign: "center", lineHeight: 1.5,
@@ -6666,8 +6763,8 @@ function SayHelloView({
 function IllustGradient({ id, color }: { id: string; color: string }) {
   return (
     <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stopColor={color} stopOpacity="1" />
-      <stop offset="100%" stopColor={color} stopOpacity="0.55" />
+      <stop offset="0%" style={{ stopColor: color }} stopOpacity="1" />
+      <stop offset="100%" style={{ stopColor: color }} stopOpacity="0.55" />
     </linearGradient>
   );
 }
@@ -6681,7 +6778,7 @@ function IllustMail({ color, size = 56 }: { color: string; size?: number }) {
       <path d="M6 22 L32 40 L58 22" stroke="#FFF6DC" strokeWidth="2.2" fill="none" strokeLinejoin="round" opacity="0.9" />
       <path d="M28 36 q4 4 8 0 q-2 4 -4 4 q-2 0 -4 -4 z" fill="#FFF6DC" opacity="0.92" />
       <circle cx="32" cy="34" r="6" fill="#fff" opacity="0.95" />
-      <path d="M32 36 l-3 -3 a2 2 0 1 1 3 -2 a2 2 0 1 1 3 2 z" fill={color} />
+      <path d="M32 36 l-3 -3 a2 2 0 1 1 3 -2 a2 2 0 1 1 3 2 z" style={{ fill: color }} />
       <path d="M52 8 l1.2 -2.5 l1.2 2.5 l2.5 1.2 l-2.5 1.2 l-1.2 2.5 l-1.2 -2.5 l-2.5 -1.2 z" fill="#FFF6DC" opacity="0.85" />
     </svg>
   );
@@ -6695,9 +6792,9 @@ function IllustPhone({ color, size = 36 }: { color: string; size?: number }) {
       <rect x="18" y="6" width="28" height="52" rx="6" fill={`url(#${id})`} />
       <rect x="22" y="12" width="20" height="36" rx="2" fill="#0b172e" opacity="0.9" />
       <circle cx="32" cy="53" r="2" fill="#FFF6DC" opacity="0.85" />
-      <circle cx="32" cy="30" r="6"  stroke={color} strokeWidth="2" fill="none" opacity="0.4" />
-      <circle cx="32" cy="30" r="10" stroke={color} strokeWidth="2" fill="none" opacity="0.25" />
-      <circle cx="32" cy="30" r="3.2" fill={color} />
+      <circle cx="32" cy="30" r="6"  style={{ stroke: color }} strokeWidth="2" fill="none" opacity="0.4" />
+      <circle cx="32" cy="30" r="10" style={{ stroke: color }} strokeWidth="2" fill="none" opacity="0.25" />
+      <circle cx="32" cy="30" r="3.2" style={{ fill: color }} />
       <path d="M50 16 l1 -2 l1 2 l2 1 l-2 1 l-1 2 l-1 -2 l-2 -1 z" fill="#FFF6DC" opacity="0.85" />
     </svg>
   );
@@ -6741,23 +6838,23 @@ function FamilyCodePanel({ code, onNewCode }: { code: string; onNewCode?: () => 
   };
   const btn: React.CSSProperties = {
     minHeight: 48, padding: "0 18px", borderRadius: 999,
-    background: "rgba(255,255,255,0.06)", border: "1px solid rgba(201,146,42,0.5)",
+    background: "var(--lk-fill-060, rgba(255,255,255,0.06))", border: "1px solid var(--lk-accent-500, rgba(201,146,42,0.5))",
     color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 700, cursor: "pointer", touchAction: "manipulation",
   };
   return (
     <div data-testid="settings-family" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <div style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: 15, lineHeight: 1.5 }}>
+      <div style={{ color: "var(--lk-ink-750, rgba(247,240,227,0.75))", fontFamily: "DM Sans, sans-serif", fontSize: 15, lineHeight: 1.5 }}>
         To connect a grandchild's iPad: open NeverMiss on it, tap <strong>I'm a Grandchild</strong> and enter this code. Each grandchild then signs in with their own picture and PIN.
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
-        <div data-testid="settings-family-code" style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 34, fontWeight: 900, letterSpacing: "0.22em" }}>{code}</div>
+        <div data-testid="settings-family-code" style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 34, fontWeight: 900, letterSpacing: "0.22em" }}>{code}</div>
         <button type="button" data-testid="family-code-copy" onClick={() => void copy()} style={btn}>{copied ? "Copied ✓" : "📋 Copy"}</button>
         {onNewCode && !asking && (
           <button type="button" data-testid="family-code-new" onClick={() => { setAsking(true); setMsg(null); }} style={btn}>Make a new code</button>
         )}
       </div>
       {asking && (
-        <div data-testid="family-code-new-ask" style={{ padding: "14px 16px", borderRadius: 14, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.14)", display: "flex", flexDirection: "column", gap: 12 }}>
+        <div data-testid="family-code-new-ask" style={{ padding: "14px 16px", borderRadius: 14, background: "var(--lk-fill-050, rgba(255,255,255,0.05))", border: "1px solid var(--lk-line-140, rgba(255,255,255,0.14))", display: "flex", flexDirection: "column", gap: 12 }}>
           <div style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 15, lineHeight: 1.5 }}>
             The old code will stop working for new iPads. iPads already set up stay connected.
           </div>
@@ -6767,7 +6864,7 @@ function FamilyCodePanel({ code, onNewCode }: { code: string; onNewCode?: () => 
           </div>
         </div>
       )}
-      {msg && <div role="status" style={{ color: msg.bad ? "#fca5a5" : "#86efac", fontFamily: "DM Sans, sans-serif", fontSize: 14 }}>{msg.text}</div>}
+      {msg && <div role="status" style={{ color: msg.bad ? "var(--lk-bad-t, #fca5a5)" : "var(--lk-ok-t, #86efac)", fontFamily: "DM Sans, sans-serif", fontSize: 14 }}>{msg.text}</div>}
     </div>
   );
 }
@@ -6962,8 +7059,8 @@ function SettingsView({
   return (
     <div style={{
       flex: 1, display: "flex", flexDirection: "column",
-      backgroundColor: "#0b172e",
-      backgroundImage: "radial-gradient(700px 380px at 80% -20%, rgba(201,146,42,0.16), transparent 70%), radial-gradient(560px 360px at -10% 110%, rgba(96,165,250,0.14), transparent 70%)",
+      backgroundColor: "var(--lk-bg, #0b172e)",
+      backgroundImage: "radial-gradient(700px 380px at 80% -20%, var(--lk-accent-160, rgba(201,146,42,0.16)), transparent 70%), radial-gradient(560px 360px at -10% 110%, rgba(96,165,250,0.14), transparent 70%)",
       overflow: "auto",
     }}>
       <style>{`
@@ -6971,15 +7068,15 @@ function SettingsView({
       `}</style>
 
       {/* Header bar */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 16px 8px", borderBottom: "1px solid rgba(255,255,255,0.06)", flexShrink: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 16px 8px", borderBottom: "1px solid var(--lk-line-060, rgba(255,255,255,0.06))", flexShrink: 0 }}>
         <button onClick={onBack} style={{
-          background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.12)",
+          background: "var(--lk-fill-050, rgba(255,255,255,0.05))", border: "1px solid var(--lk-line-120, rgba(255,255,255,0.12))",
           borderRadius: 999, padding: "6px 12px", color: CREAM,
           fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700, cursor: "pointer",
         }}>← Back</button>
         <div style={{ flex: 1 }}>
           <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: "clamp(18px, 2.4vw, 22px)", fontWeight: 700, lineHeight: 1.1 }}>Settings</div>
-          <div style={{ color: "rgba(247,240,227,0.45)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2 }}>Tune your reading room</div>
+          <div style={{ color: "var(--lk-ink-450, rgba(247,240,227,0.45))", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2 }}>Tune your reading room</div>
         </div>
       </div>
 
@@ -7005,10 +7102,15 @@ function SettingsView({
           </SettingsCard>
         )}
 
+        {/* Build 43: colours and Library style for both iPads. */}
+        <SettingsCard title="How NeverMiss looks" icon="🎨" delay="0s" wide>
+          <SettingsLookPicker />
+        </SettingsCard>
+
         {onOpenWithChange && (
         <SettingsCard title="Opening screen" icon="🏠" delay="0s">
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: "0.1em" }}>WHERE TO START</div>
+            <div style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: "0.1em" }}>WHERE TO START</div>
             <div style={{ display: "flex", gap: 8 }}>
               {([
                 { k: "home" as const,  icon: "🏠", title: "Home",        sub: "Your grandchildren" },
@@ -7023,9 +7125,9 @@ function SettingsView({
                       flex: 1,
                       padding: "12px 10px",
                       borderRadius: 14,
-                      border: active ? `2px solid ${AMBER}` : "1px solid rgba(255,255,255,0.12)",
-                      backgroundColor: active ? "rgba(201,146,42,0.14)" : "rgba(255,255,255,0.04)",
-                      color: active ? AMBER : CREAM,
+                      border: active ? `2px solid ${AMBER}` : "1px solid var(--lk-line-120, rgba(255,255,255,0.12))",
+                      backgroundColor: active ? "var(--lk-accent-140, rgba(201,146,42,0.14))" : "var(--lk-fill-040, rgba(255,255,255,0.04))",
+                      color: active ? AMBER_T : CREAM,
                       fontFamily: "DM Sans, sans-serif",
                       cursor: "pointer",
                       display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
@@ -7040,7 +7142,7 @@ function SettingsView({
                 );
               })}
             </div>
-            <div style={{ color: "rgba(247,240,227,0.45)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2, lineHeight: 1.5 }}>
+            <div style={{ color: "var(--lk-ink-450, rgba(247,240,227,0.45))", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2, lineHeight: 1.5 }}>
               {openWith === "video"
                 ? "With one grandchild, opening NeverMiss starts your visit straight away. With more, you'll pick who's reading first."
                 : "You'll see your grandchildren. Tap one, then Start Reading."}
@@ -7053,18 +7155,18 @@ function SettingsView({
         <SettingsCard title="Profile" icon="👤" delay="0s">
           <GrandparentNameRow name={nanaName || "Nana"} onSave={onRenameNana} />
           <SettingsRow label="Reading with" value={childName || "Your grandchild"} />
-          <SettingsRow label="Plan" value={<span style={{ color: AMBER, fontWeight: 700 }}>Founding Family</span>} />
+          <SettingsRow label="Plan" value={<span style={{ color: AMBER_T, fontWeight: 700 }}>Founding Family</span>} />
         </SettingsCard>
 
         {/* Reading defaults */}
         <SettingsCard title="Reading defaults" icon="📖" delay="0.05s">
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: "0.1em" }}>THEME</div>
+            <div style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: "0.1em" }}>THEME</div>
             <div style={{ display: "flex", gap: 8 }}>
               {([{k:"day",label:"Day",bg:"#F2E4C4",fg:"#2D1A08"},{k:"bright",label:"White",bg:"#FFFFFF",fg:"#1A1A1A"},{k:"sepia",label:"Sepia",bg:"#EFE0BD",fg:"#3F2208"},{k:"night",label:"Night",bg:"#1B2030",fg:"#D8C8A8"}] as const).map(t => (
                 <button key={t.k} onClick={() => setDefaultTheme(t.k)} style={{
                   flex: 1, padding: "10px 12px", borderRadius: 12,
-                  border: defaultTheme === t.k ? `2px solid ${AMBER}` : "1px solid rgba(255,255,255,0.12)",
+                  border: defaultTheme === t.k ? `2px solid ${AMBER}` : "1px solid var(--lk-line-120, rgba(255,255,255,0.12))",
                   backgroundColor: t.bg, color: t.fg,
                   fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700, cursor: "pointer",
                   boxShadow: defaultTheme === t.k ? `0 6px 18px color-mix(in srgb, ${AMBER} 35%, transparent)` : "none",
@@ -7073,21 +7175,21 @@ function SettingsView({
             </div>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
-            <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: "0.1em" }}>FONT SIZE</div>
+            <div style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: "0.1em" }}>FONT SIZE</div>
             <div style={{ display: "flex", gap: 8 }}>
               {(["S","M","L","XL"] as const).map(s => (
                 <button key={s} onClick={() => setDefaultFontSize(s)} style={{
                   flex: 1, padding: "10px 12px", borderRadius: 12,
-                  border: defaultFontSize === s ? `2px solid ${AMBER}` : "1px solid rgba(255,255,255,0.12)",
-                  backgroundColor: defaultFontSize === s ? "rgba(201,146,42,0.18)" : "rgba(255,255,255,0.05)",
-                  color: defaultFontSize === s ? AMBER : CREAM,
+                  border: defaultFontSize === s ? `2px solid ${AMBER}` : "1px solid var(--lk-line-120, rgba(255,255,255,0.12))",
+                  backgroundColor: defaultFontSize === s ? "var(--lk-accent-180, rgba(201,146,42,0.18))" : "var(--lk-fill-050, rgba(255,255,255,0.05))",
+                  color: defaultFontSize === s ? AMBER_T : CREAM,
                   fontFamily: "Merriweather, serif",
                   fontSize: s === "S" ? 12 : s === "M" ? 14 : s === "L" ? 16 : 18,
                   fontWeight: 700, cursor: "pointer",
                 }}>{s}</button>
               ))}
             </div>
-            <div style={{ color: "rgba(247,240,227,0.45)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2 }}>
+            <div style={{ color: "var(--lk-ink-450, rgba(247,240,227,0.45))", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2 }}>
               Both iPads use this size. Same as Menu → Reading Setup while you read.
             </div>
           </div>
@@ -7096,16 +7198,16 @@ function SettingsView({
               so it can be set as a default before a session starts. */}
           {onPageModeChange && (
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
-              <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: "0.1em" }}>PAGE MODE</div>
+              <div style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700, letterSpacing: "0.1em" }}>PAGE MODE</div>
               <div style={{ display: "flex", gap: 8 }}>
                 {([{k: "double" as const, label: "Two pages", icon: "📖"}, {k: "single" as const, label: "One page", icon: "📄"}]).map(m => {
                   const active = (pageMode ?? "double") === m.k;
                   return (
                     <button key={m.k} onClick={() => onPageModeChange(m.k)} style={{
                       flex: 1, padding: "10px 12px", borderRadius: 12,
-                      border: active ? `2px solid ${AMBER}` : "1px solid rgba(255,255,255,0.12)",
-                      backgroundColor: active ? "rgba(201,146,42,0.18)" : "rgba(255,255,255,0.05)",
-                      color: active ? AMBER : CREAM,
+                      border: active ? `2px solid ${AMBER}` : "1px solid var(--lk-line-120, rgba(255,255,255,0.12))",
+                      backgroundColor: active ? "var(--lk-accent-180, rgba(201,146,42,0.18))" : "var(--lk-fill-050, rgba(255,255,255,0.05))",
+                      color: active ? AMBER_T : CREAM,
                       fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700, cursor: "pointer",
                       display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
                     }}>
@@ -7154,9 +7256,9 @@ function SettingsView({
               disabled={helpResetConfirmed}
               style={{
                 width: "100%", textAlign: "left", marginTop: 8,
-                backgroundColor: helpResetConfirmed ? "rgba(134,239,172,0.10)" : "rgba(255,255,255,0.04)",
-                border: `1px solid ${helpResetConfirmed ? "rgba(134,239,172,0.40)" : "rgba(255,255,255,0.10)"}`,
-                borderRadius: 12, padding: "12px 14px", color: helpResetConfirmed ? "#86efac" : CREAM,
+                backgroundColor: helpResetConfirmed ? "rgba(134,239,172,0.10)" : "var(--lk-fill-040, rgba(255,255,255,0.04))",
+                border: `1px solid ${helpResetConfirmed ? "rgba(134,239,172,0.40)" : "var(--lk-line-100, rgba(255,255,255,0.10))"}`,
+                borderRadius: 12, padding: "12px 14px", color: helpResetConfirmed ? "var(--lk-ok-t, #86efac)" : CREAM,
                 fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700,
                 cursor: helpResetConfirmed ? "default" : "pointer",
                 display: "flex", alignItems: "center", gap: 10,
@@ -7166,7 +7268,7 @@ function SettingsView({
               <span style={{ fontSize: 18 }}>{helpResetConfirmed ? "✓" : "🔄"}</span>
               <div style={{ flex: 1 }}>
                 <div>{helpResetConfirmed ? "Help prompts restored" : "Reset dismissed help prompts"}</div>
-                <div style={{ color: "rgba(247,240,227,0.5)", fontSize: 11, fontWeight: 500, marginTop: 2 }}>
+                <div style={{ color: "var(--lk-ink-500, rgba(247,240,227,0.5))", fontSize: 11, fontWeight: 500, marginTop: 2 }}>
                   {helpResetConfirmed
                     ? "All cards will appear again next time you enter each phase."
                     : "Bring back every \"Don't show again\" dismiss"}
@@ -7194,7 +7296,7 @@ function SettingsView({
         <SettingsCard title="Account" icon="🔄" delay="0.2s">
           <button onClick={onSwitchDevice} style={{
             width: "100%", textAlign: "left",
-            backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.10)",
+            backgroundColor: "var(--lk-fill-040, rgba(255,255,255,0.04))", border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))",
             borderRadius: 12, padding: "12px 14px", color: CREAM,
             fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700, cursor: "pointer",
             display: "flex", alignItems: "center", gap: 10,
@@ -7202,9 +7304,9 @@ function SettingsView({
             <span style={{ fontSize: 20 }}>🔄</span>
             <div style={{ flex: 1 }}>
               <div>Switch user</div>
-              <div style={{ color: "rgba(247,240,227,0.5)", fontSize: 11, fontWeight: 500, marginTop: 2 }}>Hand the iPad to someone else</div>
+              <div style={{ color: "var(--lk-ink-500, rgba(247,240,227,0.5))", fontSize: 11, fontWeight: 500, marginTop: 2 }}>Hand the iPad to someone else</div>
             </div>
-            <span style={{ color: "rgba(247,240,227,0.4)" }}>→</span>
+            <span style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))" }}>→</span>
           </button>
           {onSignOut && (
             <button
@@ -7212,7 +7314,7 @@ function SettingsView({
               style={{
                 width: "100%", textAlign: "left", marginTop: 8,
                 backgroundColor: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.35)",
-                borderRadius: 12, padding: "12px 14px", color: "#fca5a5",
+                borderRadius: 12, padding: "12px 14px", color: "var(--lk-bad-t, #fca5a5)",
                 fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700, cursor: "pointer",
                 display: "flex", alignItems: "center", gap: 10,
               }}
@@ -7234,7 +7336,7 @@ function SettingsView({
             disabled={exportBusy}
             style={{
               width: "100%", textAlign: "left",
-              backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.10)",
+              backgroundColor: "var(--lk-fill-040, rgba(255,255,255,0.04))", border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))",
               borderRadius: 12, padding: "12px 14px", color: CREAM,
               fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700,
               cursor: exportBusy ? "wait" : "pointer", opacity: exportBusy ? 0.6 : 1,
@@ -7244,15 +7346,15 @@ function SettingsView({
             <span style={{ fontSize: 20 }}>📥</span>
             <div style={{ flex: 1 }}>
               <div>{exportBusy ? "Preparing…" : "Download my data"}</div>
-              <div style={{ color: "rgba(247,240,227,0.5)", fontSize: 11, fontWeight: 500, marginTop: 2 }}>JSON copy of everything we hold on you</div>
+              <div style={{ color: "var(--lk-ink-500, rgba(247,240,227,0.5))", fontSize: 11, fontWeight: 500, marginTop: 2 }}>JSON copy of everything we hold on you</div>
             </div>
-            <span style={{ color: "rgba(247,240,227,0.4)" }}>→</span>
+            <span style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))" }}>→</span>
           </button>
           <button
             onClick={() => setWithdrawOpen(true)}
             style={{
               width: "100%", textAlign: "left", marginTop: 8,
-              backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.10)",
+              backgroundColor: "var(--lk-fill-040, rgba(255,255,255,0.04))", border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))",
               borderRadius: 12, padding: "12px 14px", color: CREAM,
               fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700, cursor: "pointer",
               display: "flex", alignItems: "center", gap: 10,
@@ -7261,16 +7363,16 @@ function SettingsView({
             <span style={{ fontSize: 20 }}>🛑</span>
             <div style={{ flex: 1 }}>
               <div>Withdraw parental consent</div>
-              <div style={{ color: "rgba(247,240,227,0.5)", fontSize: 11, fontWeight: 500, marginTop: 2 }}>Deletes child profiles + sessions only</div>
+              <div style={{ color: "var(--lk-ink-500, rgba(247,240,227,0.5))", fontSize: 11, fontWeight: 500, marginTop: 2 }}>Deletes child profiles + sessions only</div>
             </div>
-            <span style={{ color: "rgba(247,240,227,0.4)" }}>→</span>
+            <span style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))" }}>→</span>
           </button>
           <button
             onClick={() => { setDeleteOpen(true); setDeleteText(""); setDeleteError(null); }}
             style={{
               width: "100%", textAlign: "left", marginTop: 8,
               backgroundColor: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.35)",
-              borderRadius: 12, padding: "12px 14px", color: "#fca5a5",
+              borderRadius: 12, padding: "12px 14px", color: "var(--lk-bad-t, #fca5a5)",
               fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700, cursor: "pointer",
               display: "flex", alignItems: "center", gap: 10,
             }}
@@ -7278,7 +7380,7 @@ function SettingsView({
             <span style={{ fontSize: 20 }}>🗑️</span>
             <div style={{ flex: 1 }}>
               <div>Delete my account</div>
-              <div style={{ color: "rgba(252,165,165,0.7)", fontSize: 11, fontWeight: 500, marginTop: 2 }}>Permanently erase account and all family data</div>
+              <div style={{ color: "var(--lk-lt-fca5a5-700, rgba(252,165,165,0.7))", fontSize: 11, fontWeight: 500, marginTop: 2 }}>Permanently erase account and all family data</div>
             </div>
             <span style={{ opacity: 0.5 }}>→</span>
           </button>
@@ -7295,7 +7397,7 @@ function SettingsView({
             style={{
               width: "100%", textAlign: "left", textDecoration: "none",
               boxSizing: "border-box",
-              backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.10)",
+              backgroundColor: "var(--lk-fill-040, rgba(255,255,255,0.04))", border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))",
               borderRadius: 12, padding: "12px 14px", color: CREAM,
               fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700, cursor: "pointer",
               display: "flex", alignItems: "center", gap: 10,
@@ -7303,7 +7405,7 @@ function SettingsView({
           >
             <span style={{ fontSize: 20 }}>🔒</span>
             <div style={{ flex: 1 }}>Privacy Policy</div>
-            <span style={{ color: "rgba(247,240,227,0.4)" }}>↗</span>
+            <span style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))" }}>↗</span>
           </a>
           <a
             href="https://nevermiss.family/data/NeverMiss_Terms_of_Use_v2%20(1).pdf"
@@ -7313,7 +7415,7 @@ function SettingsView({
               width: "100%", textAlign: "left", textDecoration: "none",
               boxSizing: "border-box",
               marginTop: 8,
-              backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.10)",
+              backgroundColor: "var(--lk-fill-040, rgba(255,255,255,0.04))", border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))",
               borderRadius: 12, padding: "12px 14px", color: CREAM,
               fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700, cursor: "pointer",
               display: "flex", alignItems: "center", gap: 10,
@@ -7321,7 +7423,7 @@ function SettingsView({
           >
             <span style={{ fontSize: 20 }}>📄</span>
             <div style={{ flex: 1 }}>Terms of Use</div>
-            <span style={{ color: "rgba(247,240,227,0.4)" }}>↗</span>
+            <span style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))" }}>↗</span>
           </a>
           <a
             href="mailto:privacy@nevermiss.family"
@@ -7329,7 +7431,7 @@ function SettingsView({
               width: "100%", textAlign: "left", textDecoration: "none",
               boxSizing: "border-box",
               marginTop: 8,
-              backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.10)",
+              backgroundColor: "var(--lk-fill-040, rgba(255,255,255,0.04))", border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))",
               borderRadius: 12, padding: "12px 14px", color: CREAM,
               fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700, cursor: "pointer",
               display: "flex", alignItems: "center", gap: 10,
@@ -7338,13 +7440,13 @@ function SettingsView({
             <span style={{ fontSize: 20 }}>✉️</span>
             <div style={{ flex: 1 }}>
               <div>Contact us</div>
-              <div style={{ color: "rgba(247,240,227,0.5)", fontSize: 11, fontWeight: 500, marginTop: 2 }}>privacy@nevermiss.family</div>
+              <div style={{ color: "var(--lk-ink-500, rgba(247,240,227,0.5))", fontSize: 11, fontWeight: 500, marginTop: 2 }}>privacy@nevermiss.family</div>
             </div>
-            <span style={{ color: "rgba(247,240,227,0.4)" }}>↗</span>
+            <span style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))" }}>↗</span>
           </a>
           <div style={{
             marginTop: 12,
-            color: "rgba(247,240,227,0.4)",
+            color: "var(--lk-ink-400, rgba(247,240,227,0.4))",
             fontFamily: "DM Sans, sans-serif",
             fontSize: 10, lineHeight: 1.6, textAlign: "center",
           }}>
@@ -7353,7 +7455,7 @@ function SettingsView({
           </div>
         </SettingsCard>
 
-        <div style={{ textAlign: "center", color: "rgba(247,240,227,0.32)", fontFamily: "DM Sans, sans-serif", fontSize: 10, marginTop: 6 }}>
+        <div style={{ textAlign: "center", color: "var(--lk-ink-320, rgba(247,240,227,0.32))", fontFamily: "DM Sans, sans-serif", fontSize: 10, marginTop: 6 }}>
           NeverMiss · Built for the family across the miles
         </div>
       </div>
@@ -7368,32 +7470,32 @@ function SettingsView({
           aria-labelledby="delete-account-title"
           style={{
             position: "fixed", inset: 0, zIndex: 200,
-            backgroundColor: "rgba(11,23,46,0.78)", backdropFilter: "blur(6px)",
+            backgroundColor: "var(--lk-bg-780, rgba(11,23,46,0.78))", backdropFilter: "blur(6px)",
             display: "flex", alignItems: "center", justifyContent: "center",
             padding: 16,
             animation: "settings-rise 0.18s ease-out",
           }}
         >
           <div style={{
-            backgroundColor: "#0d1e38",
+            backgroundColor: "var(--lk-n-0d1e38, #0d1e38)",
             border: "1px solid rgba(239,68,68,0.45)",
             borderRadius: 18, padding: "22px 22px 18px",
             maxWidth: 440, width: "100%",
-            boxShadow: "0 24px 70px rgba(0,0,0,0.55)",
+            boxShadow: "0 24px 70px var(--lk-shadow-550, rgba(0,0,0,0.55))",
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
               <span style={{ fontSize: 24 }}>⚠️</span>
-              <div id="delete-account-title" style={{ color: "#fca5a5", fontFamily: "Playfair Display, serif", fontSize: 20, fontWeight: 700 }}>
+              <div id="delete-account-title" style={{ color: "var(--lk-bad-t, #fca5a5)", fontFamily: "Playfair Display, serif", fontSize: 20, fontWeight: 700 }}>
                 Delete your account
               </div>
             </div>
-            <div style={{ color: "rgba(247,240,227,0.78)", fontFamily: "DM Sans, sans-serif", fontSize: 13, lineHeight: 1.55, marginBottom: 14 }}>
+            <div style={{ color: "var(--lk-ink-780, rgba(247,240,227,0.78))", fontFamily: "DM Sans, sans-serif", fontSize: 13, lineHeight: 1.55, marginBottom: 14 }}>
               This permanently removes your NeverMiss account and{" "}
               <strong>every connection, child profile and photo, reading session, progress entry, and saved word</strong>{" "}
               tied to it. This action is immediate and cannot be undone.
             </div>
-            <div style={{ color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginBottom: 6 }}>
-              Type <strong style={{ color: AMBER, letterSpacing: "0.08em" }}>DELETE</strong> to confirm:
+            <div style={{ color: "var(--lk-ink-500, rgba(247,240,227,0.5))", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginBottom: 6 }}>
+              Type <strong style={{ color: AMBER_T, letterSpacing: "0.08em" }}>DELETE</strong> to confirm:
             </div>
             <input
               value={deleteText}
@@ -7404,7 +7506,7 @@ function SettingsView({
               placeholder="DELETE"
               style={{
                 width: "100%", boxSizing: "border-box",
-                backgroundColor: "rgba(255,255,255,0.06)",
+                backgroundColor: "var(--lk-fill-060, rgba(255,255,255,0.06))",
                 border: "1px solid rgba(239,68,68,0.45)",
                 borderRadius: 10, padding: "10px 12px",
                 color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 14,
@@ -7413,7 +7515,7 @@ function SettingsView({
               }}
             />
             {deleteError && (
-              <div style={{ color: "#fca5a5", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 8 }}>
+              <div style={{ color: "var(--lk-bad-t, #fca5a5)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 8 }}>
                 {deleteError}
               </div>
             )}
@@ -7422,8 +7524,8 @@ function SettingsView({
                 onClick={() => { setDeleteOpen(false); setDeleteText(""); setDeleteError(null); }}
                 disabled={deleteBusy}
                 style={{
-                  backgroundColor: "rgba(255,255,255,0.06)",
-                  border: "1px solid rgba(255,255,255,0.18)",
+                  backgroundColor: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+                  border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))",
                   color: CREAM,
                   borderRadius: 999, padding: "9px 18px",
                   fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700,
@@ -7461,28 +7563,28 @@ function SettingsView({
           aria-modal="true"
           style={{
             position: "fixed", inset: 0, zIndex: 200,
-            backgroundColor: "rgba(11,23,46,0.78)", backdropFilter: "blur(6px)",
+            backgroundColor: "var(--lk-bg-780, rgba(11,23,46,0.78))", backdropFilter: "blur(6px)",
             display: "flex", alignItems: "center", justifyContent: "center",
             padding: 16,
             animation: "settings-rise 0.18s ease-out",
           }}
         >
           <div style={{
-            backgroundColor: "#0d1e38",
-            border: "1px solid rgba(247,201,93,0.45)",
+            backgroundColor: "var(--lk-n-0d1e38, #0d1e38)",
+            border: "1px solid var(--lk-accent-hi-450, rgba(247,201,93,0.45))",
             borderRadius: 18, padding: "22px 22px 18px",
             maxWidth: 440, width: "100%",
-            boxShadow: "0 24px 70px rgba(0,0,0,0.55)",
+            boxShadow: "0 24px 70px var(--lk-shadow-550, rgba(0,0,0,0.55))",
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
               <span style={{ fontSize: 24 }}>🛑</span>
-              <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 20, fontWeight: 700 }}>
+              <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: 20, fontWeight: 700 }}>
                 Withdraw parental consent
               </div>
             </div>
             {withdrawDone ? (
               <>
-                <div style={{ color: "rgba(247,240,227,0.85)", fontFamily: "DM Sans, sans-serif", fontSize: 13, lineHeight: 1.55, marginBottom: 14 }}>
+                <div style={{ color: "var(--lk-ink-850, rgba(247,240,227,0.85))", fontFamily: "DM Sans, sans-serif", fontSize: 13, lineHeight: 1.55, marginBottom: 14 }}>
                   Done. Removed <strong>{withdrawDone.children}</strong> child profile{withdrawDone.children === 1 ? "" : "s"}
                   {withdrawDone.sessions ? <> and <strong>{withdrawDone.sessions}</strong> reading session{withdrawDone.sessions === 1 ? "" : "s"}</> : null}.
                   Your account is untouched.
@@ -7505,7 +7607,7 @@ function SettingsView({
               </>
             ) : (
               <>
-                <div style={{ color: "rgba(247,240,227,0.78)", fontFamily: "DM Sans, sans-serif", fontSize: 13, lineHeight: 1.55, marginBottom: 14 }}>
+                <div style={{ color: "var(--lk-ink-780, rgba(247,240,227,0.78))", fontFamily: "DM Sans, sans-serif", fontSize: 13, lineHeight: 1.55, marginBottom: 14 }}>
                   This deletes every child profile + reading session on your account, as guaranteed by §8 of the Privacy Policy.
                   Your adult account, email, and family connection itself stay in place — you can add a child back later.
                 </div>
@@ -7514,8 +7616,8 @@ function SettingsView({
                     onClick={() => setWithdrawOpen(false)}
                     disabled={withdrawBusy}
                     style={{
-                      backgroundColor: "rgba(255,255,255,0.06)",
-                      border: "1px solid rgba(255,255,255,0.18)",
+                      backgroundColor: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+                      border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))",
                       color: CREAM,
                       borderRadius: 999, padding: "9px 18px",
                       fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700,
@@ -7548,12 +7650,24 @@ function SettingsView({
   );
 }
 
+/** The look picker in the Menu's "Colours & Library" panel (narrow drawer). */
+function MenuLookPicker() {
+  const { look, style } = useLooks();
+  return <LookPicker narrow look={look} style={style} onChoose={next => { void chooseFamilyLook(next); }} />;
+}
+
+/** The look picker in Settings: the current look, and Nana's choice goes to both iPads. */
+function SettingsLookPicker() {
+  const { look, style } = useLooks();
+  return <LookPicker look={look} style={style} onChoose={next => { void chooseFamilyLook(next); }} />;
+}
+
 function SettingsCard({ title, icon, children, delay = "0s", wide = false }: { title: string; icon: string; children: React.ReactNode; delay?: string; wide?: boolean }) {
   return (
     <div style={{
       gridColumn: wide ? "1 / -1" : undefined,
-      backgroundColor: "rgba(255,255,255,0.04)",
-      border: "1px solid rgba(255,255,255,0.10)",
+      backgroundColor: "var(--lk-fill-040, rgba(255,255,255,0.04))",
+      border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))",
       borderRadius: 14, padding: "12px 14px",
       animation: "settings-rise 0.5s both",
       animationDelay: delay,
@@ -7561,7 +7675,7 @@ function SettingsCard({ title, icon, children, delay = "0s", wide = false }: { t
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
         <span style={{ fontSize: 16 }}>{icon}</span>
-        <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 800, letterSpacing: "0.14em" }}>{title.toUpperCase()}</span>
+        <span style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 800, letterSpacing: "0.14em" }}>{title.toUpperCase()}</span>
       </div>
       {children}
     </div>
@@ -7588,23 +7702,23 @@ function GrandparentNameRow({ name, onSave }: { name: string; onSave?: (next: st
   };
   const chip: React.CSSProperties = {
     minHeight: 44, padding: "0 16px", borderRadius: 999, cursor: "pointer", touchAction: "manipulation",
-    background: "rgba(255,255,255,0.06)", border: "1px solid rgba(201,146,42,0.45)", color: CREAM,
+    background: "var(--lk-fill-060, rgba(255,255,255,0.06))", border: "1px solid var(--lk-accent-450, rgba(201,146,42,0.45))", color: CREAM,
     fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 700,
   };
   if (!editing) {
     return (
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
-        <span style={{ color: "rgba(247,240,227,0.65)", fontFamily: "DM Sans, sans-serif", fontSize: 12 }}>Your grandchildren call you</span>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid var(--lk-line-040, rgba(255,255,255,0.04))" }}>
+        <span style={{ color: "var(--lk-ink-650, rgba(247,240,227,0.65))", fontFamily: "DM Sans, sans-serif", fontSize: 12 }}>Your grandchildren call you</span>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
           <span data-testid="grandparent-name" style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 700 }}>{name}</span>
-          <button type="button" data-testid="grandparent-name-change" onClick={() => { setDraft(name); setError(""); setEditing(true); }} style={{ ...chip, minHeight: 40, fontSize: 13, color: AMBER }}>Change</button>
+          <button type="button" data-testid="grandparent-name-change" onClick={() => { setDraft(name); setError(""); setEditing(true); }} style={{ ...chip, minHeight: 40, fontSize: 13, color: AMBER_T }}>Change</button>
         </span>
       </div>
     );
   }
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
-      <span style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700 }}>What do your grandchildren call you?</span>
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "10px 0", borderBottom: "1px solid var(--lk-line-040, rgba(255,255,255,0.04))" }}>
+      <span style={{ color: "var(--lk-ink-750, rgba(247,240,227,0.75))", fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700 }}>What do your grandchildren call you?</span>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
         {["Nana", "Papa", "Grandma", "Grandpa"].map(n => (
           <button key={n} type="button" disabled={saving} onClick={() => void save(n)} style={chip}>{n}</button>
@@ -7620,22 +7734,22 @@ function GrandparentNameRow({ name, onSave }: { name: string; onSave?: (next: st
           placeholder="Oma, Gigi, Pop-Pop…"
           style={{
             flex: 1, minWidth: 0, minHeight: 44, padding: "0 14px", borderRadius: 12,
-            background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.18)", color: CREAM,
+            background: "var(--lk-fill-060, rgba(255,255,255,0.06))", border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))", color: CREAM,
             fontFamily: "DM Sans, sans-serif", fontSize: 16,
           }}
         />
         <button type="button" data-testid="grandparent-name-save" disabled={saving} onClick={() => void save(draft)} style={{ ...chip, background: AMBER, color: NAVY, border: "none" }}>{saving ? "Saving…" : "Save"}</button>
         <button type="button" disabled={saving} onClick={() => setEditing(false)} style={chip}>Cancel</button>
       </div>
-      {error && <span role="alert" style={{ color: "#fca5a5", fontFamily: "DM Sans, sans-serif", fontSize: 13 }}>{error}</span>}
+      {error && <span role="alert" style={{ color: "var(--lk-bad-t, #fca5a5)", fontFamily: "DM Sans, sans-serif", fontSize: 13 }}>{error}</span>}
     </div>
   );
 }
 
 function SettingsRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
-      <span style={{ color: "rgba(247,240,227,0.65)", fontFamily: "DM Sans, sans-serif", fontSize: 12 }}>{label}</span>
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid var(--lk-line-040, rgba(255,255,255,0.04))" }}>
+      <span style={{ color: "var(--lk-ink-650, rgba(247,240,227,0.65))", fontFamily: "DM Sans, sans-serif", fontSize: 12 }}>{label}</span>
       <span style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 600 }}>{value}</span>
     </div>
   );
@@ -7648,8 +7762,8 @@ function SettingsToggle({ label, sub, value, onChange }: { label: string; sub?: 
       style={{
         display: "flex", alignItems: "center", gap: 12,
         padding: "10px 12px", borderRadius: 12,
-        backgroundColor: "rgba(255,255,255,0.03)",
-        border: "1px solid rgba(255,255,255,0.08)",
+        backgroundColor: "var(--lk-fill-030, rgba(255,255,255,0.03))",
+        border: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))",
         cursor: "pointer", textAlign: "left",
         width: "100%", color: CREAM,
         marginBottom: 6,
@@ -7657,11 +7771,11 @@ function SettingsToggle({ label, sub, value, onChange }: { label: string; sub?: 
     >
       <div style={{ flex: 1 }}>
         <div style={{ fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700 }}>{label}</div>
-        {sub && <div style={{ color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2, fontWeight: 500 }}>{sub}</div>}
+        {sub && <div style={{ color: "var(--lk-ink-500, rgba(247,240,227,0.5))", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2, fontWeight: 500 }}>{sub}</div>}
       </div>
       <div style={{
         width: 38, height: 22, borderRadius: 999,
-        backgroundColor: value ? AMBER : "rgba(255,255,255,0.18)",
+        backgroundColor: value ? AMBER : "var(--lk-track, rgba(255,255,255,0.18))",
         position: "relative", flexShrink: 0,
         transition: "background-color 180ms ease",
       }}>
@@ -7768,36 +7882,36 @@ function BookRequestsView({
     return nanaName || "Nana";
   };
   // Rotating accent colors so each card has visual variety.
-  const accents = ["#f7c95d", "#60a5fa", "#a78bfa", "#86efac", "#fb923c"];
+  const accents = ["var(--lk-accent-hi, #f7c95d)", "#60a5fa", "#a78bfa", "#86efac", "#fb923c"];
 
   return (
     <div style={{
       flex: 1, display: "flex", flexDirection: "column",
-      backgroundColor: "#0b172e",
-      backgroundImage: "radial-gradient(700px 380px at 80% -20%, rgba(248,113,113,0.16), transparent 70%), radial-gradient(560px 360px at -10% 110%, rgba(201,146,42,0.14), transparent 70%)",
+      backgroundColor: "var(--lk-bg, #0b172e)",
+      backgroundImage: "radial-gradient(700px 380px at 80% -20%, rgba(248,113,113,0.16), transparent 70%), radial-gradient(560px 360px at -10% 110%, var(--lk-accent-140, rgba(201,146,42,0.14)), transparent 70%)",
       overflow: "auto",
     }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 16px 8px", borderBottom: "1px solid rgba(255,255,255,0.06)", flexShrink: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 16px 8px", borderBottom: "1px solid var(--lk-line-060, rgba(255,255,255,0.06))", flexShrink: 0 }}>
         <button onClick={onBack} style={{
-          background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.12)",
+          background: "var(--lk-fill-050, rgba(255,255,255,0.05))", border: "1px solid var(--lk-line-120, rgba(255,255,255,0.12))",
           borderRadius: 999, padding: "6px 12px", color: CREAM,
           fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700, cursor: "pointer",
         }}>← Back</button>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: "clamp(18px, 2.4vw, 22px)", fontWeight: 700, lineHeight: 1.1 }}>Book Requests</div>
-          <div style={{ color: "rgba(247,240,227,0.45)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2 }}>From {childLabel} & family</div>
+          <div style={{ color: "var(--lk-ink-450, rgba(247,240,227,0.45))", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2 }}>From {childLabel} & family</div>
         </div>
         {onSubmitNew && (
           <button
             onClick={onSubmitNew}
             style={{
-              background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 100%)",
+              background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 100%)",
               color: NAVY, border: "none",
               borderRadius: 999, padding: "8px 14px",
               fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 800,
               letterSpacing: "0.02em", cursor: "pointer",
               display: "inline-flex", alignItems: "center", gap: 6,
-              boxShadow: "0 4px 12px rgba(201,146,42,0.35)",
+              boxShadow: "0 4px 12px var(--lk-accent-350, rgba(201,146,42,0.35))",
               touchAction: "manipulation",
             }}
           >
@@ -7808,7 +7922,7 @@ function BookRequestsView({
         {newCount > 0 && (
           <span style={{
             backgroundColor: "rgba(248,113,113,0.16)", border: "1px solid rgba(248,113,113,0.45)",
-            borderRadius: 999, padding: "4px 10px", color: "#fca5a5",
+            borderRadius: 999, padding: "4px 10px", color: "var(--lk-bad-t, #fca5a5)",
             fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: "0.1em",
             whiteSpace: "nowrap",
           }}>{newCount} NEW</span>
@@ -7816,32 +7930,32 @@ function BookRequestsView({
       </div>
 
       {err && (
-        <div style={{ margin: "10px 16px 0", padding: "8px 12px", borderRadius: 10, background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.35)", color: "#fca5a5", fontFamily: "DM Sans, sans-serif", fontSize: 12 }}>
+        <div style={{ margin: "10px 16px 0", padding: "8px 12px", borderRadius: 10, background: "rgba(239,68,68,0.10)", border: "1px solid rgba(239,68,68,0.35)", color: "var(--lk-bad-t, #fca5a5)", fontFamily: "DM Sans, sans-serif", fontSize: 12 }}>
           {err}
         </div>
       )}
 
       {requests === null ? (
-        <div style={{ padding: "40px 16px", textAlign: "center", color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: 13 }}>
+        <div style={{ padding: "40px 16px", textAlign: "center", color: "var(--lk-ink-500, rgba(247,240,227,0.5))", fontFamily: "DM Sans, sans-serif", fontSize: 13 }}>
           Loading requests…
         </div>
       ) : visible.length === 0 ? (
         <div style={{ padding: "40px 20px", textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
           <div style={{ fontSize: 48, opacity: 0.7 }}>📬</div>
           <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 18, fontWeight: 700 }}>No requests yet</div>
-          <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 13, lineHeight: 1.55, maxWidth: 420 }}>
+          <div style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: "DM Sans, sans-serif", fontSize: 13, lineHeight: 1.55, maxWidth: 420 }}>
             When {childLabel} or another family member asks for a book that's not in the library, it'll appear here for you to approve.
           </div>
           {onSubmitNew && (
             <button
               onClick={onSubmitNew}
               style={{
-                background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 100%)",
+                background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 100%)",
                 color: NAVY, border: "none", borderRadius: 999,
                 padding: "10px 20px", marginTop: 8,
                 fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 800,
                 cursor: "pointer", touchAction: "manipulation",
-                boxShadow: "0 6px 16px rgba(201,146,42,0.35)",
+                boxShadow: "0 6px 16px var(--lk-accent-350, rgba(201,146,42,0.35))",
               }}
             >
               + Request a book yourself
@@ -7860,8 +7974,8 @@ function BookRequestsView({
             const busy = actingId === req.id;
             return (
               <div key={req.id} style={{
-                backgroundImage: `linear-gradient(135deg, color-mix(in srgb, ${accent} 12%, rgba(255,255,255,0.04)), rgba(255,255,255,0.03) 70%)`,
-                border: `1px solid color-mix(in srgb, ${accent} 35%, rgba(255,255,255,0.10))`,
+                backgroundImage: `linear-gradient(135deg, color-mix(in srgb, ${accent} 12%, var(--lk-fill-040, rgba(255,255,255,0.04))), var(--lk-fill-030, rgba(255,255,255,0.03)) 70%)`,
+                border: `1px solid color-mix(in srgb, ${accent} 35%, var(--lk-line-100, rgba(255,255,255,0.10)))`,
                 borderRadius: 14, padding: "12px 14px",
                 display: "flex", gap: 10, alignItems: "flex-start",
                 minHeight: 0,
@@ -7875,23 +7989,23 @@ function BookRequestsView({
                 }}>📚</div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                    <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800, letterSpacing: "0.14em" }}>
+                    <span style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800, letterSpacing: "0.14em" }}>
                       FROM {requestorLabel(req).toUpperCase()}
                     </span>
                     {isApproved && (
                       <span style={{
                         backgroundColor: "rgba(134,239,172,0.18)", border: "1px solid rgba(134,239,172,0.55)",
-                        color: "#86efac", borderRadius: 999,
+                        color: "var(--lk-ok-t, #86efac)", borderRadius: 999,
                         padding: "1px 8px", fontSize: 9, fontWeight: 800, letterSpacing: "0.10em",
                       }}>✓ APPROVED</span>
                     )}
                   </div>
                   <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 16, fontWeight: 700, marginTop: 2 }}>{req.requestedTitle}</div>
                   {req.requestedAuthor && (
-                    <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 1 }}>{req.requestedAuthor}</div>
+                    <div style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 1 }}>{req.requestedAuthor}</div>
                   )}
                   {req.notes && (
-                    <div style={{ color: "rgba(247,240,227,0.65)", fontFamily: "Merriweather, serif", fontSize: 12, fontStyle: "italic", marginTop: 4 }}>"{req.notes}"</div>
+                    <div style={{ color: "var(--lk-ink-650, rgba(247,240,227,0.65))", fontFamily: "Merriweather, serif", fontSize: 12, fontStyle: "italic", marginTop: 4 }}>"{req.notes}"</div>
                   )}
                   <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
                     {req.status === "pending" && (
@@ -7900,7 +8014,7 @@ function BookRequestsView({
                           onClick={() => approve(req.id)}
                           disabled={busy}
                           style={{
-                            background: `linear-gradient(135deg, ${accent}, color-mix(in srgb, ${accent} 70%, #d97706))`,
+                            background: `linear-gradient(135deg, ${accent}, color-mix(in srgb, ${accent} 70%, var(--lk-accent-2, #d97706)))`,
                             color: NAVY, border: "none", borderRadius: 999,
                             padding: "8px 14px", fontFamily: "DM Sans, sans-serif",
                             fontSize: 11, fontWeight: 800, cursor: busy ? "wait" : "pointer",
@@ -7913,8 +8027,8 @@ function BookRequestsView({
                           onClick={() => reject(req.id)}
                           disabled={busy}
                           style={{
-                            background: "transparent", color: "rgba(247,240,227,0.6)",
-                            border: "1px solid rgba(255,255,255,0.18)", borderRadius: 999,
+                            background: "transparent", color: "var(--lk-ink-600, rgba(247,240,227,0.6))",
+                            border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))", borderRadius: 999,
                             padding: "8px 14px", fontFamily: "DM Sans, sans-serif",
                             fontSize: 11, fontWeight: 700, cursor: busy ? "wait" : "pointer",
                             opacity: busy ? 0.6 : 1, touchAction: "manipulation",
@@ -7925,7 +8039,7 @@ function BookRequestsView({
                       </>
                     )}
                     {isApproved && (
-                      <span style={{ color: "rgba(134,239,172,0.85)", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontStyle: "italic" }}>
+                      <span style={{ color: "var(--lk-lt-86efac-850, rgba(134,239,172,0.85))", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontStyle: "italic" }}>
                         Waiting for the book to be added — we'll notify you.
                       </span>
                     )}
@@ -7942,8 +8056,8 @@ function BookRequestsView({
           }}>
             <span style={{ fontSize: 22 }}>💡</span>
             <div style={{ flex: 1 }}>
-              <div style={{ color: "#cfe3ff", fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700 }}>How family sends requests</div>
-              <div style={{ color: "rgba(247,240,227,0.6)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2 }}>
+              <div style={{ color: "var(--lk-lt-cfe3ff, #cfe3ff)", fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700 }}>How family sends requests</div>
+              <div style={{ color: "var(--lk-ink-600, rgba(247,240,227,0.6))", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 2 }}>
                 Tap "+ New request" up top to add one yourself. Family-invite links for other adults are coming next.
               </div>
             </div>
@@ -7956,10 +8070,10 @@ function BookRequestsView({
           position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)",
           zIndex: 120,
           background: "linear-gradient(135deg, rgba(34,197,94,0.96), rgba(21,128,61,0.96))",
-          color: "#f0fdf4",
+          color: "var(--lk-lt-f0fdf4, #f0fdf4)",
           fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700,
           padding: "10px 20px", borderRadius: 999,
-          boxShadow: "0 8px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(134,239,172,0.35)",
+          boxShadow: "0 8px 24px var(--lk-shadow-450, rgba(0,0,0,0.45)), 0 0 0 1px rgba(134,239,172,0.35)",
           maxWidth: "calc(100% - 40px)",
           animation: "phase-card-up 0.24s cubic-bezier(0.22,1,0.36,1)",
         }}>
@@ -7972,19 +8086,19 @@ function BookRequestsView({
 
 function StubScreen({ icon, title, subtitle, onBack }: { icon: string; title: string; subtitle: string; onBack: () => void }) {
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", backgroundColor: "#0b172e", padding: 24, gap: 14 }}>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", backgroundColor: "var(--lk-bg, #0b172e)", padding: 24, gap: 14 }}>
       <div style={{ fontSize: 64 }}>{icon}</div>
-      <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 24, fontWeight: 700 }}>{title}</div>
-      <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 13, textAlign: "center", maxWidth: 320, lineHeight: 1.5 }}>
+      <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: 24, fontWeight: 700 }}>{title}</div>
+      <div style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: "DM Sans, sans-serif", fontSize: 13, textAlign: "center", maxWidth: 320, lineHeight: 1.5 }}>
         {subtitle}
       </div>
       <button
         onClick={onBack}
         style={{
           marginTop: 14,
-          backgroundColor: "rgba(255,255,255,0.07)",
+          backgroundColor: "var(--lk-fill-070, rgba(255,255,255,0.07))",
           color: CREAM,
-          border: "1px solid rgba(255,255,255,0.18)",
+          border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))",
           borderRadius: 999,
           padding: "10px 24px",
           fontFamily: "DM Sans, sans-serif",
@@ -8085,20 +8199,20 @@ function LearnedWordsView({
   })();
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#0b172e", overflow: "hidden" }}>
-      <div style={{ padding: "12px 14px 10px", borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0, display: "grid", gridTemplateColumns: "32px 1fr 32px", alignItems: "center" }}>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "var(--lk-bg, #0b172e)", overflow: "hidden" }}>
+      <div style={{ padding: "12px 14px 10px", borderBottom: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))", flexShrink: 0, display: "grid", gridTemplateColumns: "32px 1fr 32px", alignItems: "center" }}>
         <button
           onClick={onGoHome}
           aria-label="Back"
-          style={{ width: 28, height: 28, borderRadius: "50%", backgroundColor: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.10)", color: "rgba(247,240,227,0.7)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", padding: 0 }}
+          style={{ width: 28, height: 28, borderRadius: "50%", backgroundColor: "var(--lk-fill-060, rgba(255,255,255,0.06))", border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))", color: "var(--lk-ink-700, rgba(247,240,227,0.7))", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", padding: 0 }}
         >
           <ChevronLeft size={15} strokeWidth={2.2} aria-hidden />
         </button>
         <div style={{ textAlign: "center" }}>
-          <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 15, fontWeight: 700 }}>
+          <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: 15, fontWeight: 700 }}>
             Words We're Learning
           </div>
-          <div style={{ color: "rgba(247,240,227,0.45)", fontFamily: "Inter, DM Sans, sans-serif", fontSize: 11, marginTop: 2, letterSpacing: "0.04em" }}>
+          <div style={{ color: "var(--lk-ink-450, rgba(247,240,227,0.45))", fontFamily: "Inter, DM Sans, sans-serif", fontSize: 11, marginTop: 2, letterSpacing: "0.04em" }}>
             {childName ? `Saved together with ${childName}` : "Saved during reading"}
           </div>
         </div>
@@ -8107,20 +8221,20 @@ function LearnedWordsView({
 
       <div style={{ flex: 1, overflowY: "auto", padding: "12px 12px 20px" }}>
         {words === null ? (
-          <div style={{ padding: "32px 16px", textAlign: "center", color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: 13 }}>Loading…</div>
+          <div style={{ padding: "32px 16px", textAlign: "center", color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: "DM Sans, sans-serif", fontSize: 13 }}>Loading…</div>
         ) : loadErr ? (
-          <div style={{ padding: "24px 16px", textAlign: "center", color: "#f87171", fontFamily: "DM Sans, sans-serif", fontSize: 13 }}>{loadErr}</div>
+          <div style={{ padding: "24px 16px", textAlign: "center", color: "var(--lk-bad-t2, #f87171)", fontFamily: "DM Sans, sans-serif", fontSize: 13 }}>{loadErr}</div>
         ) : words.length === 0 ? (
           <div style={{
             margin: "32px auto",
             maxWidth: 380,
             textAlign: "center",
-            color: "rgba(247,240,227,0.65)",
+            color: "var(--lk-ink-650, rgba(247,240,227,0.65))",
             fontFamily: "DM Sans, sans-serif",
             padding: "22px 18px",
-            border: "1px dashed rgba(255,255,255,0.14)",
+            border: "1px dashed var(--lk-line-140, rgba(255,255,255,0.14))",
             borderRadius: 14,
-            background: "rgba(255,255,255,0.03)",
+            background: "var(--lk-fill-030, rgba(255,255,255,0.03))",
           }}>
             <div style={{ fontSize: 38, marginBottom: 10 }}>⭐</div>
             <div style={{ color: CREAM, fontSize: 15, fontWeight: 700, marginBottom: 6 }}>No saved words yet</div>
@@ -8140,12 +8254,12 @@ function LearnedWordsView({
                     display: "inline-flex", alignItems: "center", justifyContent: "center",
                     fontSize: 18,
                     flexShrink: 0,
-                    boxShadow: "1px 2px 6px rgba(0,0,0,0.4)",
+                    boxShadow: "1px 2px 6px var(--lk-shadow-400, rgba(0,0,0,0.4))",
                   }}>{group.emoji}</span>
-                  <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 16, fontWeight: 700 }}>
+                  <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: 16, fontWeight: 700 }}>
                     {group.title}
                   </div>
-                  <span style={{ color: "rgba(247,240,227,0.4)", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 600 }}>
+                  <span style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))", fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 600 }}>
                     · {group.items.length} word{group.items.length === 1 ? "" : "s"}
                   </span>
                 </div>
@@ -8155,8 +8269,8 @@ function LearnedWordsView({
                       key={w.id}
                       style={{
                         display: "flex", alignItems: "flex-start", gap: 12,
-                        background: "rgba(255,255,255,0.04)",
-                        border: "1px solid rgba(255,255,255,0.08)",
+                        background: "var(--lk-fill-040, rgba(255,255,255,0.04))",
+                        border: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))",
                         borderRadius: 12,
                         padding: "12px 14px",
                       }}
@@ -8167,13 +8281,13 @@ function LearnedWordsView({
                         style={{
                           flexShrink: 0,
                           width: 48, height: 48, borderRadius: "50%",
-                          background: "linear-gradient(135deg, #f7c95d, #C9922A)",
+                          background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d), var(--lk-accent, #C9922A))",
                           color: NAVY,
                           border: "none",
                           display: "inline-flex", alignItems: "center", justifyContent: "center",
                           fontSize: 22,
                           cursor: "pointer",
-                          boxShadow: "0 3px 10px rgba(0,0,0,0.35)",
+                          boxShadow: "0 3px 10px var(--lk-shadow-350, rgba(0,0,0,0.35))",
                           touchAction: "manipulation",
                         }}
                       >🔊</button>
@@ -8183,7 +8297,7 @@ function LearnedWordsView({
                             {w.word}
                           </div>
                           {w.ipa && (
-                            <div style={{ color: "rgba(247,240,227,0.62)", fontFamily: "Merriweather, serif", fontStyle: "italic", fontSize: 13 }}>
+                            <div style={{ color: "var(--lk-ink-620, rgba(247,240,227,0.62))", fontFamily: "Merriweather, serif", fontStyle: "italic", fontSize: 13 }}>
                               {w.ipa}
                             </div>
                           )}
@@ -8191,38 +8305,38 @@ function LearnedWordsView({
                             <span style={{
                               display: "inline-flex", alignItems: "center",
                               padding: "2px 8px", borderRadius: 999,
-                              background: "rgba(201,146,42,0.15)",
-                              color: AMBER,
-                              border: "1px solid rgba(201,146,42,0.42)",
+                              background: "var(--lk-accent-150, rgba(201,146,42,0.15))",
+                              color: AMBER_T,
+                              border: "1px solid var(--lk-accent-420, rgba(201,146,42,0.42))",
                               fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800,
                               letterSpacing: "0.06em", textTransform: "uppercase",
                             }}>{w.phonicsRuleLabel}</span>
                           )}
                         </div>
                         {w.definition && (
-                          <div style={{ color: "rgba(247,240,227,0.82)", fontFamily: "DM Sans, sans-serif", fontSize: 12.5, lineHeight: 1.45, marginTop: 6 }}>
+                          <div style={{ color: "var(--lk-ink-820, rgba(247,240,227,0.82))", fontFamily: "DM Sans, sans-serif", fontSize: 12.5, lineHeight: 1.45, marginTop: 6 }}>
                             {w.definition}
                           </div>
                         )}
                         {w.phonicsCue && (
                           <div style={{
-                            color: "rgba(247,201,93,0.90)",
+                            color: "var(--lk-accent-hi-t-900, rgba(247,201,93,0.90))",
                             fontFamily: "Merriweather, serif",
                             fontStyle: "italic",
                             fontSize: 12, lineHeight: 1.5,
                             marginTop: 6,
                             paddingLeft: 10,
-                            borderLeft: "2px solid rgba(201,146,42,0.55)",
+                            borderLeft: "2px solid var(--lk-accent-550, rgba(201,146,42,0.55))",
                           }}>
                             "{w.phonicsCue}"
                           </div>
                         )}
                         {w.sentence && (
-                          <div style={{ color: "rgba(247,240,227,0.52)", fontFamily: "Merriweather, serif", fontStyle: "italic", fontSize: 11.5, lineHeight: 1.5, marginTop: 6 }}>
+                          <div style={{ color: "var(--lk-ink-520, rgba(247,240,227,0.52))", fontFamily: "Merriweather, serif", fontStyle: "italic", fontSize: 11.5, lineHeight: 1.5, marginTop: 6 }}>
                             From the book: "{w.sentence.length > 140 ? w.sentence.slice(0, 137) + "…" : w.sentence}"
                           </div>
                         )}
-                        <div style={{ color: "rgba(247,240,227,0.35)", fontFamily: "DM Sans, sans-serif", fontSize: 10, marginTop: 6, letterSpacing: "0.02em" }}>
+                        <div style={{ color: "var(--lk-ink-350, rgba(247,240,227,0.35))", fontFamily: "DM Sans, sans-serif", fontSize: 10, marginTop: 6, letterSpacing: "0.02em" }}>
                           {w.page ? `Page ${w.page} · ` : ""}
                           {new Date(w.createdAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
                         </div>
@@ -8235,8 +8349,8 @@ function LearnedWordsView({
                           flexShrink: 0,
                           width: 34, height: 34, borderRadius: "50%",
                           background: "transparent",
-                          color: "rgba(247,240,227,0.5)",
-                          border: "1px solid rgba(255,255,255,0.14)",
+                          color: "var(--lk-ink-500, rgba(247,240,227,0.5))",
+                          border: "1px solid var(--lk-line-140, rgba(255,255,255,0.14))",
                           cursor: removing === w.id ? "default" : "pointer",
                           padding: 0,
                           display: "inline-flex", alignItems: "center", justifyContent: "center",
@@ -8301,22 +8415,22 @@ function VaultView({ onGoHome, connectionId, activeChildId }: { onGoHome: () => 
   const shownSessions = sessions.filter(entry => !!booksLibrary[entry.bookId]);
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#0b172e", overflow: "hidden" }}>
-      <div style={{ padding: "10px 14px 8px", textAlign: "center", borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0 }}>
-        <div style={{ display: "inline-flex", color: AMBER }} aria-hidden>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "var(--lk-bg, #0b172e)", overflow: "hidden" }}>
+      <div style={{ padding: "10px 14px 8px", textAlign: "center", borderBottom: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))", flexShrink: 0 }}>
+        <div style={{ display: "inline-flex", color: AMBER_T }} aria-hidden>
           <Disc size={22} strokeWidth={1.6} />
         </div>
         <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: "14px", fontWeight: 700, marginTop: "3px" }}>
           Memory Vault
         </div>
-        <div style={{ color: "rgba(247,240,227,0.4)", fontFamily: "DM Sans, sans-serif", fontSize: "9px", marginTop: "2px", letterSpacing: "0.04em" }}>
+        <div style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))", fontFamily: "DM Sans, sans-serif", fontSize: "9px", marginTop: "2px", letterSpacing: "0.04em" }}>
           Your reading memories · growing over time
         </div>
       </div>
 
       <div style={{ flex: 1, padding: "10px", overflow: "auto", display: "flex", flexDirection: "column", gap: "8px" }}>
         {loading && (
-          <div style={{ textAlign: "center", padding: "20px", color: "rgba(247,240,227,0.3)", fontFamily: "DM Sans, sans-serif", fontSize: "9px" }}>
+          <div style={{ textAlign: "center", padding: "20px", color: "var(--lk-ink-300, rgba(247,240,227,0.3))", fontFamily: "DM Sans, sans-serif", fontSize: "9px" }}>
             Loading memories…
           </div>
         )}
@@ -8324,7 +8438,7 @@ function VaultView({ onGoHome, connectionId, activeChildId }: { onGoHome: () => 
         {!loading && shownSessions.length === 0 && (
           <div style={{ textAlign: "center", padding: "20px" }}>
             <div style={{ fontSize: "28px", marginBottom: "8px" }}>📚</div>
-            <div style={{ color: "rgba(247,240,227,0.4)", fontFamily: "Merriweather, serif", fontSize: "9px", fontStyle: "italic", lineHeight: 1.6 }}>
+            <div style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))", fontFamily: "Merriweather, serif", fontSize: "9px", fontStyle: "italic", lineHeight: 1.6 }}>
               Your reading memories will appear here after your first session.
             </div>
           </div>
@@ -8339,10 +8453,10 @@ function VaultView({ onGoHome, connectionId, activeChildId }: { onGoHome: () => 
           return (
             <div key={entry.id} style={{
               display: "flex", alignItems: "center", gap: "10px",
-              backgroundColor: isLatest ? "rgba(201,146,42,0.08)" : "rgba(255,255,255,0.035)",
-              borderTop: `1px solid ${isLatest ? "rgba(201,146,42,0.35)" : "rgba(255,255,255,0.08)"}`,
-              borderRight: `1px solid ${isLatest ? "rgba(201,146,42,0.35)" : "rgba(255,255,255,0.08)"}`,
-              borderBottom: `1px solid ${isLatest ? "rgba(201,146,42,0.35)" : "rgba(255,255,255,0.08)"}`,
+              backgroundColor: isLatest ? "var(--lk-accent-080, rgba(201,146,42,0.08))" : "var(--lk-fill-035, rgba(255,255,255,0.035))",
+              borderTop: `1px solid ${isLatest ? "var(--lk-accent-350, rgba(201,146,42,0.35))" : "var(--lk-line-080, rgba(255,255,255,0.08))"}`,
+              borderRight: `1px solid ${isLatest ? "var(--lk-accent-350, rgba(201,146,42,0.35))" : "var(--lk-line-080, rgba(255,255,255,0.08))"}`,
+              borderBottom: `1px solid ${isLatest ? "var(--lk-accent-350, rgba(201,146,42,0.35))" : "var(--lk-line-080, rgba(255,255,255,0.08))"}`,
               borderLeft: `4px solid ${book.spineColor}`,
               borderRadius: "8px", padding: "14px 16px 14px 14px",
             }}>
@@ -8350,13 +8464,13 @@ function VaultView({ onGoHome, connectionId, activeChildId }: { onGoHome: () => 
                 width: "52px", height: "52px", borderRadius: "50%",
                 backgroundColor: book.spineColor,
                 display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: "26px", flexShrink: 0, boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+                fontSize: "26px", flexShrink: 0, boxShadow: "0 2px 8px var(--lk-shadow-400, rgba(0,0,0,0.4))",
               }}>
                 {book.emoji}
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: "5px", marginBottom: "2px" }}>
-                  <span style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "16px", fontWeight: 700 }}>
+                  <span style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: "16px", fontWeight: 700 }}>
                     {childName}{age !== null ? ` · Age ${age}` : ""}
                   </span>
                   {isNew && (
@@ -8366,7 +8480,7 @@ function VaultView({ onGoHome, connectionId, activeChildId }: { onGoHome: () => 
                 <div style={{ color: CREAM, fontFamily: "Merriweather, serif", fontSize: "15px", fontStyle: "italic", marginBottom: "1px", lineHeight: 1.3 }}>
                   {book.title}
                 </div>
-                <div style={{ color: "rgba(247,240,227,0.4)", fontFamily: "DM Sans, sans-serif", fontSize: "13px" }}>
+                <div style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))", fontFamily: "DM Sans, sans-serif", fontSize: "13px" }}>
                   {formatSessionDate(entry.sessionDate)}{pagesRead > 0 ? ` · ${pagesRead} page${pagesRead !== 1 ? "s" : ""} read` : ""}
                 </div>
               </div>
@@ -8375,8 +8489,8 @@ function VaultView({ onGoHome, connectionId, activeChildId }: { onGoHome: () => 
                 aria-label="Playback not yet available"
                 title="Recording playback — coming soon"
                 style={{
-                  backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.10)",
-                  borderRadius: "8px", padding: "9px 14px", color: "rgba(247,240,227,0.35)",
+                  backgroundColor: "var(--lk-fill-050, rgba(255,255,255,0.05))", border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))",
+                  borderRadius: "8px", padding: "9px 14px", color: "var(--lk-ink-350, rgba(247,240,227,0.35))",
                   fontFamily: "Inter, DM Sans, sans-serif", fontSize: "12px", fontWeight: 600,
                   cursor: "not-allowed", flexShrink: 0,
                   display: "inline-flex", alignItems: "center", gap: 6,
@@ -8395,8 +8509,8 @@ function VaultView({ onGoHome, connectionId, activeChildId }: { onGoHome: () => 
                     disabled={deletingId === entry.id}
                     aria-label="Cancel delete"
                     style={{
-                      backgroundColor: "rgba(255,255,255,0.05)",
-                      border: "1px solid rgba(255,255,255,0.18)",
+                      backgroundColor: "var(--lk-fill-050, rgba(255,255,255,0.05))",
+                      border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))",
                       borderRadius: "8px", padding: "9px 10px",
                       color: CREAM,
                       fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700,
@@ -8429,9 +8543,9 @@ function VaultView({ onGoHome, connectionId, activeChildId }: { onGoHome: () => 
                   title="Delete this memory"
                   style={{
                     backgroundColor: "transparent",
-                    border: "1px solid rgba(255,255,255,0.10)",
+                    border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))",
                     borderRadius: "8px", padding: "9px 10px",
-                    color: "rgba(247,240,227,0.5)",
+                    color: "var(--lk-ink-500, rgba(247,240,227,0.5))",
                     cursor: "pointer", flexShrink: 0,
                     display: "inline-flex", alignItems: "center", justifyContent: "center",
                   }}
@@ -8445,19 +8559,19 @@ function VaultView({ onGoHome, connectionId, activeChildId }: { onGoHome: () => 
 
         <div style={{
           marginTop: "4px", padding: "10px", borderRadius: "8px",
-          border: "1px dashed rgba(255,255,255,0.1)",
+          border: "1px dashed var(--lk-line-100, rgba(255,255,255,0.1))",
           textAlign: "center",
         }}>
-          <div style={{ color: "rgba(247,240,227,0.3)", fontFamily: "Merriweather, serif", fontSize: "13px", fontStyle: "italic", lineHeight: 1.6 }}>
+          <div style={{ color: "var(--lk-ink-300, rgba(247,240,227,0.3))", fontFamily: "Merriweather, serif", fontSize: "13px", fontStyle: "italic", lineHeight: 1.6 }}>
             "{childName} at 7" — "{childName} at 10" — "{childName} at 13"
           </div>
-          <div style={{ color: "rgba(247,240,227,0.2)", fontFamily: "DM Sans, sans-serif", fontSize: "11px", marginTop: "3px" }}>
+          <div style={{ color: "var(--lk-ink-200, rgba(247,240,227,0.2))", fontFamily: "DM Sans, sans-serif", fontSize: "11px", marginTop: "3px" }}>
             A decade of memories · growing here over time
           </div>
         </div>
       </div>
 
-      <div style={{ padding: "10px 12px 12px", borderTop: "1px solid rgba(255,255,255,0.07)", flexShrink: 0, display: "flex", justifyContent: "center" }}>
+      <div style={{ padding: "10px 12px 12px", borderTop: "1px solid var(--lk-line-070, rgba(255,255,255,0.07))", flexShrink: 0, display: "flex", justifyContent: "center" }}>
         {/* Single "Home" tile replaces the old multi-tap Back flow. Rick:
             "Memory Vault back button requires multiple taps and kills the
             camera." The old Back returned to whatever screen opened the
@@ -8482,20 +8596,20 @@ function VaultView({ onGoHome, connectionId, activeChildId }: { onGoHome: () => 
 function StoriesEntryCard({ entry }: { entry: FamilyStoryEntry }) {
   return (
     <div style={{
-      backgroundColor: entry.isNew ? "rgba(201,146,42,0.07)" : "rgba(255,255,255,0.032)",
-      borderTop: `1px solid ${entry.isNew ? "rgba(201,146,42,0.3)" : "rgba(255,255,255,0.07)"}`,
-      borderRight: `1px solid ${entry.isNew ? "rgba(201,146,42,0.3)" : "rgba(255,255,255,0.07)"}`,
-      borderBottom: `1px solid ${entry.isNew ? "rgba(201,146,42,0.3)" : "rgba(255,255,255,0.07)"}`,
+      backgroundColor: entry.isNew ? "var(--lk-accent-070, rgba(201,146,42,0.07))" : "var(--lk-fill-032, rgba(255,255,255,0.032))",
+      borderTop: `1px solid ${entry.isNew ? "var(--lk-accent-300, rgba(201,146,42,0.3))" : "var(--lk-line-070, rgba(255,255,255,0.07))"}`,
+      borderRight: `1px solid ${entry.isNew ? "var(--lk-accent-300, rgba(201,146,42,0.3))" : "var(--lk-line-070, rgba(255,255,255,0.07))"}`,
+      borderBottom: `1px solid ${entry.isNew ? "var(--lk-accent-300, rgba(201,146,42,0.3))" : "var(--lk-line-070, rgba(255,255,255,0.07))"}`,
       borderLeft: `4px solid ${entry.bookColor}`,
       borderRadius: "8px", padding: "10px 11px",
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: "7px", marginBottom: "6px" }}>
         <span style={{ fontSize: "14px" }}>{entry.bookEmoji}</span>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "15px", fontWeight: 700, lineHeight: 1.2 }}>
+          <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: "15px", fontWeight: 700, lineHeight: 1.2 }}>
             {entry.book}
           </div>
-          <div style={{ color: "rgba(247,240,227,0.35)", fontFamily: "DM Sans, sans-serif", fontSize: "13px" }}>
+          <div style={{ color: "var(--lk-ink-350, rgba(247,240,227,0.35))", fontFamily: "DM Sans, sans-serif", fontSize: "13px" }}>
             {entry.date}
           </div>
         </div>
@@ -8597,15 +8711,15 @@ function FamilyStoriesView({
 
   if (isNana && subMode === "write") {
     return (
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#0b172e", overflow: "hidden" }}>
-        <div style={{ padding: "10px 14px 8px", borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0 }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "var(--lk-bg, #0b172e)", overflow: "hidden" }}>
+        <div style={{ padding: "10px 14px 8px", borderBottom: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))", flexShrink: 0 }}>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <div style={{ width: "28px", height: "34px", borderRadius: "4px", backgroundColor: currentBookSpineColor, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "14px", flexShrink: 0 }}>
               {currentBookEmoji}
             </div>
             <div>
-              <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "18px", fontWeight: 700 }}>Add a Memory</div>
-              <div style={{ color: "rgba(247,240,227,0.4)", fontFamily: "DM Sans, sans-serif", fontSize: "14px", marginTop: "1px" }}>{currentBookTitle}</div>
+              <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: "18px", fontWeight: 700 }}>Add a Memory</div>
+              <div style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))", fontFamily: "DM Sans, sans-serif", fontSize: "14px", marginTop: "1px" }}>{currentBookTitle}</div>
             </div>
           </div>
         </div>
@@ -8626,8 +8740,8 @@ function FamilyStoriesView({
                 <button
                   onClick={onSkip}
                   style={{
-                    background: "rgba(255,255,255,0.06)",
-                    border: "1px solid rgba(255,255,255,0.16)", color: "rgba(247,240,227,0.7)",
+                    background: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+                    border: "1px solid var(--lk-line-160, rgba(255,255,255,0.16))", color: "var(--lk-ink-700, rgba(247,240,227,0.7))",
                     borderRadius: 999, padding: "10px 18px",
                     fontFamily: "DM Sans, sans-serif", fontSize: "13px", fontWeight: 600,
                     cursor: "pointer",
@@ -8643,7 +8757,7 @@ function FamilyStoriesView({
                     style={{
                       background: "rgba(96,165,250,0.14)",
                       border: "1px solid rgba(96,165,250,0.45)",
-                      color: "#93c5fd",
+                      color: "var(--lk-info-t2, #93c5fd)",
                       borderRadius: 999,
                       padding: "10px 18px",
                       fontFamily: "DM Sans, sans-serif",
@@ -8662,7 +8776,7 @@ function FamilyStoriesView({
                 <button
                   onClick={handleSave}
                   style={{
-                    background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+                    background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)",
                     color: NAVY,
                     border: "none",
                     borderRadius: 999,
@@ -8672,7 +8786,7 @@ function FamilyStoriesView({
                     fontWeight: 800,
                     letterSpacing: "0.04em",
                     cursor: "pointer",
-                    boxShadow: "0 6px 22px rgba(201,146,42,0.45)",
+                    boxShadow: "0 6px 22px var(--lk-accent-450, rgba(201,146,42,0.45))",
                     display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 10,
                     minHeight: 56, minWidth: 220, maxWidth: 360,
                     touchAction: "manipulation",
@@ -8695,7 +8809,7 @@ function FamilyStoriesView({
                     onClick={onDisconnectSession}
                     style={{
                       background: "linear-gradient(135deg, rgba(192,132,252,0.20) 0%, rgba(139,92,246,0.20) 100%)",
-                      color: "#e0d4ff",
+                      color: "var(--lk-lt-e0d4ff, #e0d4ff)",
                       border: "1px solid rgba(192,132,252,0.55)",
                       borderRadius: 999,
                       padding: "10px 20px",
@@ -8714,7 +8828,7 @@ function FamilyStoriesView({
                   </button>
                 </div>
               )}
-              <div style={{ color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: "16px", lineHeight: 1.5 }}>
+              <div style={{ color: "var(--lk-ink-500, rgba(247,240,227,0.5))", fontFamily: "DM Sans, sans-serif", fontSize: "16px", lineHeight: 1.5 }}>
                 What will {activeChildName} remember about today's session?
               </div>
               <textarea
@@ -8722,7 +8836,7 @@ function FamilyStoriesView({
                 onChange={e => setText((e.target as HTMLTextAreaElement).value)}
                 placeholder={`"Tonight ${activeChildName} laughed so hard at the Mad Hatter..."`}
                 style={{
-                  flex: 1, backgroundColor: "rgba(255,255,255,0.05)", border: "1px solid rgba(201,146,42,0.3)",
+                  flex: 1, backgroundColor: "var(--lk-fill-050, rgba(255,255,255,0.05))", border: "1px solid var(--lk-accent-300, rgba(201,146,42,0.3))",
                   borderRadius: "10px", padding: "10px 12px", color: CREAM,
                   fontFamily: "Merriweather, serif", fontSize: "15px", lineHeight: 1.75,
                   resize: "none", outline: "none", fontStyle: text ? "normal" : "italic",
@@ -8733,8 +8847,8 @@ function FamilyStoriesView({
           ) : (
             <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, padding: "20px 16px", animation: "fade-in 0.4s ease-out", overflowY: "auto" }}>
               <div style={{ fontSize: 48 }}>💛</div>
-              <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 22, fontWeight: 700, textAlign: "center" }}>Memory saved!</div>
-              <div style={{ color: "rgba(247,240,227,0.6)", fontFamily: "Merriweather, serif", fontSize: 13, fontStyle: "italic", textAlign: "center", lineHeight: 1.55, maxWidth: 320 }}>
+              <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: 22, fontWeight: 700, textAlign: "center" }}>Memory saved!</div>
+              <div style={{ color: "var(--lk-ink-600, rgba(247,240,227,0.6))", fontFamily: "Merriweather, serif", fontSize: 13, fontStyle: "italic", textAlign: "center", lineHeight: 1.55, maxWidth: 320 }}>
                 {activeChildName}'s family will be able to read this whenever they like.
               </div>
 
@@ -8746,7 +8860,7 @@ function FamilyStoriesView({
               {onSelectChild && onOpenAddChild && childrenList.length > 0 && (
                 <div style={{ width: "100%", maxWidth: 420, marginTop: 6 }}>
                   <div style={{
-                    color: "rgba(247,240,227,0.5)",
+                    color: "var(--lk-ink-500, rgba(247,240,227,0.5))",
                     fontFamily: "DM Sans, sans-serif",
                     fontSize: 10, fontWeight: 800, letterSpacing: "0.16em",
                     textAlign: "center", marginBottom: 8,
@@ -8771,8 +8885,8 @@ function FamilyStoriesView({
                   style={{
                     marginTop: 8,
                     background: "transparent",
-                    border: "1px solid rgba(247,201,93,0.45)",
-                    color: AMBER,
+                    border: "1px solid var(--lk-accent-hi-450, rgba(247,201,93,0.45))",
+                    color: AMBER_T,
                     borderRadius: 999,
                     padding: "10px 20px",
                     fontFamily: "DM Sans, sans-serif",
@@ -8794,8 +8908,8 @@ function FamilyStoriesView({
 
   if (!isNana && subMode === "write") {
     return (
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#0b172e", overflow: "hidden" }}>
-        <div style={{ padding: "10px 14px 8px", display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0 }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "var(--lk-bg, #0b172e)", overflow: "hidden" }}>
+        <div style={{ padding: "10px 14px 8px", display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", borderBottom: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))", flexShrink: 0 }}>
           {/* Perry-side Back — Rick: "you are completely trapped on that
               screen." She landed here from session_end; tapping Back
               returns her to her PIN/splash so she can rejoin or wait. */}
@@ -8804,8 +8918,8 @@ function FamilyStoriesView({
             aria-label="Back"
             title="Back"
             style={{
-              background: "rgba(255,255,255,0.06)",
-              border: "1px solid rgba(255,255,255,0.18)",
+              background: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+              border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))",
               borderRadius: 999,
               padding: "6px 12px",
               color: CREAM,
@@ -8815,24 +8929,24 @@ function FamilyStoriesView({
             }}
           >← Back</button>
           <div style={{ textAlign: "center" }}>
-            <div style={{ display: "inline-flex", color: AMBER }} aria-hidden>
+            <div style={{ display: "inline-flex", color: AMBER_T }} aria-hidden>
               <BookHeart size={20} strokeWidth={1.6} />
             </div>
             <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: "13px", fontWeight: 700, marginTop: "3px" }}>Our Family Journal</div>
           </div>
           <span />
         </div>
-        <div style={{ padding: "14px 12px 10px", borderBottom: "1px solid rgba(255,255,255,0.06)", flexShrink: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "8px", backgroundColor: "rgba(201,146,42,0.07)", borderRadius: "8px", padding: "9px 10px", border: "1px solid rgba(201,146,42,0.2)" }}>
+        <div style={{ padding: "14px 12px 10px", borderBottom: "1px solid var(--lk-line-060, rgba(255,255,255,0.06))", flexShrink: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", backgroundColor: "var(--lk-accent-070, rgba(201,146,42,0.07))", borderRadius: "8px", padding: "9px 10px", border: "1px solid var(--lk-accent-200, rgba(201,146,42,0.2))" }}>
             <div style={{ fontSize: "20px", animation: "pulse-sm 2s ease-in-out infinite" }}>✍️</div>
             <div>
-              <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700 }}>{grandparentName} is writing a memory...</div>
-              <div style={{ color: "rgba(247,240,227,0.4)", fontFamily: "DM Sans, sans-serif", fontSize: "11px", marginTop: "1px" }}>about today's reading session</div>
+              <div style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700 }}>{grandparentName} is writing a memory...</div>
+              <div style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))", fontFamily: "DM Sans, sans-serif", fontSize: "11px", marginTop: "1px" }}>about today's reading session</div>
             </div>
           </div>
         </div>
         <div style={{ flex: 1, padding: "10px", overflow: "auto", display: "flex", flexDirection: "column", gap: "8px" }}>
-          <div style={{ color: "rgba(247,240,227,0.3)", fontFamily: "DM Sans, sans-serif", fontSize: "8px", letterSpacing: "0.06em", marginBottom: "2px" }}>PAST MEMORIES</div>
+          <div style={{ color: "var(--lk-ink-300, rgba(247,240,227,0.3))", fontFamily: "DM Sans, sans-serif", fontSize: "8px", letterSpacing: "0.06em", marginBottom: "2px" }}>PAST MEMORIES</div>
           {entries.length === 0 ? (
             <div style={{
               flex: 1,
@@ -8841,7 +8955,7 @@ function FamilyStoriesView({
               textAlign: "center",
               padding: "20px 16px",
               gap: 10,
-              color: "rgba(247,240,227,0.55)",
+              color: "var(--lk-ink-550, rgba(247,240,227,0.55))",
               fontFamily: "DM Sans, sans-serif",
             }}>
               <div style={{ fontSize: 36 }}>💌</div>
@@ -8859,14 +8973,14 @@ function FamilyStoriesView({
   }
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#0b172e", overflow: "hidden" }}>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "var(--lk-bg, #0b172e)", overflow: "hidden" }}>
       {/* Header — Rick: "When you open the Family Journal it shows a
           blank screen with nothing to interact with. There is no way to
           exit — you are completely trapped on that screen." Hero, body
           and footer were all there but rendered so faintly (9px italic at
           25% opacity for the empty state; 11px outlined Back button) that
           on an iPad it read as a blank panel. Bumped every level. */}
-      <div style={{ padding: "12px 16px 10px", display: "flex", alignItems: "center", gap: 12, borderBottom: "1px solid rgba(255,255,255,0.08)", flexShrink: 0 }}>
+      <div style={{ padding: "12px 16px 10px", display: "flex", alignItems: "center", gap: 12, borderBottom: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))", flexShrink: 0 }}>
         {/* Back button visible to both Nana and Perry. App-level
             handleCloseFamilyStories routes Perry back to her PIN/splash
             so she has an explicit way out of the journal. Rick: "no way
@@ -8876,8 +8990,8 @@ function FamilyStoriesView({
           aria-label="Back"
           title="Back"
           style={{
-            background: "rgba(255,255,255,0.06)",
-            border: "1px solid rgba(255,255,255,0.18)",
+            background: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+            border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))",
             borderRadius: 999,
             padding: "6px 12px",
             color: CREAM,
@@ -8893,7 +9007,7 @@ function FamilyStoriesView({
             <span aria-hidden style={{ fontSize: 22 }}>📖</span>
             Our Family Journal
           </div>
-          <div style={{ color: "rgba(247,240,227,0.6)", fontFamily: "DM Sans, sans-serif", fontSize: 12, marginTop: 2 }}>
+          <div style={{ color: "var(--lk-ink-600, rgba(247,240,227,0.6))", fontFamily: "DM Sans, sans-serif", fontSize: 12, marginTop: 2 }}>
             {isNana ? `Your memories for ${activeChildName}` : "Nana's memories for you"}
           </div>
         </div>
@@ -8920,7 +9034,7 @@ function FamilyStoriesView({
               Your memories will live here.
             </div>
             <div style={{
-              color: "rgba(247,240,227,0.72)",
+              color: "var(--lk-ink-720, rgba(247,240,227,0.72))",
               fontFamily: "Merriweather, serif",
               fontSize: 14,
               fontStyle: "italic",
@@ -8935,7 +9049,7 @@ function FamilyStoriesView({
               onClick={onClose}
               style={{
                 marginTop: 8,
-                background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+                background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)",
                 color: NAVY,
                 border: "none",
                 borderRadius: 999,
@@ -8944,7 +9058,7 @@ function FamilyStoriesView({
                 fontSize: 14, fontWeight: 800,
                 letterSpacing: "0.02em",
                 cursor: "pointer",
-                boxShadow: "0 6px 18px rgba(201,146,42,0.42)",
+                boxShadow: "0 6px 18px var(--lk-accent-420, rgba(201,146,42,0.42))",
                 display: "inline-flex", alignItems: "center", gap: 8,
               }}
             >
@@ -8957,14 +9071,14 @@ function FamilyStoriesView({
         )}
       </div>
       {entries.length > 0 && (
-        <div style={{ padding: "10px 16px 14px", borderTop: "1px solid rgba(255,255,255,0.07)", flexShrink: 0 }}>
+        <div style={{ padding: "10px 16px 14px", borderTop: "1px solid var(--lk-line-070, rgba(255,255,255,0.07))", flexShrink: 0 }}>
           <button
             onClick={onClose}
             style={{
               width: "100%",
-              backgroundColor: "rgba(255,255,255,0.08)",
+              backgroundColor: "var(--lk-fill-080, rgba(255,255,255,0.08))",
               color: CREAM,
-              border: "1px solid rgba(255,255,255,0.18)",
+              border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))",
               borderRadius: 999,
               padding: "12px",
               fontSize: 14,
@@ -9044,7 +9158,7 @@ function VisitEndCard({ data, onHome, others = [], onVisitChild, autoHomeMs = 60
         position: "fixed", inset: 0, zIndex: 9000,
         display: "flex", alignItems: "center", justifyContent: "center",
         padding: 16,
-        background: "radial-gradient(900px 600px at 50% 20%, rgba(247,201,93,0.16), transparent 70%), linear-gradient(180deg, #13213d 0%, #0b172e 100%)",
+        background: "radial-gradient(900px 600px at 50% 20%, var(--lk-accent-hi-160, rgba(247,201,93,0.16)), transparent 70%), linear-gradient(180deg, var(--lk-n-13213d, #13213d) 0%, var(--lk-bg, #0b172e) 100%)",
         animation: "phase-intro-fade 0.35s ease-out",
       }}
     >
@@ -9058,16 +9172,16 @@ function VisitEndCard({ data, onHome, others = [], onVisitChild, autoHomeMs = 60
             <img
               src={data.childPhotoUrl}
               alt=""
-              style={{ width: 132, height: 132, borderRadius: "50%", objectFit: "cover", border: `4px solid ${AMBER}`, boxShadow: "0 10px 40px rgba(201,146,42,0.35)" }}
+              style={{ width: 132, height: 132, borderRadius: "50%", objectFit: "cover", border: `4px solid ${AMBER}`, boxShadow: "0 10px 40px var(--lk-accent-350, rgba(201,146,42,0.35))" }}
             />
           ) : (
             <div aria-hidden style={{
               width: 132, height: 132, borderRadius: "50%",
               display: "flex", alignItems: "center", justifyContent: "center",
-              background: "linear-gradient(135deg, #f7c95d, #C9922A)",
+              background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d), var(--lk-accent, #C9922A))",
               color: NAVY, fontFamily: "Playfair Display, serif", fontSize: 60, fontWeight: 700,
-              border: "4px solid rgba(255,255,255,0.85)",
-              boxShadow: "0 10px 40px rgba(201,146,42,0.35)",
+              border: "4px solid var(--lk-line-850, rgba(255,255,255,0.85))",
+              boxShadow: "0 10px 40px var(--lk-accent-350, rgba(201,146,42,0.35))",
             }}>{initial}</div>
           )}
           <span aria-hidden style={{ position: "absolute", right: -6, bottom: 2, fontSize: 34 }}>💛</span>
@@ -9083,7 +9197,7 @@ function VisitEndCard({ data, onHome, others = [], onVisitChild, autoHomeMs = 60
               <span aria-hidden style={{ fontSize: 26 }}>{data.bookEmoji || "📖"}</span>
               <div style={{ minWidth: 0, textAlign: "left" }}>
                 <div style={{ color: CREAM, fontSize: 18, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{data.bookTitle}</div>
-                <div style={{ color: "rgba(247,240,227,0.72)", fontSize: 15, fontWeight: 600 }}>
+                <div style={{ color: "var(--lk-ink-720, rgba(247,240,227,0.72))", fontSize: 15, fontWeight: 600 }}>
                   {data.pagesRead > 0
                     ? `Read ${data.pagesRead} page${data.pagesRead === 1 ? "" : "s"} together`
                     : "Opened together today"}
@@ -9095,8 +9209,8 @@ function VisitEndCard({ data, onHome, others = [], onVisitChild, autoHomeMs = 60
           <div style={endCardRowStyle}>
             <span aria-hidden style={{ fontSize: 26 }}>📅</span>
             <div style={{ textAlign: "left" }}>
-              <div style={{ color: "rgba(247,240,227,0.72)", fontSize: 13, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase" }}>Next visit</div>
-              <div style={{ color: next ? CREAM : "rgba(247,240,227,0.6)", fontSize: 18, fontWeight: 800 }}>
+              <div style={{ color: "var(--lk-ink-720, rgba(247,240,227,0.72))", fontSize: 13, fontWeight: 800, letterSpacing: "0.08em", textTransform: "uppercase" }}>Next visit</div>
+              <div style={{ color: next ? CREAM : "var(--lk-ink-600, rgba(247,240,227,0.6))", fontSize: 18, fontWeight: 800 }}>
                 {next || "Not scheduled yet"}
               </div>
             </div>
@@ -9120,7 +9234,7 @@ function VisitEndCard({ data, onHome, others = [], onVisitChild, autoHomeMs = 60
                 </button>
               ))}
             </div>
-            <button type="button" onClick={() => setChoosing(false)} style={{ background: "none", border: "none", color: "rgba(247,240,227,0.7)", fontFamily: "DM Sans, sans-serif", fontSize: 16, fontWeight: 700, padding: "8px 14px", minHeight: 44, cursor: "pointer" }}>
+            <button type="button" onClick={() => setChoosing(false)} style={{ background: "none", border: "none", color: "var(--lk-ink-700, rgba(247,240,227,0.7))", fontFamily: "DM Sans, sans-serif", fontSize: 16, fontWeight: 700, padding: "8px 14px", minHeight: 44, cursor: "pointer" }}>
               Back
             </button>
           </div>
@@ -9146,7 +9260,7 @@ function VisitEndCard({ data, onHome, others = [], onVisitChild, autoHomeMs = 60
             )}
           </div>
         )}
-        <div style={{ color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: 14, fontWeight: 600 }}>
+        <div style={{ color: "var(--lk-ink-500, rgba(247,240,227,0.5))", fontFamily: "DM Sans, sans-serif", fontSize: 14, fontWeight: 600 }}>
           Going Home in {left}s
         </div>
       </div>
@@ -9157,11 +9271,11 @@ function visitEndButtonStyle(primary: boolean): React.CSSProperties {
   return {
     flex: "1 1 0", minWidth: 220, maxWidth: 300, minHeight: 68,
     borderRadius: 999,
-    border: primary ? "none" : "1.5px solid rgba(247,201,93,0.75)",
-    background: primary ? "linear-gradient(135deg, #f7c95d 0%, #C9922A 60%, #d97706 100%)" : "rgba(247,201,93,0.10)",
+    border: primary ? "none" : "1.5px solid var(--lk-accent-hi-750, rgba(247,201,93,0.75))",
+    background: primary ? "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 60%, var(--lk-accent-2, #d97706) 100%)" : "var(--lk-accent-hi-100, rgba(247,201,93,0.10))",
     color: primary ? NAVY : CREAM,
     fontFamily: "DM Sans, sans-serif", fontSize: 20, fontWeight: 800,
-    boxShadow: primary ? "0 10px 30px rgba(201,146,42,0.45)" : "none",
+    boxShadow: primary ? "0 10px 30px var(--lk-accent-450, rgba(201,146,42,0.45))" : "none",
     display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 10,
     padding: "0 18px",
     cursor: "pointer", touchAction: "manipulation",
@@ -9170,8 +9284,8 @@ function visitEndButtonStyle(primary: boolean): React.CSSProperties {
 const endCardRowStyle: React.CSSProperties = {
   display: "flex", alignItems: "center", gap: 14,
   padding: "14px 18px", borderRadius: 18,
-  background: "rgba(255,255,255,0.06)",
-  border: "1px solid rgba(255,255,255,0.12)",
+  background: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+  border: "1px solid var(--lk-line-120, rgba(255,255,255,0.12))",
   fontFamily: "DM Sans, sans-serif",
 };
 
@@ -9265,7 +9379,7 @@ function GoodbyeView({
   // the video was small. Now: one slim header row, two big faces side by
   // side (the Silly Faces layout), ceremony overlays centred on the seam.
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#000", overflow: "hidden", minHeight: 0 }}>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "var(--lk-stage, #000)", overflow: "hidden", minHeight: 0 }}>
       <style>{`
         .nm-goodbye-head { min-height: 52px; }
         @media (max-height: 760px) { .nm-goodbye-head { min-height: 42px; padding-top: 4px !important; padding-bottom: 4px !important; } }
@@ -9284,20 +9398,20 @@ function GoodbyeView({
       <div className="nm-goodbye-head" style={{
         display: "flex", alignItems: "center", gap: 12,
         padding: "6px 14px",
-        background: "linear-gradient(180deg, rgba(27,43,75,0.95), rgba(11,23,46,0.95))",
-        borderBottom: "1px solid rgba(201,146,42,0.25)",
+        background: "linear-gradient(180deg, var(--lk-bar-1-950, rgba(27,43,75,0.95)), var(--lk-bg-950, rgba(11,23,46,0.95)))",
+        borderBottom: "1px solid var(--lk-accent-250, rgba(201,146,42,0.25))",
         flexShrink: 0,
       }}>
         <span aria-hidden style={{ fontSize: 22, flexShrink: 0 }}>📖💕</span>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 17, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: 17, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             What a wonderful reading session!
           </div>
           {sessionSummary && sessionSummary.pagesRead > 0 && (
-            <div style={{ color: "rgba(247,240,227,0.85)", fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-              Read <span style={{ color: AMBER, fontWeight: 800 }}>{sessionSummary.pagesRead}</span> page{sessionSummary.pagesRead === 1 ? "" : "s"} of <span style={{ color: AMBER, fontWeight: 800 }}>{sessionSummary.bookTitle}</span>
+            <div style={{ color: "var(--lk-ink-850, rgba(247,240,227,0.85))", fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              Read <span style={{ color: AMBER_T, fontWeight: 800 }}>{sessionSummary.pagesRead}</span> page{sessionSummary.pagesRead === 1 ? "" : "s"} of <span style={{ color: AMBER_T, fontWeight: 800 }}>{sessionSummary.bookTitle}</span>
               {sessionSummary.chapterCompleted && (
-                <span style={{ color: "#86efac", fontWeight: 700 }}> · ✓ {sessionSummary.chapterCompleted}</span>
+                <span style={{ color: "var(--lk-ok-t, #86efac)", fontWeight: 700 }}> · ✓ {sessionSummary.chapterCompleted}</span>
               )}
             </div>
           )}
@@ -9309,9 +9423,9 @@ function GoodbyeView({
               <span key={step.label} style={{
                 display: "inline-flex", alignItems: "center", gap: 5,
                 padding: "5px 10px", borderRadius: 999,
-                background: active ? "rgba(201,146,42,0.22)" : "rgba(255,255,255,0.05)",
-                border: `1px solid ${active ? "rgba(201,146,42,0.7)" : "rgba(255,255,255,0.10)"}`,
-                color: active ? CREAM : "rgba(247,240,227,0.45)",
+                background: active ? "var(--lk-accent-220, rgba(201,146,42,0.22))" : "var(--lk-fill-050, rgba(255,255,255,0.05))",
+                border: `1px solid ${active ? "var(--lk-accent-700, rgba(201,146,42,0.7))" : "var(--lk-line-100, rgba(255,255,255,0.10))"}`,
+                color: active ? CREAM : "var(--lk-ink-450, rgba(247,240,227,0.45))",
                 fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: active ? 800 : 600,
                 transition: "all 0.4s ease",
                 whiteSpace: "nowrap",
@@ -9328,8 +9442,8 @@ function GoodbyeView({
         display: "flex", gap: 12, padding: 12,
         alignItems: "stretch", justifyContent: "center",
         position: "relative", overflow: "hidden",
-        backgroundColor: "#0b172e",
-        backgroundImage: "radial-gradient(720px 460px at 80% -10%, rgba(247,201,93,0.16), transparent 70%), radial-gradient(580px 420px at -10% 110%, rgba(248,113,113,0.18), transparent 70%)",
+        backgroundColor: "var(--lk-bg, #0b172e)",
+        backgroundImage: "radial-gradient(720px 460px at 80% -10%, var(--lk-accent-hi-160, rgba(247,201,93,0.16)), transparent 70%), radial-gradient(580px 420px at -10% 110%, rgba(248,113,113,0.18), transparent 70%)",
       }}>
         <div className="nm-goodbye-tile" style={{ flex: "1 1 0", maxWidth: "calc(50% - 6px)", minWidth: 0, display: "flex" }}>
           <FaceVideo
@@ -9368,11 +9482,11 @@ function GoodbyeView({
             position: "absolute", left: 0, right: 0, bottom: 0, zIndex: 22,
             display: "flex", flexDirection: "column", alignItems: "center",
             padding: "48px 20px 18px",
-            background: "linear-gradient(to top, rgba(11,23,46,0.95) 0%, rgba(11,23,46,0.85) 55%, rgba(11,23,46,0) 100%)",
+            background: "linear-gradient(to top, var(--lk-bg-950, rgba(11,23,46,0.95)) 0%, var(--lk-bg-850, rgba(11,23,46,0.85)) 55%, var(--lk-bg-000, rgba(11,23,46,0)) 100%)",
             textAlign: "center",
             animation: "phase-intro-fade 0.3s ease-out",
           }}>
-            <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "clamp(20px, 2.6vw, 26px)", fontWeight: 700, lineHeight: 1.25 }}>
+            <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: "clamp(20px, 2.6vw, 26px)", fontWeight: 700, lineHeight: 1.25 }}>
               🖐️ Out loud together, count down from 5 … then blow kisses! 💋
             </div>
             {isNana ? (
@@ -9383,7 +9497,7 @@ function GoodbyeView({
                     onClick={onBackToSillyFaces}
                     style={{
                       background: "rgba(192,132,252,0.14)",
-                      color: "#c084fc",
+                      color: "var(--lk-purple-t, #c084fc)",
                       border: "1px solid rgba(192,132,252,0.55)",
                       borderRadius: 999,
                       padding: "11px 20px",
@@ -9407,7 +9521,7 @@ function GoodbyeView({
                     fontSize: "clamp(16px, 1.9vw, 19px)",
                     fontFamily: "DM Sans, sans-serif", fontWeight: 800, letterSpacing: "0.03em",
                     cursor: "pointer",
-                    boxShadow: "0 6px 22px rgba(201,146,42,0.45)",
+                    boxShadow: "0 6px 22px var(--lk-accent-450, rgba(201,146,42,0.45))",
                     display: "inline-flex", alignItems: "center", gap: 8,
                     minHeight: 56, touchAction: "manipulation",
                   }}
@@ -9418,11 +9532,11 @@ function GoodbyeView({
             ) : (
               <div style={{
                 marginTop: 14,
-                color: "rgba(247,240,227,0.8)",
+                color: "var(--lk-ink-800, rgba(247,240,227,0.8))",
                 fontFamily: "DM Sans, sans-serif", fontSize: 17, fontWeight: 600,
                 display: "inline-flex", alignItems: "center", gap: 8,
                 padding: "10px 18px",
-                border: "1px dashed rgba(255,255,255,0.25)",
+                border: "1px dashed var(--lk-line-250, rgba(255,255,255,0.25))",
                 borderRadius: 999,
               }}>
                 <span style={{ fontSize: 18, animation: "pulse-sm 1.4s ease-in-out infinite" }}>⏳</span>
@@ -9472,7 +9586,7 @@ function GoodbyeView({
             <div style={{ color: "white", fontFamily: "Playfair Display, serif", fontSize: "clamp(28px, 4.4vh, 38px)", fontWeight: 700, textShadow: "0 2px 14px rgba(0,0,0,0.95)", marginTop: "10px" }}>
               Goodbye! 💕
             </div>
-            <div style={{ color: "rgba(255,255,255,0.75)", fontFamily: "Playfair Display, serif", fontSize: 15, fontStyle: "italic", textShadow: "0 1px 8px rgba(0,0,0,0.95)", marginTop: "10px", lineHeight: 1.5 }}>
+            <div style={{ color: "var(--lk-glass-750, rgba(255,255,255,0.75))", fontFamily: "Playfair Display, serif", fontSize: 15, fontStyle: "italic", textShadow: "0 1px 8px rgba(0,0,0,0.95)", marginTop: "10px", lineHeight: 1.5 }}>
               Reading is the vehicle.<br/>The relationship is the destination.
             </div>
             {isNana && hangUpAllowed && (
@@ -9496,7 +9610,7 @@ function GoodbyeView({
             style={{
               position: "absolute", left: "50%", bottom: 22, transform: "translateX(-50%)", zIndex: 24,
               width: "min(520px, calc(100% - 32px))", minHeight: 96,
-              borderRadius: 999, border: "4px solid rgba(255,255,255,0.9)",
+              borderRadius: 999, border: "4px solid var(--lk-line-900, rgba(255,255,255,0.9))",
               background: "linear-gradient(135deg, #fb7185 0%, #f43f5e 50%, #e11d48 100%)",
               color: "#fff", fontFamily: "DM Sans, sans-serif",
               fontSize: "clamp(24px, 3.2vw, 32px)", fontWeight: 900, letterSpacing: "0.01em",
@@ -9513,7 +9627,7 @@ function GoodbyeView({
 
         {/* === Hang-up celebration: hearts, confetti, stars, kisses === */}
         {celebrating && (
-          <div data-testid="hangup-celebration" style={{ position: "absolute", inset: 0, zIndex: 30, overflow: "hidden", pointerEvents: "none", background: "radial-gradient(circle at 50% 55%, rgba(251,113,133,0.25), rgba(11,23,46,0.55) 70%)" }}>
+          <div data-testid="hangup-celebration" style={{ position: "absolute", inset: 0, zIndex: 30, overflow: "hidden", pointerEvents: "none", background: "radial-gradient(circle at 50% 55%, rgba(251,113,133,0.25), var(--lk-bg-550, rgba(11,23,46,0.55)) 70%)" }}>
             {Array.from({ length: 28 }, (_, i) => {
               const glyphs = ["💖", "🎉", "⭐", "💋", "🎊", "✨", "💕", "🌟"];
               const angle = (i / 28) * Math.PI * 2;
@@ -9540,7 +9654,7 @@ function GoodbyeView({
             position: "absolute", left: "50%", bottom: 16, transform: "translateX(-50%)", zIndex: 21,
             padding: "8px 16px", borderRadius: 999,
             background: "rgba(0,0,0,0.65)", backdropFilter: "blur(6px)",
-            border: "1px solid rgba(255,255,255,0.14)",
+            border: "1px solid var(--lk-line-140, rgba(255,255,255,0.14))",
             color: "white", fontFamily: "DM Sans, sans-serif", fontSize: 16, fontWeight: 700,
             whiteSpace: "nowrap", pointerEvents: "none",
           }}>
@@ -9553,9 +9667,9 @@ function GoodbyeView({
           the call; Nana finishes up for both. */}
       {isNana && !isReadyStage && (
         <div style={{
-          backgroundColor: "#0b172e",
+          backgroundColor: "var(--lk-bg, #0b172e)",
           padding: "10px 16px",
-          borderTop: "1px solid rgba(255,255,255,0.08)",
+          borderTop: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))",
           display: "flex", gap: 10, alignItems: "center",
           justifyContent: isGoodbye ? "center" : "flex-end",
           flexShrink: 0, minHeight: 64,
@@ -9564,8 +9678,8 @@ function GoodbyeView({
             <button
               onClick={onSkipToGoodbye}
               style={{
-                background: "rgba(255,255,255,0.06)", color: CREAM,
-                border: "1px solid rgba(255,255,255,0.28)", borderRadius: 999,
+                background: "var(--lk-fill-060, rgba(255,255,255,0.06))", color: CREAM,
+                border: "1px solid var(--lk-line-280, rgba(255,255,255,0.28))", borderRadius: 999,
                 padding: "10px 22px", minHeight: 48,
                 fontFamily: "DM Sans, sans-serif", fontSize: 16, fontWeight: 700,
                 cursor: "pointer", touchAction: "manipulation",
@@ -9600,12 +9714,12 @@ function GoodbyeView({
               <button
                 onClick={onEndSession}
                 style={{
-                  background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+                  background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)",
                   color: NAVY, border: "none", borderRadius: 999,
                   padding: "14px 24px",
                   fontFamily: "DM Sans, sans-serif", fontSize: "clamp(15px, 1.8vw, 17px)", fontWeight: 800, letterSpacing: "0.03em",
                   cursor: "pointer",
-                  boxShadow: "0 6px 22px rgba(201,146,42,0.45)",
+                  boxShadow: "0 6px 22px var(--lk-accent-450, rgba(201,146,42,0.45))",
                   display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 10,
                   minHeight: 56, minWidth: 210,
                   touchAction: "manipulation",
@@ -9618,8 +9732,8 @@ function GoodbyeView({
               <button
                 onClick={() => (onHangUp ?? onEndSession)()}
                 style={{
-                  background: "rgba(255,255,255,0.06)", color: CREAM,
-                  border: "1px solid rgba(255,255,255,0.28)", borderRadius: 999,
+                  background: "var(--lk-fill-060, rgba(255,255,255,0.06))", color: CREAM,
+                  border: "1px solid var(--lk-line-280, rgba(255,255,255,0.28))", borderRadius: 999,
                   padding: "14px 22px",
                   fontFamily: "DM Sans, sans-serif", fontSize: "clamp(14px, 1.7vw, 16px)", fontWeight: 700, letterSpacing: "0.02em",
                   cursor: "pointer",
@@ -9731,17 +9845,17 @@ function SillyFacesView({
   const trackerLoading = useSyncExternalStore(FaceTracker.subscribeLoading, FaceTracker.isLoading);
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#000", overflow: "hidden", position: "relative" }}>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "var(--lk-stage, #000)", overflow: "hidden", position: "relative" }}>
       {trackerLoading && (
         <div data-testid="silly-loading" role="status" style={{
           position: "absolute", top: 18, left: "50%", transform: "translateX(-50%)", zIndex: 30,
           display: "inline-flex", alignItems: "center", gap: 10,
           padding: "8px 16px", borderRadius: 999,
-          background: "rgba(11,23,46,0.88)", border: "1px solid rgba(247,201,93,0.55)",
+          background: "var(--lk-bg-880, rgba(11,23,46,0.88))", border: "1px solid var(--lk-accent-hi-550, rgba(247,201,93,0.55))",
           color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 700,
           pointerEvents: "none",
         }}>
-          <span aria-hidden style={{ width: 16, height: 16, borderRadius: "50%", border: "3px solid rgba(247,201,93,0.3)", borderTopColor: "#f7c95d", animation: "nm-word-spin 0.9s linear infinite" }} />
+          <span aria-hidden style={{ width: 16, height: 16, borderRadius: "50%", border: "3px solid var(--lk-accent-hi-300, rgba(247,201,93,0.3))", borderTopColor: "var(--lk-accent-hi, #f7c95d)", animation: "nm-word-spin 0.9s linear infinite" }} />
           Getting the silly faces ready…
           <style>{`@keyframes nm-word-spin { to { transform: rotate(360deg); } }`}</style>
         </div>
@@ -9758,7 +9872,7 @@ function SillyFacesView({
           On portrait viewports (iPhone in portrait) tiles stack vertically
           via the .nm-silly-stack class + media query below — otherwise
           side-by-side 4:3 tiles get crushed into tiny narrow rectangles. */}
-      <div className="nm-silly-stack" style={{ position: "relative", flex: 1, display: "flex", gap: 12, padding: 12, background: "#000", alignItems: "center", justifyContent: "center", minHeight: 0 }}>
+      <div className="nm-silly-stack" style={{ position: "relative", flex: 1, display: "flex", gap: 12, padding: 12, background: "var(--lk-stage, #000)", alignItems: "center", justifyContent: "center", minHeight: 0 }}>
         <style>{`
           @media (orientation: portrait) and (max-width: 700px) {
             .nm-silly-stack { flex-direction: column !important; }
@@ -9831,7 +9945,7 @@ function SillyFacesView({
             >
               <span style={{ fontSize: "80px", fontFamily: "DM Sans, sans-serif", fontWeight: 900, color: "white", lineHeight: 1 }}>{sillyCountNum}</span>
             </div>
-            <div style={{ color: "rgba(255,255,255,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: "13px", marginTop: "14px", letterSpacing: "0.08em" }}>Get your silliest face ready…</div>
+            <div style={{ color: "var(--lk-glass-750, rgba(255,255,255,0.75))", fontFamily: "DM Sans, sans-serif", fontSize: "13px", marginTop: "14px", letterSpacing: "0.08em" }}>Get your silliest face ready…</div>
           </div>
         )}
 
@@ -9845,7 +9959,7 @@ function SillyFacesView({
           <div style={{ position: "absolute", inset: 0, zIndex: 20, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", backgroundColor: "rgba(0,0,0,0.35)" }}>
             <span style={{ fontSize: "72px", display: "inline-block", animation: "pulse-sm 0.55s ease-in-out infinite" }}>😬</span>
             <div style={{ color: "white", fontFamily: "DM Sans, sans-serif", fontSize: "22px", fontWeight: 900, letterSpacing: "0.06em", marginTop: "8px", textShadow: "0 2px 12px rgba(0,0,0,0.9)" }}>HOLD IT!</div>
-            <div style={{ color: "rgba(255,255,255,0.65)", fontFamily: "DM Sans, sans-serif", fontSize: "12px", marginTop: "4px" }}>First to laugh loses 😂</div>
+            <div style={{ color: "var(--lk-glass-650, rgba(255,255,255,0.65))", fontFamily: "DM Sans, sans-serif", fontSize: "12px", marginTop: "4px" }}>First to laugh loses 😂</div>
           </div>
         )}
 
@@ -9854,7 +9968,7 @@ function SillyFacesView({
           <div style={{ position: "absolute", inset: 0, zIndex: 20, backgroundColor: "rgba(0,0,0,0.68)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "12px", padding: "20px" }}>
             <span style={{ fontSize: "42px" }}>😂</span>
             <div style={{ color: "white", fontFamily: "DM Sans, sans-serif", fontSize: "15px", fontWeight: 800, textAlign: "center" }}>Who cracked up first?</div>
-            <div style={{ color: "rgba(255,255,255,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: "11px", textAlign: "center", marginTop: -4 }}>
+            <div style={{ color: "var(--lk-glass-550, rgba(255,255,255,0.55))", fontFamily: "DM Sans, sans-serif", fontSize: "11px", textAlign: "center", marginTop: -4 }}>
               First to laugh loses — the OTHER person wins.
             </div>
             {/* Buttons explicitly name the action ("X laughed") so
@@ -9896,7 +10010,7 @@ function SillyFacesView({
                 title="Skip — return to Silly Faces"
                 style={{
                   marginTop: 8,
-                  background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+                  background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)",
                   color: NAVY,
                   border: "none",
                   borderRadius: 999,
@@ -9905,7 +10019,7 @@ function SillyFacesView({
                   fontSize: 14, fontWeight: 800,
                   letterSpacing: "0.02em",
                   cursor: "pointer",
-                  boxShadow: "0 8px 22px rgba(201,146,42,0.45), 0 0 0 1px rgba(247,201,93,0.35)",
+                  boxShadow: "0 8px 22px var(--lk-accent-450, rgba(201,146,42,0.45)), 0 0 0 1px var(--lk-accent-hi-350, rgba(247,201,93,0.35))",
                   display: "inline-flex", alignItems: "center", gap: 8,
                   touchAction: "manipulation",
                   minHeight: 48,
@@ -9924,10 +10038,10 @@ function SillyFacesView({
         {laughWinner && (
           <div style={{ position: "absolute", inset: 0, zIndex: 20, backgroundColor: "rgba(0,0,0,0.68)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "10px", padding: "20px" }}>
             <span style={{ fontSize: "52px", display: "inline-block", animation: "bob 1s ease-in-out infinite" }}>🏆</span>
-            <div style={{ color: "#fde68a", fontFamily: "Playfair Display, serif", fontSize: "22px", fontWeight: 800, textAlign: "center", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+            <div style={{ color: "var(--lk-lt-fde68a, #fde68a)", fontFamily: "Playfair Display, serif", fontSize: "22px", fontWeight: 800, textAlign: "center", textTransform: "uppercase", letterSpacing: "0.04em" }}>
               {roundWinnerName} wins!
             </div>
-            <div style={{ color: "rgba(255,255,255,0.65)", fontFamily: "DM Sans, sans-serif", fontSize: "12px", textAlign: "center" }}>
+            <div style={{ color: "var(--lk-glass-650, rgba(255,255,255,0.65))", fontFamily: "DM Sans, sans-serif", fontSize: "12px", textAlign: "center" }}>
               {laughedFirstName} cracked up first 😂
             </div>
             {/* Three paths forward — Rick: "We need an exit option that
@@ -9972,13 +10086,13 @@ function SillyFacesView({
 
       {/* Bottom strip — gaps tightened from 8 → 6 and padding pulled in so
           the row stays comfortably within the viewport on small iPads. */}
-      <div style={{ backgroundColor: "#0b172e", padding: "6px 12px 8px", borderTop: "1px solid rgba(255,255,255,0.08)", display: "flex", flexDirection: "column", gap: "6px", flexShrink: 0 }}>
+      <div style={{ backgroundColor: "var(--lk-bg, #0b172e)", padding: "6px 12px 8px", borderTop: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))", display: "flex", flexDirection: "column", gap: "6px", flexShrink: 0 }}>
         {/* Filter label + Clear button row. Rick's Build 30 review #6:
             Nana's "Clear" needs to reset BOTH sides (she's in control).
             Perry still only clears her own. Also Rick's #10: bumped
             filter circles to 52px + onTouchStart for faster taps. */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10 }}>
-          <div style={{ color: "rgba(255,255,255,0.4)", fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700, letterSpacing: "0.12em" }}>
+          <div style={{ color: "var(--lk-glass-400, rgba(255,255,255,0.4))", fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700, letterSpacing: "0.12em" }}>
             🎭 YOUR FILTER
           </div>
           {isNana && onClearAllFilters && (myFilter !== "none" || theirFilter !== "none") && (
@@ -9988,7 +10102,7 @@ function SillyFacesView({
               style={{
                 background: "rgba(239,68,68,0.22)",
                 border: "1px solid rgba(239,68,68,0.60)",
-                color: "#fca5a5",
+                color: "var(--lk-bad-t, #fca5a5)",
                 borderRadius: 999,
                 padding: "3px 10px",
                 fontFamily: "DM Sans, sans-serif",
@@ -10010,7 +10124,7 @@ function SillyFacesView({
               style={{
                 background: "rgba(239,68,68,0.18)",
                 border: "1px solid rgba(239,68,68,0.55)",
-                color: "#fca5a5",
+                color: "var(--lk-bad-t, #fca5a5)",
                 borderRadius: 999,
                 padding: "3px 10px",
                 fontFamily: "DM Sans, sans-serif",
@@ -10048,8 +10162,8 @@ function SillyFacesView({
                 }}
                 style={{
                   flexShrink: 0, width: "52px", height: "52px", borderRadius: "50%",
-                  backgroundColor: sel ? "rgba(192,132,252,0.35)" : "rgba(255,255,255,0.08)",
-                  border: `2px solid ${sel ? "#c084fc" : "rgba(255,255,255,0.16)"}`,
+                  backgroundColor: sel ? "rgba(192,132,252,0.35)" : "var(--lk-fill-080, rgba(255,255,255,0.08))",
+                  border: `2px solid ${sel ? "#c084fc" : "var(--lk-line-160, rgba(255,255,255,0.16))"}`,
                   display: "flex", alignItems: "center", justifyContent: "center",
                   cursor: "pointer", transition: "all 0.15s",
                   boxShadow: sel ? "0 0 14px rgba(192,132,252,0.55)" : "none",
@@ -10071,7 +10185,7 @@ function SillyFacesView({
         {onReact && (
           <div role="toolbar" aria-label="Send a reaction" style={{ display: "flex", gap: "6px", alignItems: "center", justifyContent: "center" }}>
             <span style={{
-              color: "rgba(255,255,255,0.45)", fontFamily: "DM Sans, sans-serif",
+              color: "var(--lk-glass-450, rgba(255,255,255,0.45))", fontFamily: "DM Sans, sans-serif",
               fontSize: "9px", fontWeight: 700, letterSpacing: "0.12em",
               whiteSpace: "nowrap", marginRight: 4,
             }}>💛 REACT</span>
@@ -10089,9 +10203,9 @@ function SillyFacesView({
                 style={{
                   width: 44, height: 34,
                   borderRadius: 10,
-                  border: `1px solid color-mix(in srgb, ${accent} 35%, rgba(255,255,255,0.10))`,
-                  backgroundImage: `linear-gradient(155deg, color-mix(in srgb, ${accent} 20%, rgba(255,255,255,0.04)) 0%, rgba(255,255,255,0.04) 70%)`,
-                  backgroundColor: "rgba(255,255,255,0.04)",
+                  border: `1px solid color-mix(in srgb, ${accent} 35%, var(--lk-line-100, rgba(255,255,255,0.10)))`,
+                  backgroundImage: `linear-gradient(155deg, color-mix(in srgb, ${accent} 20%, var(--lk-fill-040, rgba(255,255,255,0.04))) 0%, var(--lk-fill-040, rgba(255,255,255,0.04)) 70%)`,
+                  backgroundColor: "var(--lk-fill-040, rgba(255,255,255,0.04))",
                   color: "#fff",
                   fontSize: 18,
                   lineHeight: 1,
@@ -10164,7 +10278,7 @@ function SillyFacesView({
               borderRadius: 999,
               background: "rgba(192,132,252,0.10)",
               border: "1px dashed rgba(192,132,252,0.45)",
-              color: "rgba(247,240,227,0.85)",
+              color: "var(--lk-ink-850, rgba(247,240,227,0.85))",
               fontFamily: "DM Sans, sans-serif",
               fontSize: "clamp(12px, 1.4vw, 14px)",
               fontWeight: 600,
@@ -10180,7 +10294,7 @@ function SillyFacesView({
                 style={{
                   background: "rgba(239,68,68,0.18)",
                   border: "1px solid rgba(239,68,68,0.55)",
-                  color: "#fca5a5",
+                  color: "var(--lk-bad-t, #fca5a5)",
                   borderRadius: 999,
                   padding: "4px 12px",
                   fontFamily: "DM Sans, sans-serif",
@@ -10200,7 +10314,7 @@ function SillyFacesView({
             iPads (Rick's Build 38 review #6: nothing could be tapped). */}
         {challengeActive && !laughWinner && sillyChallenge !== "result" && (
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 14 }}>
-            <span style={{ color: "#c084fc", fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 800, animation: "pulse-sm 0.8s ease-in-out infinite" }}>
+            <span style={{ color: "var(--lk-purple-t, #c084fc)", fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 800, animation: "pulse-sm 0.8s ease-in-out infinite" }}>
               😬 Hold that face…
             </span>
             <button
@@ -10209,7 +10323,7 @@ function SillyFacesView({
               onClick={onEndChallenge}
               style={{
                 minHeight: 44, padding: "8px 20px", borderRadius: 999,
-                background: "rgba(255,255,255,0.08)", border: "1px solid rgba(192,132,252,0.6)",
+                background: "var(--lk-fill-080, rgba(255,255,255,0.08))", border: "1px solid rgba(192,132,252,0.6)",
                 color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 800,
                 cursor: "pointer", touchAction: "manipulation",
               }}
@@ -10236,9 +10350,9 @@ function SillyFacesView({
             style={{
               flex: 1,
               minHeight: 44,
-              backgroundColor: "rgba(255,255,255,0.06)",
+              backgroundColor: "var(--lk-fill-060, rgba(255,255,255,0.06))",
               color: CREAM,
-              border: "1px solid rgba(255,255,255,0.14)",
+              border: "1px solid var(--lk-line-140, rgba(255,255,255,0.14))",
               borderRadius: 999,
               padding: "10px 12px",
               fontSize: 12,
@@ -10258,7 +10372,7 @@ function SillyFacesView({
               flex: 1,
               minHeight: 44,
               background: "linear-gradient(135deg, rgba(34,197,94,0.22) 0%, rgba(34,197,94,0.10) 100%)",
-              color: "#86efac",
+              color: "var(--lk-ok-t, #86efac)",
               border: "1px solid rgba(34,197,94,0.55)",
               borderRadius: 999,
               padding: "10px 12px",
@@ -10279,7 +10393,7 @@ function SillyFacesView({
               flex: 1.6,
               minHeight: 44,
               background: "linear-gradient(135deg, rgba(192,132,252,0.30) 0%, rgba(139,92,246,0.30) 100%)",
-              color: "#e0d4ff",
+              color: "var(--lk-lt-e0d4ff, #e0d4ff)",
               border: "1px solid rgba(192,132,252,0.65)",
               borderRadius: 999,
               padding: "10px 14px",
@@ -10377,27 +10491,27 @@ function DrumColumn({ items, value, onChange }: { items: string[]; value: string
       onTouchMove={onTouchMove}
       onTouchEnd={onTouchEnd}
       onTouchCancel={onTouchEnd}
-      style={{ flex: 1, position: "relative", overflow: "hidden", borderRadius: "8px", backgroundColor: "rgba(255,255,255,0.04)", touchAction: "none", userSelect: "none", cursor: "ns-resize" }}
+      style={{ flex: 1, position: "relative", overflow: "hidden", borderRadius: "8px", backgroundColor: "var(--lk-fill-040, rgba(255,255,255,0.04))", touchAction: "none", userSelect: "none", cursor: "ns-resize" }}
     >
-      <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: "40px", background: "linear-gradient(to bottom, rgba(11,23,46,0.9), transparent)", pointerEvents: "none", zIndex: 3 }} />
-      <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: "40px", background: "linear-gradient(to top, rgba(11,23,46,0.9), transparent)", pointerEvents: "none", zIndex: 3 }} />
+      <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: "40px", background: "linear-gradient(to bottom, var(--lk-bg-900, rgba(11,23,46,0.9)), transparent)", pointerEvents: "none", zIndex: 3 }} />
+      <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: "40px", background: "linear-gradient(to top, var(--lk-bg-900, rgba(11,23,46,0.9)), transparent)", pointerEvents: "none", zIndex: 3 }} />
       <button
         type="button"
         onClick={() => idx > 0 && onChange(items[idx - 1])}
         disabled={idx === 0}
         aria-label="Up"
-        style={{ position: "absolute", top: 2, left: 0, right: 0, height: "14px", background: "transparent", border: "none", color: idx === 0 ? "rgba(247,240,227,0.15)" : "rgba(247,240,227,0.55)", cursor: idx === 0 ? "default" : "pointer", zIndex: 4, fontSize: "10px", padding: 0, lineHeight: 1 }}
+        style={{ position: "absolute", top: 2, left: 0, right: 0, height: "14px", background: "transparent", border: "none", color: idx === 0 ? "var(--lk-ink-150, rgba(247,240,227,0.15))" : "var(--lk-ink-550, rgba(247,240,227,0.55))", cursor: idx === 0 ? "default" : "pointer", zIndex: 4, fontSize: "10px", padding: 0, lineHeight: 1 }}
       >▲</button>
       <button
         type="button"
         onClick={() => idx < items.length - 1 && onChange(items[idx + 1])}
         disabled={idx === items.length - 1}
         aria-label="Down"
-        style={{ position: "absolute", bottom: 2, left: 0, right: 0, height: "14px", background: "transparent", border: "none", color: idx === items.length - 1 ? "rgba(247,240,227,0.15)" : "rgba(247,240,227,0.55)", cursor: idx === items.length - 1 ? "default" : "pointer", zIndex: 4, fontSize: "10px", padding: 0, lineHeight: 1 }}
+        style={{ position: "absolute", bottom: 2, left: 0, right: 0, height: "14px", background: "transparent", border: "none", color: idx === items.length - 1 ? "var(--lk-ink-150, rgba(247,240,227,0.15))" : "var(--lk-ink-550, rgba(247,240,227,0.55))", cursor: idx === items.length - 1 ? "default" : "pointer", zIndex: 4, fontSize: "10px", padding: 0, lineHeight: 1 }}
       >▼</button>
       <div style={{ position: "absolute", top: 0, left: 0, right: 0, transform: `translateY(${translateY}px)`, transition: isDragging ? "none" : "transform 0.18s ease-out", willChange: "transform" }}>
         {items.map(item => (
-          <div key={item} style={{ height: `${ROW}px`, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "DM Sans, sans-serif", fontSize: item === value ? "15px" : "12px", fontWeight: item === value ? 800 : 400, color: item === value ? AMBER : "rgba(247,240,227,0.5)" }}>{item}</div>
+          <div key={item} style={{ height: `${ROW}px`, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "DM Sans, sans-serif", fontSize: item === value ? "15px" : "12px", fontWeight: item === value ? 800 : 400, color: item === value ? AMBER_T : "var(--lk-ink-500, rgba(247,240,227,0.5))" }}>{item}</div>
         ))}
       </div>
     </div>
@@ -10559,13 +10673,13 @@ function ParentCheckView({
     backgroundColor: AMBER,
     color: NAVY,
     border: "none",
-    boxShadow: "0 3px 16px rgba(201,146,42,0.45)",
+    boxShadow: "0 3px 16px var(--lk-accent-450, rgba(201,146,42,0.45))",
   };
   const SECONDARY_BTN: React.CSSProperties = {
     ...PANEL_BTN_BASE,
     background: "transparent",
-    border: "1px solid rgba(247,201,93,0.45)",
-    color: AMBER,
+    border: "1px solid var(--lk-accent-hi-450, rgba(247,201,93,0.45))",
+    color: AMBER_T,
   };
   // Footer-tier CTAs — Propose / Silly Faces / Goodbye sit side-by-side
   // and must read as equal peers in size. They differ ONLY in
@@ -10590,7 +10704,7 @@ function ParentCheckView({
   };
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "#000", overflow: "hidden" }}>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", backgroundColor: "var(--lk-stage, #000)", overflow: "hidden" }}>
       <style>{`
         @keyframes pcv-rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
         @keyframes pcv-twinkle { 0%,100% { opacity: 0.35; transform: scale(0.85); } 50% { opacity: 1; transform: scale(1.1); } }
@@ -10607,8 +10721,8 @@ function ParentCheckView({
            same eye-grabbing pulse but in the warm/scheduling palette
            rather than the silly-faces purple. */
         @keyframes pcv-cta-glow-amber {
-          0%,100% { box-shadow: 0 12px 32px rgba(201,146,42,0.55), 0 0 0 0 rgba(247,201,93,0.45); }
-          50%     { box-shadow: 0 14px 38px rgba(201,146,42,0.65), 0 0 0 16px rgba(247,201,93,0); }
+          0%,100% { box-shadow: 0 12px 32px var(--lk-accent-550, rgba(201,146,42,0.55)), 0 0 0 0 var(--lk-accent-hi-450, rgba(247,201,93,0.45)); }
+          50%     { box-shadow: 0 14px 38px var(--lk-accent-650, rgba(201,146,42,0.65)), 0 0 0 16px var(--lk-accent-hi-000, rgba(247,201,93,0)); }
         }
       `}</style>
 
@@ -10621,8 +10735,8 @@ function ParentCheckView({
         padding: "10px 14px 8px",
         display: "flex", alignItems: "center", justifyContent: "flex-start",
         gap: 10,
-        borderBottom: "1px solid rgba(255,255,255,0.08)",
-        backgroundColor: "rgba(11,23,46,0.55)",
+        borderBottom: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))",
+        backgroundColor: "var(--lk-bg-550, rgba(11,23,46,0.55))",
       }}>
         {isNana && onBack && (
           <button
@@ -10631,7 +10745,7 @@ function ParentCheckView({
             data-testid="schedule-back"
             style={{
               minHeight: 46, padding: "0 18px", borderRadius: 999,
-              background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.25)",
+              background: "var(--lk-fill-070, rgba(255,255,255,0.07))", border: "1px solid var(--lk-line-250, rgba(255,255,255,0.25))",
               color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 16, fontWeight: 800,
               display: "inline-flex", alignItems: "center", gap: 8,
               cursor: "pointer", touchAction: "manipulation",
@@ -10645,7 +10759,7 @@ function ParentCheckView({
           padding: "6px 12px", borderRadius: 999,
           backgroundColor: "rgba(34,197,94,0.10)",
           border: "1px solid rgba(34,197,94,0.55)",
-          color: "#86efac",
+          color: "var(--lk-ok-t, #86efac)",
           fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 800,
           letterSpacing: "0.14em",
         }}>
@@ -10661,8 +10775,8 @@ function ParentCheckView({
           container is already narrower so the cap is a no-op. */}
       <div style={{
         flex: 1, overflowY: "auto",
-        backgroundColor: "#0b172e",
-        backgroundImage: "radial-gradient(680px 360px at 80% -10%, rgba(34,197,94,0.16), transparent 70%), radial-gradient(560px 360px at -10% 110%, rgba(201,146,42,0.14), transparent 70%)",
+        backgroundColor: "var(--lk-bg, #0b172e)",
+        backgroundImage: "radial-gradient(680px 360px at 80% -10%, rgba(34,197,94,0.16), transparent 70%), radial-gradient(560px 360px at -10% 110%, var(--lk-accent-140, rgba(201,146,42,0.14)), transparent 70%)",
         padding: "12px 14px 16px",
         display: "flex", flexDirection: "column", alignItems: "center",
       }}>
@@ -10692,7 +10806,7 @@ function ParentCheckView({
               old. Something warmer and more direct would work better."
               Also fixed the hardcoded names so it uses the actual nana /
               child display names instead of literal "Perry" / "Nana". */}
-          <span style={{ color: "#dcfce7", fontFamily: "DM Sans, sans-serif", fontSize: "clamp(16px, 2vw, 19px)", fontWeight: 800, lineHeight: 1.4, flex: 1, position: "relative", zIndex: 1 }}>
+          <span style={{ color: "var(--lk-lt-dcfce7, #dcfce7)", fontFamily: "DM Sans, sans-serif", fontSize: "clamp(16px, 2vw, 19px)", fontWeight: 800, lineHeight: 1.4, flex: 1, position: "relative", zIndex: 1 }}>
             {isNana
               ? `Ask ${childLabel} to get Mom, Dad, or a grown-up so you can pick your next reading time together.`
               : `Go get Mom, Dad, or a grown-up! ${nanaLabel} wants to pick our next reading time.`}
@@ -10701,9 +10815,9 @@ function ParentCheckView({
 
         {/* Section divider */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, marginTop: 2 }}>
-          <div style={{ flex: 1, height: 1, background: "linear-gradient(to right, transparent, rgba(201,146,42,0.4))" }} />
-          <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: "0.16em", whiteSpace: "nowrap" }}>📅 BOOK NEXT READING</span>
-          <div style={{ flex: 1, height: 1, background: "linear-gradient(to left, transparent, rgba(201,146,42,0.4))" }} />
+          <div style={{ flex: 1, height: 1, background: "linear-gradient(to right, transparent, var(--lk-accent-400, rgba(201,146,42,0.4)))" }} />
+          <span style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: "0.16em", whiteSpace: "nowrap" }}>📅 BOOK NEXT READING</span>
+          <div style={{ flex: 1, height: 1, background: "linear-gradient(to left, transparent, var(--lk-accent-400, rgba(201,146,42,0.4)))" }} />
         </div>
 
         {/* Partner-requested-reschedule banner — surfaces when the OTHER
@@ -10721,7 +10835,7 @@ function ParentCheckView({
             role="status"
             aria-live="polite"
             style={{
-              backgroundImage: "linear-gradient(135deg, rgba(247,201,93,0.18) 0%, rgba(247,201,93,0.06) 100%)",
+              backgroundImage: "linear-gradient(135deg, var(--lk-accent-hi-180, rgba(247,201,93,0.18)) 0%, var(--lk-accent-hi-060, rgba(247,201,93,0.06)) 100%)",
               border: `1px solid ${AMBER}`,
               borderRadius: 12,
               padding: "11px 14px",
@@ -10731,12 +10845,12 @@ function ParentCheckView({
           >
             <span style={{ fontSize: 22 }}>🔁</span>
             <div style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 }}>
-              <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 800, letterSpacing: "0.02em" }}>
+              <span style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 800, letterSpacing: "0.02em" }}>
                 {isNana
                   ? `${childLabel}'s family asked for a different time`
                   : `${nanaLabel} asked for a different time`}
               </span>
-              <span style={{ color: "rgba(247,240,227,0.7)", fontFamily: "DM Sans, sans-serif", fontSize: 12, lineHeight: 1.4 }}>
+              <span style={{ color: "var(--lk-ink-700, rgba(247,240,227,0.7))", fontFamily: "DM Sans, sans-serif", fontSize: 12, lineHeight: 1.4 }}>
                 {isNana ? "Pick another day and time to propose." : `Hang tight. ${nanaName || getRoleLabel("nana")} will suggest a new time.`}
               </span>
             </div>
@@ -10745,27 +10859,27 @@ function ParentCheckView({
 
         {/* ── PANEL: Both confirmed ── */}
         {bothConfirmed && proposal && (
-          <div style={{ backgroundColor: "rgba(201,146,42,0.10)", border: `1px solid ${AMBER}`, borderRadius: "12px", padding: PANEL_PAD, display: "flex", flexDirection: "column", gap: PANEL_GAP, flexShrink: 0 }}>
+          <div style={{ backgroundColor: "var(--lk-accent-100, rgba(201,146,42,0.10))", border: `1px solid ${AMBER}`, borderRadius: "12px", padding: PANEL_PAD, display: "flex", flexDirection: "column", gap: PANEL_GAP, flexShrink: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
               <span style={{ fontSize: "22px" }}>✅</span>
-              <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: "18px", fontWeight: 700 }}>All booked!</span>
+              <span style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: "18px", fontWeight: 700 }}>All booked!</span>
             </div>
             <p style={{ color: CREAM, fontFamily: "Merriweather, serif", fontSize: "18px", fontWeight: 700, lineHeight: 1.45, margin: 0 }}>
               {formatDate(proposal.date, proposal.time)} <span style={{ fontSize: "14px", fontWeight: 400, opacity: 0.6 }}>({nanaOffset})</span>
             </p>
             {!isNana && (
-              <div style={{ color: "rgba(247,240,227,0.7)", fontFamily: "DM Sans, sans-serif", fontSize: "14px", marginTop: "4px" }}>
+              <div style={{ color: "var(--lk-ink-700, rgba(247,240,227,0.7))", fontFamily: "DM Sans, sans-serif", fontSize: "14px", marginTop: "4px" }}>
                 {formatDate(proposal.date, proposal.time, true)}
               </div>
             )}
-            <p style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: "13px", lineHeight: 1.5, margin: 0 }}>
+            <p style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: "DM Sans, sans-serif", fontSize: "13px", lineHeight: 1.5, margin: 0 }}>
               📱 ✉️ Text &amp; email reminders will be sent to Nana and the family before the session.
             </p>
             {(() => {
               const scheduledDate = combineDateAndTime(proposal.date, proposal.time);
               return (
                 <div style={{ marginTop: "10px" }}>
-                  <div style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: "11px", letterSpacing: "0.08em", textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
+                  <div style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: "DM Sans, sans-serif", fontSize: "11px", letterSpacing: "0.08em", textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
                     {isNana ? "ADD TO CALENDAR" : "SEND TO A PARENT — ADD TO THEIR CALENDAR"}
                   </div>
                   {/* All four calendar destinations now use the SAME
@@ -10866,8 +10980,8 @@ function ParentCheckView({
             Eyebrow 10→12px, date itself 14→20px (now reads at arm's length
             on an iPad without leaning in). */}
         {showIncoming && proposal && (
-          <div style={{ backgroundColor: "rgba(201,146,42,0.08)", border: `1px solid ${AMBER}`, borderRadius: "12px", padding: PANEL_PAD, display: "flex", flexDirection: "column", gap: PANEL_GAP, flexShrink: 0 }}>
-            <div style={{ color: "rgba(247,240,227,0.7)", fontFamily: "DM Sans, sans-serif", fontSize: "12px", fontWeight: 700, letterSpacing: "0.05em" }}>
+          <div style={{ backgroundColor: "var(--lk-accent-080, rgba(201,146,42,0.08))", border: `1px solid ${AMBER}`, borderRadius: "12px", padding: PANEL_PAD, display: "flex", flexDirection: "column", gap: PANEL_GAP, flexShrink: 0 }}>
+            <div style={{ color: "var(--lk-ink-700, rgba(247,240,227,0.7))", fontFamily: "DM Sans, sans-serif", fontSize: "12px", fontWeight: 700, letterSpacing: "0.05em" }}>
               {proposerName} wants to book:
             </div>
             <p style={{ color: CREAM, fontFamily: "Merriweather, serif", fontSize: "clamp(18px, 2.4vw, 22px)", fontWeight: 700, lineHeight: 1.35, margin: 0 }}>
@@ -10886,8 +11000,8 @@ function ParentCheckView({
         {/* ── PANEL: Waiting for other to accept (I proposed) ──
             Same font bump as the incoming-proposal panel above. */}
         {showWaiting && proposal && (
-          <div style={{ backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "12px", padding: PANEL_PAD, display: "flex", flexDirection: "column", gap: PANEL_GAP, flexShrink: 0 }}>
-            <div style={{ color: "rgba(247,240,227,0.6)", fontFamily: "DM Sans, sans-serif", fontSize: "12px", fontWeight: 700, letterSpacing: "0.05em" }}>
+          <div style={{ backgroundColor: "var(--lk-fill-040, rgba(255,255,255,0.04))", border: "1px solid var(--lk-line-120, rgba(255,255,255,0.12))", borderRadius: "12px", padding: PANEL_PAD, display: "flex", flexDirection: "column", gap: PANEL_GAP, flexShrink: 0 }}>
+            <div style={{ color: "var(--lk-ink-600, rgba(247,240,227,0.6))", fontFamily: "DM Sans, sans-serif", fontSize: "12px", fontWeight: 700, letterSpacing: "0.05em" }}>
               You proposed:
             </div>
             <p style={{ color: CREAM, fontFamily: "Merriweather, serif", fontSize: "clamp(18px, 2.4vw, 22px)", fontWeight: 700, lineHeight: 1.35, margin: 0 }}>
@@ -10895,7 +11009,7 @@ function ParentCheckView({
             </p>
             <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "2px" }}>
               <span style={{ fontSize: "16px", animation: "pulse-sm 1.6s ease-in-out infinite" }}>⏳</span>
-              <span style={{ color: "rgba(247,240,227,0.55)", fontFamily: "DM Sans, sans-serif", fontSize: "13px" }}>
+              <span style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: "DM Sans, sans-serif", fontSize: "13px" }}>
                 Waiting for {otherName} to confirm…
               </span>
             </div>
@@ -10908,12 +11022,12 @@ function ParentCheckView({
 
         {/* ── PANEL: Perry waiting (no proposal yet, child side) ── */}
         {showPicker && !isNana && (
-          <div style={{ backgroundColor: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "12px", padding: PANEL_PAD, display: "flex", flexDirection: "column", alignItems: "center", gap: PANEL_GAP, flexShrink: 0, textAlign: "center" }}>
+          <div style={{ backgroundColor: "var(--lk-fill-040, rgba(255,255,255,0.04))", border: "1px solid var(--lk-line-120, rgba(255,255,255,0.12))", borderRadius: "12px", padding: PANEL_PAD, display: "flex", flexDirection: "column", alignItems: "center", gap: PANEL_GAP, flexShrink: 0, textAlign: "center" }}>
             <span style={{ fontSize: "26px" }}>⏳</span>
-            <span style={{ color: "rgba(247,240,227,0.65)", fontFamily: "DM Sans, sans-serif", fontSize: "13px", fontWeight: 600, lineHeight: 1.5 }}>
+            <span style={{ color: "var(--lk-ink-650, rgba(247,240,227,0.65))", fontFamily: "DM Sans, sans-serif", fontSize: "13px", fontWeight: 600, lineHeight: 1.5 }}>
               Waiting for {nanaName || getRoleLabel("nana")} to suggest a time…
             </span>
-            <span style={{ color: "rgba(247,240,227,0.35)", fontFamily: "DM Sans, sans-serif", fontSize: "10px" }}>
+            <span style={{ color: "var(--lk-ink-350, rgba(247,240,227,0.35))", fontFamily: "DM Sans, sans-serif", fontSize: "10px" }}>
               A day and time for your next reading will show here.
             </span>
           </div>
@@ -10934,7 +11048,7 @@ function ParentCheckView({
                   ovals with big gaps. Rick: "the calendar buttons seem to
                   be spreading apart — could we tighten those back up?" */}
               <div style={{ flex: "0 0 auto", width: 240, minWidth: 0 }}>
-                <div style={{ color: "rgba(255,255,255,0.38)", fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700, letterSpacing: "0.08em", marginBottom: "6px" }}>PICK A DAY</div>
+                <div style={{ color: "var(--lk-glass-380, rgba(255,255,255,0.38))", fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700, letterSpacing: "0.08em", marginBottom: "6px" }}>PICK A DAY</div>
 
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: 224, margin: "0 auto 8px" }}>
                   {/* Month-nav chevrons bumped from 2x6 padding (~10px
@@ -10945,9 +11059,9 @@ function ParentCheckView({
                     onClick={() => setCalMonth(m => { const d = new Date(m); d.setMonth(d.getMonth() - 1); return d; })}
                     style={{
                       width: 32, height: 32, borderRadius: "50%",
-                      background: "rgba(255,255,255,0.04)",
-                      border: "1px solid rgba(255,255,255,0.10)",
-                      color: AMBER, fontSize: 14, cursor: "pointer",
+                      background: "var(--lk-fill-040, rgba(255,255,255,0.04))",
+                      border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))",
+                      color: AMBER_T, fontSize: 14, cursor: "pointer",
                       display: "inline-flex", alignItems: "center", justifyContent: "center",
                       padding: 0, touchAction: "manipulation",
                     }}
@@ -10960,9 +11074,9 @@ function ParentCheckView({
                     onClick={() => setCalMonth(m => { const d = new Date(m); d.setMonth(d.getMonth() + 1); return d; })}
                     style={{
                       width: 32, height: 32, borderRadius: "50%",
-                      background: "rgba(255,255,255,0.04)",
-                      border: "1px solid rgba(255,255,255,0.10)",
-                      color: AMBER, fontSize: 14, cursor: "pointer",
+                      background: "var(--lk-fill-040, rgba(255,255,255,0.04))",
+                      border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))",
+                      color: AMBER_T, fontSize: 14, cursor: "pointer",
                       display: "inline-flex", alignItems: "center", justifyContent: "center",
                       padding: 0, touchAction: "manipulation",
                     }}
@@ -10971,7 +11085,7 @@ function ParentCheckView({
 
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 32px)", gap: "0px", marginBottom: "2px", width: "fit-content", margin: "0 auto 2px" }}>
                   {["S","M","T","W","T","F","S"].map((d, i) => (
-                    <div key={i} style={{ textAlign: "center", color: "rgba(255,255,255,0.3)", fontFamily: "DM Sans, sans-serif", fontSize: "10px", fontWeight: 700, padding: "1px 0" }}>{d}</div>
+                    <div key={i} style={{ textAlign: "center", color: "var(--lk-glass-300, rgba(255,255,255,0.3))", fontFamily: "DM Sans, sans-serif", fontSize: "10px", fontWeight: 700, padding: "1px 0" }}>{d}</div>
                   ))}
                 </div>
 
@@ -10994,7 +11108,7 @@ function ParentCheckView({
                             borderRadius: "50%",
                             backgroundColor: isSel ? AMBER : "transparent",
                             outline: isToday && !isSel ? `1px solid ${AMBER}` : "none",
-                            color: isPast ? "rgba(255,255,255,0.15)" : isSel ? NAVY : CREAM,
+                            color: isPast ? "var(--lk-glass-150, rgba(255,255,255,0.15))" : isSel ? NAVY : CREAM,
                             fontFamily: "DM Sans, sans-serif", fontSize: "13px",
                             fontWeight: isSel || isToday ? 800 : 400,
                             cursor: isPast ? "default" : "pointer",
@@ -11011,17 +11125,17 @@ function ParentCheckView({
 
               {/* RIGHT — Three-column drum-roll time picker */}
               <div style={{ flexShrink: 0, width: "130px" }}>
-                <div style={{ color: "rgba(255,255,255,0.38)", fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700, letterSpacing: "0.08em", marginBottom: "6px" }}>PICK A TIME</div>
-                <div style={{ color: "rgba(247,240,227,0.65)", fontFamily: "DM Sans, sans-serif", fontSize: "12px", letterSpacing: "0.04em", marginBottom: "4px", textAlign: "center" }}>{nanaOffset}</div>
+                <div style={{ color: "var(--lk-glass-380, rgba(255,255,255,0.38))", fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700, letterSpacing: "0.08em", marginBottom: "6px" }}>PICK A TIME</div>
+                <div style={{ color: "var(--lk-ink-650, rgba(247,240,227,0.65))", fontFamily: "DM Sans, sans-serif", fontSize: "12px", letterSpacing: "0.04em", marginBottom: "4px", textAlign: "center" }}>{nanaOffset}</div>
 
                 <div style={{ display: "flex", gap: "2px", marginBottom: "2px" }}>
                   {["HR","MIN","AM/PM"].map(l => (
-                    <div key={l} style={{ flex: 1, textAlign: "center", color: "rgba(255,255,255,0.3)", fontFamily: "DM Sans, sans-serif", fontSize: "10px", fontWeight: 700 }}>{l}</div>
+                    <div key={l} style={{ flex: 1, textAlign: "center", color: "var(--lk-glass-300, rgba(255,255,255,0.3))", fontFamily: "DM Sans, sans-serif", fontSize: "10px", fontWeight: 700 }}>{l}</div>
                   ))}
                 </div>
 
                 <div style={{ position: "relative", height: "120px", display: "flex", gap: "2px" }}>
-                  <div style={{ position: "absolute", top: "50%", left: 0, right: 0, height: "28px", transform: "translateY(-50%)", backgroundColor: "rgba(201,146,42,0.15)", borderTop: "1px solid rgba(201,146,42,0.4)", borderBottom: "1px solid rgba(201,146,42,0.4)", pointerEvents: "none", zIndex: 2, borderRadius: "6px" }} />
+                  <div style={{ position: "absolute", top: "50%", left: 0, right: 0, height: "28px", transform: "translateY(-50%)", backgroundColor: "var(--lk-accent-150, rgba(201,146,42,0.15))", borderTop: "1px solid var(--lk-accent-400, rgba(201,146,42,0.4))", borderBottom: "1px solid var(--lk-accent-400, rgba(201,146,42,0.4))", pointerEvents: "none", zIndex: 2, borderRadius: "6px" }} />
                   <DrumColumn items={["12","1","2","3","4","5","6","7","8","9","10","11"]} value={selHour} onChange={setSelHour} />
                   <DrumColumn items={["00","15","30","45"]} value={selMin} onChange={setSelMin} />
                   <DrumColumn items={["AM","PM"]} value={selAmPm} onChange={setSelAmPm} />
@@ -11051,8 +11165,8 @@ function ParentCheckView({
         flexShrink: 0,
         padding: "12px 16px 14px",
         display: "flex", gap: PANEL_GAP, justifyContent: "center", flexWrap: "wrap",
-        background: "linear-gradient(180deg, transparent 0%, rgba(11,23,46,0.95) 35%, rgba(11,23,46,1) 100%)",
-        borderTop: "1px solid rgba(255,255,255,0.06)",
+        background: "linear-gradient(180deg, transparent 0%, var(--lk-bg-950, rgba(11,23,46,0.95)) 35%, var(--lk-bg-1000, rgba(11,23,46,1)) 100%)",
+        borderTop: "1px solid var(--lk-line-060, rgba(255,255,255,0.06))",
       }}>
         {/* Propose This Time — visible only when Nana is in the picker
             state. All three footer buttons share FOOTER_CTA base
@@ -11067,13 +11181,13 @@ function ParentCheckView({
             style={{
               ...FOOTER_CTA,
               background: canPropose
-                ? "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)"
-                : "rgba(255,255,255,0.06)",
-              color: canPropose ? NAVY : "rgba(255,255,255,0.35)",
-              border: canPropose ? "none" : "1px solid rgba(255,255,255,0.12)",
+                ? "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)"
+                : "var(--lk-fill-060, rgba(255,255,255,0.06))",
+              color: canPropose ? NAVY : "var(--lk-glass-350, rgba(255,255,255,0.35))",
+              border: canPropose ? "none" : "1px solid var(--lk-line-120, rgba(255,255,255,0.12))",
               cursor: canPropose ? "pointer" : "not-allowed",
               boxShadow: canPropose
-                ? "0 12px 32px rgba(201,146,42,0.55), 0 0 0 1px rgba(247,201,93,0.30)"
+                ? "0 12px 32px var(--lk-accent-550, rgba(201,146,42,0.55)), 0 0 0 1px var(--lk-accent-hi-300, rgba(247,201,93,0.30))"
                 : "none",
               animation: canPropose ? "pcv-cta-glow-amber 2.4s ease-in-out infinite" : undefined,
               opacity: canPropose ? 1 : 0.7,
@@ -11104,9 +11218,9 @@ function ParentCheckView({
           onClick={onStartGoodbye}
           style={{
             ...FOOTER_CTA,
-            background: "rgba(255,255,255,0.06)",
+            background: "var(--lk-fill-060, rgba(255,255,255,0.06))",
             color: CREAM,
-            border: "1px solid rgba(255,255,255,0.20)",
+            border: "1px solid var(--lk-line-200, rgba(255,255,255,0.20))",
           }}
         >
           <span style={{ fontSize: 20 }}>👋</span>
@@ -11129,21 +11243,21 @@ function RecordingConsentOverlay({
   // instead of a tiny toggle + generic "Got it" button that could be
   // mistaken for the whole answer.
   return (
-    <div style={{ position: "absolute", inset: 0, zIndex: 50, backgroundColor: "rgba(11,23,46,0.88)", backdropFilter: "blur(6px)", display: "flex", alignItems: "center", justifyContent: "center", padding: "20px" }}>
-      <div style={{ backgroundColor: "#0d1e38", border: "1px solid rgba(201,146,42,0.35)", borderRadius: "18px", padding: "24px 22px", width: "100%", maxWidth: 440, textAlign: "center", boxShadow: "0 18px 60px rgba(0,0,0,0.55)" }}>
+    <div style={{ position: "absolute", inset: 0, zIndex: 50, backgroundColor: "var(--lk-bg-880, rgba(11,23,46,0.88))", backdropFilter: "blur(6px)", display: "flex", alignItems: "center", justifyContent: "center", padding: "20px" }}>
+      <div style={{ backgroundColor: "var(--lk-n-0d1e38, #0d1e38)", border: "1px solid var(--lk-accent-350, rgba(201,146,42,0.35))", borderRadius: "18px", padding: "24px 22px", width: "100%", maxWidth: 440, textAlign: "center", boxShadow: "0 18px 60px var(--lk-shadow-550, rgba(0,0,0,0.55))" }}>
         <div style={{
           width: 64, height: 64, borderRadius: "50%",
-          backgroundColor: "rgba(201,146,42,0.15)",
-          border: "1px solid rgba(201,146,42,0.45)",
+          backgroundColor: "var(--lk-accent-150, rgba(201,146,42,0.15))",
+          border: "1px solid var(--lk-accent-450, rgba(201,146,42,0.45))",
           display: "inline-flex", alignItems: "center", justifyContent: "center",
-          color: AMBER, marginBottom: 14,
+          color: AMBER_T, marginBottom: 14,
         }} aria-hidden>
           <VideoIcon size={30} strokeWidth={1.8} />
         </div>
-        <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 22, fontWeight: 700, marginBottom: 6 }}>
+        <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: 22, fontWeight: 700, marginBottom: 6 }}>
           Save this session as a memory?
         </div>
-        <div style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: 13, lineHeight: 1.55, marginBottom: 18 }}>
+        <div style={{ color: "var(--lk-ink-750, rgba(247,240,227,0.75))", fontFamily: "DM Sans, sans-serif", fontSize: 13, lineHeight: 1.55, marginBottom: 18 }}>
           We can record your reading time so {isNana ? "your grandchild" : "your family"} can watch it back for years to come. Nothing gets shared outside the family.
         </div>
 
@@ -11156,7 +11270,7 @@ function RecordingConsentOverlay({
             onClick={() => { if (!recordingOn) onToggleRecording(); onDismiss(); }}
             style={{
               width: "100%",
-              background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+              background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)",
               color: NAVY,
               border: "none",
               borderRadius: 999,
@@ -11165,7 +11279,7 @@ function RecordingConsentOverlay({
               fontFamily: "DM Sans, sans-serif",
               fontWeight: 800,
               cursor: "pointer",
-              boxShadow: "0 8px 24px rgba(201,146,42,0.42)",
+              boxShadow: "0 8px 24px var(--lk-accent-420, rgba(201,146,42,0.42))",
               display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
               minHeight: 52,
               touchAction: "manipulation",
@@ -11179,9 +11293,9 @@ function RecordingConsentOverlay({
             onClick={() => { if (recordingOn) onToggleRecording(); onDismiss(); }}
             style={{
               width: "100%",
-              background: "rgba(255,255,255,0.05)",
+              background: "var(--lk-fill-050, rgba(255,255,255,0.05))",
               color: CREAM,
-              border: "1px solid rgba(255,255,255,0.20)",
+              border: "1px solid var(--lk-line-200, rgba(255,255,255,0.20))",
               borderRadius: 999,
               padding: "12px 16px",
               fontSize: 14,
@@ -11196,7 +11310,7 @@ function RecordingConsentOverlay({
           </button>
         </div>
 
-        <div style={{ color: "rgba(247,240,227,0.42)", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 14, lineHeight: 1.5 }}>
+        <div style={{ color: "var(--lk-ink-420, rgba(247,240,227,0.42))", fontFamily: "DM Sans, sans-serif", fontSize: 11, marginTop: 14, lineHeight: 1.5 }}>
           You can change this any time from the Menu.
         </div>
       </div>
@@ -11394,6 +11508,7 @@ function DeviceFrame({
   perryAuthenticated = false,
   onLibraryScroll,
   libraryScrollTop,
+  libraryScrollAnchor,
   onLibraryFilters,
   libraryFilters = null,
   catalogLoading = false,
@@ -11669,8 +11784,9 @@ function DeviceFrame({
   perryAuthenticated?: boolean;
   /** Nana publishes scroll position via this callback; Perry receives
    *  the latest value through libraryScrollTop and mirrors the scroll. */
-  onLibraryScroll?: (top: number) => void;
+  onLibraryScroll?: (top: number, anchor?: LibraryAnchor | null) => void;
   libraryScrollTop?: number;
+  libraryScrollAnchor?: LibraryAnchor | null;
   /** Nana: her library search and filters changed. */
   onLibraryFilters?: (f: LibraryFilters) => void;
   /** Child: Nana's library search and filters. */
@@ -11882,6 +11998,12 @@ function DeviceFrame({
         ),
       },
     });
+    // Build 43: colours and Library style (Nana's menu only; the kids' iPad follows).
+    if (isNana) es.push({
+      key: "looks", label: "Colours & Library", sublabel: "How NeverMiss looks on both iPads",
+      icon: <Palette size={18} strokeWidth={2} aria-hidden />,
+      panel: { title: "Colours & Library", render: () => <MenuLookPicker /> },
+    });
     if (inVisit) {
       es.push({
         key: "cammic", label: "Camera & Microphone", sublabel: "Mute, camera off, flip camera",
@@ -11920,10 +12042,10 @@ function DeviceFrame({
         className="nm-device-frame"
         data-layout={isReadingMode ? "fullpage" : undefined}
         style={{
-          border: "2px solid rgba(255,255,255,0.10)",
+          border: "2px solid var(--lk-line-100, rgba(255,255,255,0.10))",
           borderRadius: "14px",
-          backgroundColor: "#0b172e",
-          boxShadow: "0 10px 40px rgba(0,0,0,0.7), inset 0 0 0 1px rgba(255,255,255,0.06)",
+          backgroundColor: "var(--lk-bg, #0b172e)",
+          boxShadow: "0 10px 40px var(--lk-shadow-700, rgba(0,0,0,0.7)), inset 0 0 0 1px var(--lk-glass-060, rgba(255,255,255,0.06))",
           width: "100%",
           display: "flex",
           flexDirection: "column",
@@ -11961,7 +12083,7 @@ function DeviceFrame({
           .nm-device-frame[data-layout="cozy"] {
             background: linear-gradient(135deg, #3a2418 0%, #2a1810 60%, #1f110a 100%) !important;
             border-color: #5C3A1E !important;
-            box-shadow: 0 12px 44px rgba(0,0,0,0.8), inset 0 0 0 4px rgba(92,58,30,0.6), inset 0 0 0 5px rgba(247,201,93,0.18) !important;
+            box-shadow: 0 12px 44px var(--lk-shadow-800, rgba(0,0,0,0.8)), inset 0 0 0 4px rgba(92,58,30,0.6), inset 0 0 0 5px var(--lk-accent-hi-180, rgba(247,201,93,0.18)) !important;
           }
           .nm-device-frame[data-layout="cozy"] > div:first-of-type {
             background: linear-gradient(180deg, #2a1810 0%, #1f110a 100%) !important;
@@ -11971,12 +12093,12 @@ function DeviceFrame({
           /* ── KIDS — bright pastel frame, soft warm border ── */
           .nm-device-frame[data-layout="kids"] {
             background: linear-gradient(135deg, #fde9f1 0%, #e9f5ff 50%, #e9f9ec 100%) !important;
-            border-color: rgba(247,201,93,0.45) !important;
-            box-shadow: 0 12px 44px rgba(247,201,93,0.18), inset 0 0 0 2px rgba(247,201,93,0.18) !important;
+            border-color: var(--lk-accent-hi-450, rgba(247,201,93,0.45)) !important;
+            box-shadow: 0 12px 44px var(--lk-accent-hi-180, rgba(247,201,93,0.18)), inset 0 0 0 2px var(--lk-accent-hi-180, rgba(247,201,93,0.18)) !important;
           }
           .nm-device-frame[data-layout="kids"] > div:first-of-type {
-            background: linear-gradient(180deg, rgba(255,255,255,0.6) 0%, rgba(255,255,255,0.3) 100%) !important;
-            border-bottom: 1px dashed rgba(201,146,42,0.45) !important;
+            background: linear-gradient(180deg, var(--lk-fill-600, rgba(255,255,255,0.6)) 0%, var(--lk-fill-300, rgba(255,255,255,0.3)) 100%) !important;
+            border-bottom: 1px dashed var(--lk-accent-450, rgba(201,146,42,0.45)) !important;
             color: #4a3a1a !important;
           }
           .nm-device-frame[data-layout="kids"] > div:first-of-type * {
@@ -11988,10 +12110,10 @@ function DeviceFrame({
             Rick's Build 32 review #B-5: fully hidden in fullscreen mode. */}
         {!(isReadingMode && readingFullscreen) && (
         <div style={{
-          background: "linear-gradient(180deg, #1B2B4B 0%, #14223e 100%)",
+          background: "linear-gradient(180deg, var(--lk-bar-1, #1B2B4B) 0%, var(--lk-n-14223e, #14223e) 100%)",
           padding: "6px 12px",
           display: "flex", alignItems: "center",
-          borderBottom: "1px solid rgba(201,146,42,0.18)",
+          borderBottom: "1px solid var(--lk-accent-180, rgba(201,146,42,0.18))",
           flexShrink: 0,
           gap: 12,
         }}>
@@ -12003,7 +12125,7 @@ function DeviceFrame({
             <span style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 17, fontWeight: 700, lineHeight: 1, letterSpacing: "-0.005em" }}>
               NeverMiss
             </span>
-            <span className="nm-tagline" style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 8, letterSpacing: "0.18em", opacity: 0.7, fontWeight: 700 }}>
+            <span className="nm-tagline" style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 8, letterSpacing: "0.18em", opacity: 0.7, fontWeight: 700 }}>
               READ · CONNECT · REMEMBER
             </span>
           </div>
@@ -12011,7 +12133,7 @@ function DeviceFrame({
           {/* Center — current mode label, fills remaining space */}
           <div style={{ flex: 1, display: "flex", justifyContent: "center", alignItems: "center", minWidth: 0 }}>
             <span className="nm-mode-label" style={{
-              color: modeHighlight ? AMBER : "rgba(247,240,227,0.5)",
+              color: modeHighlight ? AMBER_T : "var(--lk-ink-500, rgba(247,240,227,0.5))",
               fontFamily: "DM Sans, sans-serif",
               fontSize: 13,
               fontWeight: 800,
@@ -12040,9 +12162,9 @@ function DeviceFrame({
                 onClick={onOpenLibrary}
                 data-testid="topbar-change-book"
                 style={{
-                  background: "rgba(201,146,42,0.14)",
-                  color: AMBER,
-                  border: "1px solid rgba(201,146,42,0.5)",
+                  background: "var(--lk-accent-140, rgba(201,146,42,0.14))",
+                  color: AMBER_T,
+                  border: "1px solid var(--lk-accent-500, rgba(201,146,42,0.5))",
                   borderRadius: 999,
                   padding: "0 16px",
                   minHeight: 42,
@@ -12104,7 +12226,7 @@ function DeviceFrame({
             onStartReading={isNana && onStartReadingSession ? () => { setSaidHello(true); onStartReadingSession(); } : undefined}
           />
         ) : isOnboarding && isNana && restoringSignIn ? (
-          <div data-testid="opening-nevermiss" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", backgroundColor: "#0b172e", color: "rgba(247,240,227,0.7)", fontFamily: "DM Sans, sans-serif", fontSize: 20, fontWeight: 700 }}>
+          <div data-testid="opening-nevermiss" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", backgroundColor: "var(--lk-bg, #0b172e)", color: "var(--lk-ink-700, rgba(247,240,227,0.7))", fontFamily: "DM Sans, sans-serif", fontSize: 20, fontWeight: 700 }}>
             Opening NeverMiss…
           </div>
         ) : isOnboarding ? (
@@ -12141,6 +12263,7 @@ function DeviceFrame({
             handoverCall={handoverCall}
           />
         ) : isHome && isNana ? (
+          <>
           <HomeView
             nanaName={nanaName}
             children={childrenList}
@@ -12162,6 +12285,9 @@ function DeviceFrame({
             onRetry={onHomeRetry}
             familyCode={inviteToken || undefined}
           />
+          {/* Build 43: the one-time "new look" card (returning iPads only). */}
+          <LooksIntro />
+          </>
         ) : isHome && !isNana ? (
           // Perry on home: she's not supposed to navigate Nana's dashboard.
           // This branch hits when polling syncs Perry's mode to "home" while
@@ -12301,6 +12427,7 @@ function DeviceFrame({
             // simultaneously.
             onScroll={onLibraryScroll}
             scrollTop={libraryScrollTop}
+            scrollAnchor={libraryScrollAnchor}
             onFiltersChange={isNana ? onLibraryFilters : undefined}
             mirroredFilters={isNana ? null : libraryFilters}
             nanaName={nanaName}
@@ -12558,7 +12685,7 @@ function DeviceFrame({
                 height: "clamp(80px, 11vw, 108px)",
                 borderRadius: 14,
                 overflow: "hidden",
-                boxShadow: "0 8px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.08)",
+                boxShadow: "0 8px 24px var(--lk-shadow-450, rgba(0,0,0,0.45)), 0 0 0 1px var(--lk-glass-080, rgba(255,255,255,0.08))",
               }}>
                 <FaceVideo
                   person={isNana ? "child" : "nana"}
@@ -12585,9 +12712,9 @@ function DeviceFrame({
           <div data-testid="switch-waiting" role="status" style={{
             position: "absolute", top: 72, left: "50%", transform: "translateX(-50%)", zIndex: 60,
             maxWidth: "calc(100% - 32px)", padding: "9px 18px", borderRadius: 999,
-            background: "linear-gradient(135deg, rgba(201,146,42,0.95), rgba(141,98,28,0.95))",
+            background: "linear-gradient(135deg, var(--lk-accent-950, rgba(201,146,42,0.95)), rgba(141,98,28,0.95))",
             color: NAVY, fontFamily: "DM Sans, sans-serif", fontSize: 16, fontWeight: 800,
-            boxShadow: "0 8px 24px rgba(0,0,0,0.45)", pointerEvents: "none", textAlign: "center",
+            boxShadow: "0 8px 24px var(--lk-shadow-450, rgba(0,0,0,0.45))", pointerEvents: "none", textAlign: "center",
           }}>
             👥 {awaitingReaderName
               ? `${awaitingReaderName}'s turn. Waiting for ${awaitingReaderName} to sign in on the kids' iPad.`
@@ -12676,7 +12803,7 @@ function FullPageReading({
     <div data-bk-layout="fullpage" className="nm-fp" style={{
       display: "flex", flex: 1, minHeight: 0, overflow: "hidden",
       gap: 12, padding: "8px 12px 8px",
-      background: "radial-gradient(900px 520px at 30% -10%, rgba(201,146,42,0.10), transparent 70%), #0b172e",
+      background: "radial-gradient(900px 520px at 30% -10%, var(--lk-accent-100, rgba(201,146,42,0.10)), transparent 70%), var(--lk-bg, #0b172e)",
     }}>
       <style>{`
         .nm-fp-side { width: clamp(210px, 23vw, 290px); }
@@ -12706,8 +12833,8 @@ function FullPageReading({
                 flex: 1, minWidth: 0, height: "100%",
                 display: "flex", alignItems: "center", gap: 12,
                 padding: "6px 22px 6px 10px", borderRadius: 999,
-                background: "rgba(201,146,42,0.12)",
-                border: "1.5px solid rgba(201,146,42,0.55)",
+                background: "var(--lk-accent-120, rgba(201,146,42,0.12))",
+                border: "1.5px solid var(--lk-accent-550, rgba(201,146,42,0.55))",
                 color: CREAM, cursor: "pointer", textAlign: "left",
                 touchAction: "manipulation",
               }}
@@ -12718,7 +12845,7 @@ function FullPageReading({
                 display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 20,
               }}>💬</span>
               <span style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
-                <span style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 12, lineHeight: "14px", fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase" }}>Let's Talk</span>
+                <span style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 12, lineHeight: "14px", fontWeight: 800, letterSpacing: "0.1em", textTransform: "uppercase" }}>Let's Talk</span>
                 {/* Rick's Build 38 review #2: big enough to read at a
                     glance; two lines before it shortens. */}
                 <span data-testid="lets-talk-text" style={{
@@ -12734,8 +12861,8 @@ function FullPageReading({
             <div role="group" aria-label="Turn pages" data-testid="page-pill" style={{
               display: "inline-flex", alignItems: "center", gap: 6, flexShrink: 0,
               padding: 5, borderRadius: 999,
-              background: "rgba(11,23,46,0.9)", border: "1px solid rgba(201,146,42,0.4)",
-              boxShadow: "0 6px 20px rgba(0,0,0,0.4)",
+              background: "var(--lk-bg-900, rgba(11,23,46,0.9))", border: "1px solid var(--lk-accent-400, rgba(201,146,42,0.4))",
+              boxShadow: "0 6px 20px var(--lk-shadow-400, rgba(0,0,0,0.4))",
             }}>
               <button type="button" className="nm-fp-nav" onClick={onPrev} disabled={pos.atStart} aria-label="Previous page" style={navBtnStyle(pos.atStart)}>←</button>
               <span data-testid="page-pill-label" style={{ color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 19, fontWeight: 800, padding: "0 10px", minWidth: 84, textAlign: "center", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
@@ -12783,7 +12910,7 @@ function FullPageReading({
             style={{
               minHeight: 58, borderRadius: 16, border: "none", flexShrink: 0,
               background: !isNana && asked ? "rgba(20,184,166,0.25)" : "linear-gradient(135deg, #2dd4bf 0%, #14b8a6 55%, #0d9488 100%)",
-              color: !isNana && asked ? "#99f6e4" : "#042f2e",
+              color: !isNana && asked ? "var(--lk-lt-99f6e4, #99f6e4)" : "#042f2e",
               fontFamily: "DM Sans, sans-serif", fontSize: 18, fontWeight: 800,
               display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
               boxShadow: "0 6px 18px rgba(20,184,166,0.35)",
@@ -12820,8 +12947,8 @@ function FullPageReading({
 function navBtnStyle(disabled: boolean): React.CSSProperties {
   return {
     width: 52, height: 52, borderRadius: "50%", border: "none",
-    background: disabled ? "rgba(255,255,255,0.07)" : "linear-gradient(135deg, #f7c95d 0%, #C9922A 100%)",
-    color: disabled ? "rgba(247,240,227,0.3)" : NAVY,
+    background: disabled ? "var(--lk-fill-070, rgba(255,255,255,0.07))" : "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 100%)",
+    color: disabled ? "var(--lk-ink-300, rgba(247,240,227,0.3))" : NAVY,
     fontSize: 24, fontWeight: 900, lineHeight: 1,
     display: "inline-flex", alignItems: "center", justifyContent: "center",
     cursor: disabled ? "not-allowed" : "pointer", padding: 0, touchAction: "manipulation",
@@ -12854,13 +12981,13 @@ function RoundButton({ label, ariaLabel, onClick, on, children, testId, disabled
       <span style={{
         width: 52, height: 52, borderRadius: "50%",
         display: "inline-flex", alignItems: "center", justifyContent: "center",
-        background: on === false ? "rgba(239,68,68,0.18)" : "rgba(255,255,255,0.08)",
-        border: `1.5px solid ${on === false ? "rgba(248,113,113,0.7)" : "rgba(255,255,255,0.2)"}`,
-        color: on === false ? "#fca5a5" : CREAM,
+        background: on === false ? "rgba(239,68,68,0.18)" : "var(--lk-fill-080, rgba(255,255,255,0.08))",
+        border: `1.5px solid ${on === false ? "rgba(248,113,113,0.7)" : "var(--lk-line-200, rgba(255,255,255,0.2))"}`,
+        color: on === false ? "var(--lk-bad-t, #fca5a5)" : CREAM,
       }}>
         {children}
       </span>
-      <span style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700 }}>{label}</span>
+      <span style={{ color: "var(--lk-ink-750, rgba(247,240,227,0.75))", fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700 }}>{label}</span>
     </button>
   );
 }
@@ -12937,9 +13064,9 @@ function ReadingPiPSidebar({
         flexDirection: "column",
         gap: 8,
         padding: "10px 8px",
-        backgroundColor: "rgba(11,23,46,0.85)",
-        borderLeft: "1px solid rgba(255,255,255,0.08)",
-        boxShadow: "inset 4px 0 14px rgba(0,0,0,0.25)",
+        backgroundColor: "var(--lk-bg-850, rgba(11,23,46,0.85))",
+        borderLeft: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))",
+        boxShadow: "inset 4px 0 14px var(--lk-shadow-250, rgba(0,0,0,0.25))",
         overflow: "hidden",
         minHeight: 0,
       }}
@@ -13026,9 +13153,9 @@ function MenuButton({ onClick }: { onClick: () => void }) {
       title="Menu"
       style={{
         display: "inline-flex", alignItems: "center", gap: 8,
-        background: `linear-gradient(135deg, #f7c95d 0%, ${AMBER} 60%, #d97706 100%)`,
+        background: `linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, ${AMBER} 60%, var(--lk-accent-2, #d97706) 100%)`,
         color: NAVY,
-        border: "1px solid rgba(11,23,46,0.20)",
+        border: "1px solid var(--lk-bg-200, rgba(11,23,46,0.20))",
         borderRadius: 999,
         padding: "8px 18px 8px 16px",
         fontFamily: "DM Sans, sans-serif",
@@ -13038,7 +13165,7 @@ function MenuButton({ onClick }: { onClick: () => void }) {
         touchAction: "manipulation",
         minHeight: 44,
         flexShrink: 0,
-        boxShadow: "0 4px 12px rgba(201,146,42,0.42), inset 0 1px 0 rgba(255,255,255,0.35)",
+        boxShadow: "0 4px 12px var(--lk-accent-420, rgba(201,146,42,0.42)), inset 0 1px 0 var(--lk-glass-350, rgba(255,255,255,0.35))",
       }}
     >
       <span aria-hidden style={{ display: "inline-flex", flexDirection: "column", gap: 3 }}>
@@ -13075,10 +13202,10 @@ function NavStrip(_props: {
  * ────────────────────────────────────────────────────────── */
 
 const CHILD_AVATAR_PALETTE = [
-  { bg: "rgba(96,165,250,0.22)",  border: "#60a5fa", text: "#60a5fa" }, // blue
-  { bg: "rgba(167,139,250,0.22)", border: "#a78bfa", text: "#a78bfa" }, // violet
-  { bg: "rgba(34,197,94,0.22)",   border: "#22c55e", text: "#22c55e" }, // green
-  { bg: "rgba(247,201,93,0.22)",  border: "#f7c95d", text: "#f7c95d" }, // amber
+  { bg: "rgba(96,165,250,0.22)",  border: "#60a5fa", text: "var(--lk-info-t, #60a5fa)" }, // blue
+  { bg: "rgba(167,139,250,0.22)", border: "#a78bfa", text: "var(--lk-violet-t, #a78bfa)" }, // violet
+  { bg: "rgba(34,197,94,0.22)",   border: "#22c55e", text: "var(--lk-lt-22c55e, #22c55e)" }, // green
+  { bg: "var(--lk-accent-hi-220, rgba(247,201,93,0.22))",  border: "var(--lk-accent-hi, #f7c95d)", text: "var(--lk-accent-hi-t, #f7c95d)" }, // amber
   { bg: "rgba(239,68,68,0.22)",   border: "#ef4444", text: "#ef4444" }, // red
 ];
 function paletteForChild(id: string) {
@@ -13135,12 +13262,12 @@ function ChildPicker({
               gap: isGrid ? 6 : 8,
               padding: isGrid ? "10px 8px" : "6px 12px 6px 6px",
               borderRadius: isGrid ? 14 : 999,
-              backgroundColor: active ? "rgba(201,146,42,0.12)" : "rgba(255,255,255,0.04)",
-              border: `1.5px solid ${active ? AMBER : "rgba(255,255,255,0.12)"}`,
+              backgroundColor: active ? "var(--lk-accent-120, rgba(201,146,42,0.12))" : "var(--lk-fill-040, rgba(255,255,255,0.04))",
+              border: `1.5px solid ${active ? AMBER : "var(--lk-line-120, rgba(255,255,255,0.12))"}`,
               cursor: "pointer",
               flexShrink: 0,
               minHeight: 44,
-              boxShadow: active ? "0 4px 14px rgba(201,146,42,0.25)" : "none",
+              boxShadow: active ? "0 4px 14px var(--lk-accent-250, rgba(201,146,42,0.25))" : "none",
               transition: "all 160ms ease",
               touchAction: "manipulation",
             }}
@@ -13161,7 +13288,7 @@ function ChildPicker({
               {initial}
             </span>
             <span style={{
-              color: active ? AMBER : CREAM,
+              color: active ? AMBER_T : CREAM,
               fontFamily: "DM Sans, sans-serif",
               fontSize: 13, fontWeight: 700,
               whiteSpace: "nowrap",
@@ -13183,8 +13310,8 @@ function ChildPicker({
           padding: isGrid ? "10px 8px" : "6px 14px 6px 8px",
           borderRadius: isGrid ? 14 : 999,
           backgroundColor: "transparent",
-          border: "1.5px dashed rgba(247,201,93,0.45)",
-          color: AMBER,
+          border: "1.5px dashed var(--lk-accent-hi-450, rgba(247,201,93,0.45))",
+          color: AMBER_T,
           cursor: "pointer",
           flexShrink: 0,
           minHeight: 44,
@@ -13240,10 +13367,10 @@ function HelpToggle({ size = "normal" }: { size?: "normal" | "compact" }) {
   const pad = size === "compact" ? "3px 10px" : "5px 14px";
   return (
     <div style={{ display: "flex", alignItems: "center", gap: "8px", justifyContent: "center" }}>
-      <span style={{ color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: fs, letterSpacing: "0.06em" }}>Need help?</span>
-      <div style={{ display: "flex", backgroundColor: "rgba(255,255,255,0.08)", borderRadius: "20px", padding: "2px" }}>
-        <button onClick={() => toggle(true)} style={{ padding: pad, borderRadius: "18px", border: "none", backgroundColor: on ? AMBER : "transparent", color: on ? NAVY : "rgba(247,240,227,0.35)", fontFamily: "DM Sans, sans-serif", fontSize: fs, fontWeight: 700, cursor: "pointer", transition: "all 0.2s" }}>Yes</button>
-        <button onClick={() => toggle(false)} style={{ padding: pad, borderRadius: "18px", border: "none", backgroundColor: !on ? AMBER : "transparent", color: !on ? NAVY : "rgba(247,240,227,0.35)", fontFamily: "DM Sans, sans-serif", fontSize: fs, fontWeight: 700, cursor: "pointer", transition: "all 0.2s" }}>No</button>
+      <span style={{ color: "var(--lk-ink-500, rgba(247,240,227,0.5))", fontFamily: "DM Sans, sans-serif", fontSize: fs, letterSpacing: "0.06em" }}>Need help?</span>
+      <div style={{ display: "flex", backgroundColor: "var(--lk-fill-080, rgba(255,255,255,0.08))", borderRadius: "20px", padding: "2px" }}>
+        <button onClick={() => toggle(true)} style={{ padding: pad, borderRadius: "18px", border: "none", backgroundColor: on ? AMBER : "transparent", color: on ? NAVY : "var(--lk-ink-350, rgba(247,240,227,0.35))", fontFamily: "DM Sans, sans-serif", fontSize: fs, fontWeight: 700, cursor: "pointer", transition: "all 0.2s" }}>Yes</button>
+        <button onClick={() => toggle(false)} style={{ padding: pad, borderRadius: "18px", border: "none", backgroundColor: !on ? AMBER : "transparent", color: !on ? NAVY : "var(--lk-ink-350, rgba(247,240,227,0.35))", fontFamily: "DM Sans, sans-serif", fontSize: fs, fontWeight: 700, cursor: "pointer", transition: "all 0.2s" }}>No</button>
       </div>
     </div>
   );
@@ -13297,49 +13424,49 @@ function PhaseIntroCard({
   return (
     <div style={{
       position: "absolute", inset: 0, zIndex: 50,
-      backgroundColor: "rgba(11,23,46,0.88)",
+      backgroundColor: "var(--lk-bg-880, rgba(11,23,46,0.88))",
       display: "flex", alignItems: "center", justifyContent: "center",
       animation: closing
         ? "phase-intro-fadeout 0.22s ease-in forwards"
         : "phase-intro-fade 0.4s ease-out",
     }}>
       <div style={{
-        backgroundColor: "#162240",
-        border: "1px solid rgba(201,146,42,0.4)",
+        backgroundColor: "var(--lk-n-162240, #162240)",
+        border: "1px solid var(--lk-accent-400, rgba(201,146,42,0.4))",
         borderRadius: "24px",
         padding: "28px 40px 32px",
         maxWidth: "480px",
         width: "90%",
         textAlign: "center",
-        boxShadow: "0 24px 80px rgba(0,0,0,0.65)",
+        boxShadow: "0 24px 80px var(--lk-shadow-650, rgba(0,0,0,0.65))",
         animation: closing
           ? "phase-card-down 0.22s ease-in forwards"
           : "phase-card-up 0.42s cubic-bezier(0.22,1,0.36,1)",
       }}>
-        <div style={{ color: "rgba(201,146,42,0.65)", fontFamily: "DM Sans, sans-serif", fontSize: "12px", fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase", marginBottom: "18px" }}>
+        <div style={{ color: "var(--lk-accent-t-650, rgba(201,146,42,0.65))", fontFamily: "DM Sans, sans-serif", fontSize: "12px", fontWeight: 800, letterSpacing: "0.14em", textTransform: "uppercase", marginBottom: "18px" }}>
           WHAT'S COMING NEXT
         </div>
         <div style={{ fontSize: "68px", lineHeight: 1, marginBottom: "12px" }}>{info.emoji}</div>
-        <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "30px", fontWeight: 700, lineHeight: 1.2, marginBottom: "12px" }}>{info.title}</div>
-        <div style={{ width: "48px", height: "2px", backgroundColor: "rgba(201,146,42,0.35)", margin: "0 auto 16px" }} />
-        <div style={{ color: "rgba(247,240,227,0.88)", fontFamily: "DM Sans, sans-serif", fontSize: "17px", lineHeight: 1.6, marginBottom: "22px" }}>{description}</div>
+        <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: "30px", fontWeight: 700, lineHeight: 1.2, marginBottom: "12px" }}>{info.title}</div>
+        <div style={{ width: "48px", height: "2px", backgroundColor: "var(--lk-accent-350, rgba(201,146,42,0.35))", margin: "0 auto 16px" }} />
+        <div style={{ color: "var(--lk-ink-880, rgba(247,240,227,0.88))", fontFamily: "DM Sans, sans-serif", fontSize: "17px", lineHeight: 1.6, marginBottom: "22px" }}>{description}</div>
         <div style={{ display: "flex", gap: "10px", justifyContent: "center", flexWrap: "wrap" }}>
           <button
             onClick={() => close("session")}
             disabled={closing}
-            style={{ backgroundColor: AMBER, color: NAVY, border: "none", borderRadius: "50px", padding: "14px 30px", fontFamily: "DM Sans, sans-serif", fontWeight: 800, fontSize: "15px", letterSpacing: "0.03em", cursor: closing ? "default" : "pointer", boxShadow: "0 4px 20px rgba(201,146,42,0.35)", opacity: closing ? 0.7 : 1 }}
+            style={{ backgroundColor: AMBER, color: NAVY, border: "none", borderRadius: "50px", padding: "14px 30px", fontFamily: "DM Sans, sans-serif", fontWeight: 800, fontSize: "15px", letterSpacing: "0.03em", cursor: closing ? "default" : "pointer", boxShadow: "0 4px 20px var(--lk-accent-350, rgba(201,146,42,0.35))", opacity: closing ? 0.7 : 1 }}
           >
             Got it
           </button>
           <button
             onClick={() => close("forever")}
             disabled={closing}
-            style={{ backgroundColor: "rgba(255,255,255,0.06)", color: "rgba(247,240,227,0.78)", border: "1px solid rgba(255,255,255,0.18)", borderRadius: "50px", padding: "14px 22px", fontFamily: "DM Sans, sans-serif", fontWeight: 700, fontSize: "13px", letterSpacing: "0.02em", cursor: closing ? "default" : "pointer", opacity: closing ? 0.7 : 1 }}
+            style={{ backgroundColor: "var(--lk-fill-060, rgba(255,255,255,0.06))", color: "var(--lk-ink-780, rgba(247,240,227,0.78))", border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))", borderRadius: "50px", padding: "14px 22px", fontFamily: "DM Sans, sans-serif", fontWeight: 700, fontSize: "13px", letterSpacing: "0.02em", cursor: closing ? "default" : "pointer", opacity: closing ? 0.7 : 1 }}
           >
             Don't show again
           </button>
         </div>
-        <div style={{ color: "rgba(247,240,227,0.45)", fontFamily: "DM Sans, sans-serif", fontSize: "11px", marginTop: "14px", letterSpacing: "0.02em" }}>
+        <div style={{ color: "var(--lk-ink-450, rgba(247,240,227,0.45))", fontFamily: "DM Sans, sans-serif", fontSize: "11px", marginTop: "14px", letterSpacing: "0.02em" }}>
           Turn help back on anytime from the corner toggle or Settings.
         </div>
       </div>
@@ -13432,7 +13559,7 @@ function ReactionsDropdown({ onReact, autoCloseMs, variant = "pill" }: { onReact
             border: "1.5px solid rgba(251,191,36,0.6)",
             fontSize: 24,
           }}>💛</span>
-          <span style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700 }}>React</span>
+          <span style={{ color: "var(--lk-ink-750, rgba(247,240,227,0.75))", fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700 }}>React</span>
         </button>
       ) : (
       <button
@@ -13448,7 +13575,7 @@ function ReactionsDropdown({ onReact, autoCloseMs, variant = "pill" }: { onReact
           borderRadius: 999,
           background: "rgba(251,191,36,0.14)",
           border: "1px solid rgba(251,191,36,0.45)",
-          color: "#fbbf24",
+          color: "var(--lk-warn-t, #fbbf24)",
           fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700,
           cursor: "pointer", letterSpacing: "0.02em",
           flexShrink: 0,
@@ -13470,10 +13597,10 @@ function ReactionsDropdown({ onReact, autoCloseMs, variant = "pill" }: { onReact
             zIndex: 9999,
             display: "flex", gap: 6,
             padding: 8,
-            backgroundColor: "#0f1d36",
+            backgroundColor: "var(--lk-n-0f1d36, #0f1d36)",
             border: "1px solid rgba(251,191,36,0.55)",
             borderRadius: 14,
-            boxShadow: "0 14px 36px rgba(0,0,0,0.7), 0 0 0 1px rgba(0,0,0,0.6)",
+            boxShadow: "0 14px 36px var(--lk-shadow-700, rgba(0,0,0,0.7)), 0 0 0 1px var(--lk-shadow-600, rgba(0,0,0,0.6))",
           }}
         >
           {REACTIONS.map(({ key, accent }) => (
@@ -13484,9 +13611,9 @@ function ReactionsDropdown({ onReact, autoCloseMs, variant = "pill" }: { onReact
               aria-label={`Send ${getReactionLabel(key)}`}
               style={{
                 width: 44, height: 44, borderRadius: 12,
-                border: `1px solid color-mix(in srgb, ${accent} 32%, rgba(255,255,255,0.10))`,
-                backgroundImage: `linear-gradient(155deg, color-mix(in srgb, ${accent} 18%, rgba(255,255,255,0.04)) 0%, rgba(255,255,255,0.04) 70%)`,
-                backgroundColor: "rgba(255,255,255,0.04)",
+                border: `1px solid color-mix(in srgb, ${accent} 32%, var(--lk-line-100, rgba(255,255,255,0.10)))`,
+                backgroundImage: `linear-gradient(155deg, color-mix(in srgb, ${accent} 18%, var(--lk-fill-040, rgba(255,255,255,0.04))) 0%, var(--lk-fill-040, rgba(255,255,255,0.04)) 70%)`,
+                backgroundColor: "var(--lk-fill-040, rgba(255,255,255,0.04))",
                 color: "#fff", fontSize: 22, lineHeight: 1,
                 cursor: "pointer",
                 display: "inline-flex", alignItems: "center", justifyContent: "center",
@@ -13604,8 +13731,8 @@ function BookRequestModal({
   const busy = submittingKey !== null;
   const inputStyle: React.CSSProperties = {
     width: "100%",
-    background: "rgba(255,255,255,0.06)",
-    border: "1px solid rgba(255,255,255,0.18)",
+    background: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+    border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))",
     borderRadius: 12,
     padding: "12px 14px",
     color: CREAM,
@@ -13613,20 +13740,20 @@ function BookRequestModal({
     outline: "none",
   };
   const labelStyle: React.CSSProperties = {
-    color: "rgba(247,240,227,0.7)", fontFamily: "DM Sans, sans-serif",
+    color: "var(--lk-ink-700, rgba(247,240,227,0.7))", fontFamily: "DM Sans, sans-serif",
     fontSize: 12, fontWeight: 800, letterSpacing: "0.10em", textTransform: "uppercase",
     display: "block", marginBottom: 6,
   };
   const pillBtn = (primary: boolean): React.CSSProperties => ({
-    background: primary ? "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)" : "transparent",
-    color: primary ? NAVY : "rgba(247,240,227,0.8)",
-    border: primary ? "none" : "1px solid rgba(255,255,255,0.22)",
+    background: primary ? "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)" : "transparent",
+    color: primary ? NAVY : "var(--lk-ink-800, rgba(247,240,227,0.8))",
+    border: primary ? "none" : "1px solid var(--lk-line-220, rgba(255,255,255,0.22))",
     borderRadius: 999,
     padding: "10px 20px",
     fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 800, letterSpacing: "0.02em",
     cursor: "pointer",
     minHeight: 48, touchAction: "manipulation",
-    boxShadow: primary ? "0 6px 16px rgba(201,146,42,0.42)" : "none",
+    boxShadow: primary ? "0 6px 16px var(--lk-accent-420, rgba(201,146,42,0.42))" : "none",
     whiteSpace: "nowrap",
   });
 
@@ -13637,7 +13764,7 @@ function BookRequestModal({
       onClick={busy ? undefined : onClose}
       style={{
         position: "fixed", inset: 0, zIndex: 220,
-        background: "rgba(8,15,30,0.82)",
+        background: "var(--lk-deep-820, rgba(8,15,30,0.82))",
         display: "flex", alignItems: "center", justifyContent: "center",
         padding: 24,
         animation: "phase-intro-fade 0.2s ease-out",
@@ -13649,21 +13776,21 @@ function BookRequestModal({
           width: "min(620px, 100%)",
           maxHeight: "calc(100% - 16px)",
           display: "flex", flexDirection: "column",
-          background: "linear-gradient(180deg, #14223e 0%, #0b172e 100%)",
-          border: "1px solid rgba(201,146,42,0.45)",
+          background: "linear-gradient(180deg, var(--lk-n-14223e, #14223e) 0%, var(--lk-bg, #0b172e) 100%)",
+          border: "1px solid var(--lk-accent-450, rgba(201,146,42,0.45))",
           borderRadius: 18,
           padding: "22px 22px 18px",
-          boxShadow: "0 24px 60px rgba(0,0,0,0.6)",
+          boxShadow: "0 24px 60px var(--lk-shadow-600, rgba(0,0,0,0.6))",
           animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
         }}
       >
         {done ? (
           <div style={{ textAlign: "center", padding: "10px 0 6px" }}>
             <div style={{ fontSize: 44, marginBottom: 8 }}>📮</div>
-            <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 21, fontWeight: 700, marginBottom: 6 }}>
+            <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: 21, fontWeight: 700, marginBottom: 6 }}>
               Request sent!
             </div>
-            <div style={{ color: "rgba(247,240,227,0.75)", fontSize: 15, lineHeight: 1.55 }}>
+            <div style={{ color: "var(--lk-ink-750, rgba(247,240,227,0.75))", fontSize: 15, lineHeight: 1.55 }}>
               We'll let you know as soon as <em>{done}</em> is in your library.
             </div>
           </div>
@@ -13673,7 +13800,7 @@ function BookRequestModal({
               <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 22, fontWeight: 700, marginBottom: 4 }}>
                 Request a book
               </div>
-              <div style={{ color: "rgba(247,240,227,0.65)", fontSize: 14, lineHeight: 1.5 }}>
+              <div style={{ color: "var(--lk-ink-650, rgba(247,240,227,0.65))", fontSize: 14, lineHeight: 1.5 }}>
                 {manual
                   ? "Tell us the title and we'll try to add it. You'll get a notice when it's ready."
                   : "Search thousands of free classic books. Pick one and we'll add it to your library."}
@@ -13693,13 +13820,13 @@ function BookRequestModal({
                 />
                 <div style={{ flex: 1, minHeight: 0, overflowY: "auto", marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
                   {searching && (
-                    <div style={{ color: "rgba(247,240,227,0.6)", fontSize: 14, padding: "8px 2px" }}>Searching…</div>
+                    <div style={{ color: "var(--lk-ink-600, rgba(247,240,227,0.6))", fontSize: 14, padding: "8px 2px" }}>Searching…</div>
                   )}
                   {!searching && searchErr && (
-                    <div style={{ color: "#fca5a5", fontSize: 14, fontWeight: 600, padding: "8px 2px" }}>{searchErr}</div>
+                    <div style={{ color: "var(--lk-bad-t, #fca5a5)", fontSize: 14, fontWeight: 600, padding: "8px 2px" }}>{searchErr}</div>
                   )}
                   {!searching && !searchErr && results && results.length === 0 && (
-                    <div style={{ color: "rgba(247,240,227,0.65)", fontSize: 14, padding: "8px 2px" }}>
+                    <div style={{ color: "var(--lk-ink-650, rgba(247,240,227,0.65))", fontSize: 14, padding: "8px 2px" }}>
                       No free classics match "{query.trim()}". You can type it in below and we'll look for it.
                     </div>
                   )}
@@ -13709,13 +13836,13 @@ function BookRequestModal({
                       <div key={r.epubUrl} style={{
                         display: "flex", alignItems: "center", gap: 12,
                         padding: 10,
-                        background: "rgba(255,255,255,0.04)",
-                        border: "1px solid rgba(255,255,255,0.08)",
+                        background: "var(--lk-fill-040, rgba(255,255,255,0.04))",
+                        border: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))",
                         borderRadius: 12,
                       }}>
                         <div style={{
                           width: 48, height: 72, flexShrink: 0, borderRadius: 6, overflow: "hidden",
-                          background: "rgba(201,146,42,0.18)",
+                          background: "var(--lk-accent-180, rgba(201,146,42,0.18))",
                           display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22,
                         }}>
                           {r.coverUrl
@@ -13724,13 +13851,13 @@ function BookRequestModal({
                         </div>
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ color: CREAM, fontFamily: "Merriweather, serif", fontSize: 15, fontWeight: 700, lineHeight: 1.3, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{r.title}</div>
-                          {r.author && <div style={{ color: "rgba(247,240,227,0.7)", fontSize: 13, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.author}</div>}
-                          <div style={{ color: "rgba(247,240,227,0.45)", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", marginTop: 3 }}>
+                          {r.author && <div style={{ color: "var(--lk-ink-700, rgba(247,240,227,0.7))", fontSize: 13, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.author}</div>}
+                          <div style={{ color: "var(--lk-ink-450, rgba(247,240,227,0.45))", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", marginTop: 3 }}>
                             {r.source === "gutenberg" ? "Project Gutenberg" : "Standard Ebooks"}
                           </div>
                         </div>
                         {inLibrary ? (
-                          <span style={{ flexShrink: 0, color: "#86efac", fontSize: 13, fontWeight: 800, padding: "0 6px" }}>✓ In your library</span>
+                          <span style={{ flexShrink: 0, color: "var(--lk-ok-t, #86efac)", fontSize: 13, fontWeight: 800, padding: "0 6px" }}>✓ In your library</span>
                         ) : (
                           <button
                             onClick={() => requestResult(r)}
@@ -13763,13 +13890,13 @@ function BookRequestModal({
             )}
 
             {err && (
-              <div style={{ marginTop: 10, color: "#fca5a5", fontSize: 14, fontWeight: 600, flexShrink: 0 }}>{err}</div>
+              <div style={{ marginTop: 10, color: "var(--lk-bad-t, #fca5a5)", fontSize: 14, fontWeight: 600, flexShrink: 0 }}>{err}</div>
             )}
             <div style={{ display: "flex", gap: 10, justifyContent: "space-between", alignItems: "center", marginTop: 16, flexWrap: "wrap", flexShrink: 0 }}>
               <button
                 onClick={() => { setErr(""); setManual(m => !m); if (!manual && query.trim()) setTitle(query.trim()); }}
                 disabled={busy}
-                style={{ background: "transparent", border: "none", color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 14, fontWeight: 700, cursor: "pointer", padding: "8px 2px", minHeight: 44, touchAction: "manipulation", textDecoration: "underline" }}
+                style={{ background: "transparent", border: "none", color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 14, fontWeight: 700, cursor: "pointer", padding: "8px 2px", minHeight: 44, touchAction: "manipulation", textDecoration: "underline" }}
               >
                 {manual ? "← Search free classics instead" : "Can't find it? Type it in"}
               </button>
@@ -13867,8 +13994,8 @@ function FeedbackModal({
 
   const inputStyle: React.CSSProperties = {
     width: "100%",
-    background: "rgba(255,255,255,0.06)",
-    border: "1px solid rgba(255,255,255,0.18)",
+    background: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+    border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))",
     borderRadius: 12,
     padding: "11px 14px",
     color: CREAM,
@@ -13877,7 +14004,7 @@ function FeedbackModal({
     boxSizing: "border-box",
   };
   const labelStyle: React.CSSProperties = {
-    color: "rgba(247,240,227,0.7)", fontFamily: "DM Sans, sans-serif",
+    color: "var(--lk-ink-700, rgba(247,240,227,0.7))", fontFamily: "DM Sans, sans-serif",
     fontSize: 11, fontWeight: 800, letterSpacing: "0.10em", textTransform: "uppercase",
     display: "block", marginBottom: 6,
   };
@@ -13897,7 +14024,7 @@ function FeedbackModal({
       onClick={submitting ? undefined : onClose}
       style={{
         position: "fixed", inset: 0, zIndex: 220,
-        background: "rgba(8,15,30,0.82)",
+        background: "var(--lk-deep-820, rgba(8,15,30,0.82))",
         display: "flex", alignItems: "center", justifyContent: "center",
         padding: 24,
         animation: "phase-intro-fade 0.2s ease-out",
@@ -13907,11 +14034,11 @@ function FeedbackModal({
         onClick={(e) => e.stopPropagation()}
         style={{
           width: "min(540px, 100%)",
-          background: "linear-gradient(180deg, #14223e 0%, #0b172e 100%)",
-          border: "1px solid rgba(201,146,42,0.45)",
+          background: "linear-gradient(180deg, var(--lk-n-14223e, #14223e) 0%, var(--lk-bg, #0b172e) 100%)",
+          border: "1px solid var(--lk-accent-450, rgba(201,146,42,0.45))",
           borderRadius: 18,
           padding: "22px 22px 20px",
-          boxShadow: "0 24px 60px rgba(0,0,0,0.6)",
+          boxShadow: "0 24px 60px var(--lk-shadow-600, rgba(0,0,0,0.6))",
           animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
           maxHeight: "90vh", overflowY: "auto",
         }}
@@ -13919,10 +14046,10 @@ function FeedbackModal({
         {done ? (
           <div style={{ textAlign: "center", padding: "12px 0 8px" }}>
             <div style={{ fontSize: 44, marginBottom: 8 }}>📬</div>
-            <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: 20, fontWeight: 700, marginBottom: 6 }}>
+            <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: 20, fontWeight: 700, marginBottom: 6 }}>
               Thank you{senderName ? `, ${senderName}` : ""}!
             </div>
-            <div style={{ color: "rgba(247,240,227,0.7)", fontSize: 13, lineHeight: 1.55 }}>
+            <div style={{ color: "var(--lk-ink-700, rgba(247,240,227,0.7))", fontSize: 13, lineHeight: 1.55 }}>
               Your feedback went straight to Rick. Every message shapes the app.
             </div>
           </div>
@@ -13932,7 +14059,7 @@ function FeedbackModal({
               <div style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 21, fontWeight: 700, marginBottom: 4 }}>
                 Send feedback
               </div>
-              <div style={{ color: "rgba(247,240,227,0.6)", fontSize: 12.5, lineHeight: 1.55 }}>
+              <div style={{ color: "var(--lk-ink-600, rgba(247,240,227,0.6))", fontSize: 12.5, lineHeight: 1.55 }}>
                 Anything you noticed, anything you wish worked differently, anything that made you smile. Every note helps.
               </div>
             </div>
@@ -13949,9 +14076,9 @@ function FeedbackModal({
                         style={{
                           display: "inline-flex", alignItems: "center", gap: 6,
                           padding: "7px 12px", borderRadius: 999,
-                          background: active ? "rgba(201,146,42,0.20)" : "rgba(255,255,255,0.05)",
-                          border: `1px solid ${active ? "rgba(201,146,42,0.55)" : "rgba(255,255,255,0.14)"}`,
-                          color: active ? AMBER : "rgba(247,240,227,0.75)",
+                          background: active ? "var(--lk-accent-200, rgba(201,146,42,0.20))" : "var(--lk-fill-050, rgba(255,255,255,0.05))",
+                          border: `1px solid ${active ? "var(--lk-accent-550, rgba(201,146,42,0.55))" : "var(--lk-line-140, rgba(255,255,255,0.14))"}`,
+                          color: active ? AMBER_T : "var(--lk-ink-750, rgba(247,240,227,0.75))",
                           fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700,
                           cursor: "pointer", touchAction: "manipulation",
                         }}
@@ -13985,13 +14112,13 @@ function FeedbackModal({
                 />
               </div>
               {pageContext && (
-                <div style={{ color: "rgba(247,240,227,0.4)", fontSize: 10, fontStyle: "italic" }}>
+                <div style={{ color: "var(--lk-ink-400, rgba(247,240,227,0.4))", fontSize: 10, fontStyle: "italic" }}>
                   We'll also send the app version and the screen you're on so Rick can find the issue faster.
                 </div>
               )}
             </div>
             {err && (
-              <div style={{ marginTop: 10, color: "#fca5a5", fontSize: 12, fontWeight: 600 }}>{err}</div>
+              <div style={{ marginTop: 10, color: "var(--lk-bad-t, #fca5a5)", fontSize: 12, fontWeight: 600 }}>{err}</div>
             )}
             <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 18 }}>
               <button
@@ -13999,8 +14126,8 @@ function FeedbackModal({
                 disabled={submitting}
                 style={{
                   background: "transparent",
-                  color: "rgba(247,240,227,0.7)",
-                  border: "1px solid rgba(255,255,255,0.20)",
+                  color: "var(--lk-ink-700, rgba(247,240,227,0.7))",
+                  border: "1px solid var(--lk-line-200, rgba(255,255,255,0.20))",
                   borderRadius: 999,
                   padding: "10px 20px",
                   fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 700,
@@ -14015,7 +14142,7 @@ function FeedbackModal({
                 onClick={submit}
                 disabled={submitting || message.trim().length < 5}
                 style={{
-                  background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+                  background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)",
                   color: NAVY,
                   border: "none",
                   borderRadius: 999,
@@ -14023,7 +14150,7 @@ function FeedbackModal({
                   fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 800, letterSpacing: "0.02em",
                   cursor: submitting || message.trim().length < 5 ? "not-allowed" : "pointer",
                   minHeight: 44, touchAction: "manipulation",
-                  boxShadow: "0 6px 16px rgba(201,146,42,0.42)",
+                  boxShadow: "0 6px 16px var(--lk-accent-420, rgba(201,146,42,0.42))",
                   opacity: submitting || message.trim().length < 5 ? 0.6 : 1,
                 }}
               >
@@ -14061,17 +14188,17 @@ function PerryWelcomeOverlay({ name }: { name: string }) {
   return (
     <div style={{
       position: "fixed", inset: 0, zIndex: 9999,
-      backgroundColor: "rgba(11,23,46,0.92)", backdropFilter: "blur(6px)",
+      backgroundColor: "var(--lk-bg-920, rgba(11,23,46,0.92))", backdropFilter: "blur(6px)",
       display: "flex", alignItems: "center", justifyContent: "center",
       animation: "phase-intro-fade 0.3s ease-out",
       pointerEvents: "auto",
     }}>
       <div style={{ textAlign: "center", animation: "phase-card-up 0.45s cubic-bezier(0.22,1,0.36,1)" }}>
         <div style={{ fontSize: "72px", marginBottom: "14px", animation: "bob 1.4s ease-in-out infinite" }}>✨</div>
-        <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "32px", fontWeight: 700, marginBottom: "8px" }}>
+        <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: "32px", fontWeight: 700, marginBottom: "8px" }}>
           You're in{name ? `, ${name}` : ""}!
         </div>
-        <div style={{ color: "rgba(247,240,227,0.7)", fontFamily: "DM Sans, sans-serif", fontSize: "15px" }}>
+        <div style={{ color: "var(--lk-ink-700, rgba(247,240,227,0.7))", fontFamily: "DM Sans, sans-serif", fontSize: "15px" }}>
           Nana's almost ready…
         </div>
       </div>
@@ -14083,17 +14210,17 @@ function SessionBeginOverlay() {
   return (
     <div style={{
       position: "fixed", inset: 0, zIndex: 9999,
-      backgroundColor: "rgba(11,23,46,0.95)", backdropFilter: "blur(8px)",
+      backgroundColor: "var(--lk-bg-950, rgba(11,23,46,0.95))", backdropFilter: "blur(8px)",
       display: "flex", alignItems: "center", justifyContent: "center",
       animation: "phase-intro-fade 0.25s ease-out",
       pointerEvents: "auto",
     }}>
       <div style={{ textAlign: "center", animation: "phase-card-up 0.4s cubic-bezier(0.22,1,0.36,1)" }}>
         <div style={{ fontSize: "84px", marginBottom: "16px", animation: "bob 1.4s ease-in-out infinite" }}>📖</div>
-        <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "30px", fontWeight: 700, marginBottom: "8px" }}>
+        <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: "30px", fontWeight: 700, marginBottom: "8px" }}>
           Beginning your reading time…
         </div>
-        <div style={{ color: "rgba(247,240,227,0.65)", fontFamily: "DM Sans, sans-serif", fontSize: "13px", letterSpacing: "0.04em" }}>
+        <div style={{ color: "var(--lk-ink-650, rgba(247,240,227,0.65))", fontFamily: "DM Sans, sans-serif", fontSize: "13px", letterSpacing: "0.04em" }}>
           Take a breath together.
         </div>
       </div>
@@ -14105,17 +14232,17 @@ function PartnerLeftOverlay({ nanaName }: { nanaName: string }) {
   return (
     <div style={{
       position: "fixed", inset: 0, zIndex: 9999,
-      backgroundColor: "rgba(11,23,46,0.94)", backdropFilter: "blur(8px)",
+      backgroundColor: "var(--lk-bg-940, rgba(11,23,46,0.94))", backdropFilter: "blur(8px)",
       display: "flex", alignItems: "center", justifyContent: "center",
       animation: "phase-intro-fade 0.3s ease-out",
       pointerEvents: "auto",
     }}>
       <div style={{ textAlign: "center", maxWidth: 320, padding: "0 24px", animation: "phase-card-up 0.45s cubic-bezier(0.22,1,0.36,1)" }}>
         <div style={{ fontSize: "64px", marginBottom: "14px" }}>👋</div>
-        <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "26px", fontWeight: 700, marginBottom: "10px", lineHeight: 1.3 }}>
+        <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: "26px", fontWeight: 700, marginBottom: "10px", lineHeight: 1.3 }}>
           {nanaName || "Nana"} stepped away
         </div>
-        <div style={{ color: "rgba(247,240,227,0.75)", fontFamily: "DM Sans, sans-serif", fontSize: "14px", lineHeight: 1.55 }}>
+        <div style={{ color: "var(--lk-ink-750, rgba(247,240,227,0.75))", fontFamily: "DM Sans, sans-serif", fontSize: "14px", lineHeight: 1.55 }}>
           Taking a break together. You can rejoin anytime — just tap your PIN when {nanaName || "Nana"}'s back.
         </div>
       </div>
@@ -14127,19 +14254,19 @@ function PartnerLeftOverlay({ nanaName }: { nanaName: string }) {
 
 function WhoIsReadingScreen({ onSelect }: { onSelect: (view: "nana" | "perry" | "both") => void }) {
   return (
-    <div style={{ height: "100dvh", backgroundColor: NAVY, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "40px 24px", fontFamily: "DM Sans, sans-serif", boxSizing: "border-box" }}>
+    <div style={{ height: "100dvh", backgroundColor: NAVY_FILL, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "40px 24px", fontFamily: "DM Sans, sans-serif", boxSizing: "border-box" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=DM+Sans:wght@400;500;700&display=swap');
         @keyframes splash-float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-10px)} }
         @keyframes splash-in    { from{opacity:0;transform:translateY(24px)} to{opacity:1;transform:translateY(0)} }
-        .splash-btn:hover .splash-avatar { transform:scale(1.07) !important; box-shadow:0 14px 52px rgba(0,0,0,0.6) !important; }
+        .splash-btn:hover .splash-avatar { transform:scale(1.07) !important; box-shadow:0 14px 52px var(--lk-shadow-600, rgba(0,0,0,0.6)) !important; }
         .splash-btn:active .splash-avatar { transform:scale(0.96) !important; }
       `}</style>
 
       <div style={{ textAlign: "center", marginBottom: "44px", animation: "splash-in 0.5s ease-out" }}>
         <div style={{ fontSize: "48px", marginBottom: "10px" }}>📖</div>
         <h1 style={{ color: "white", fontFamily: "Playfair Display, serif", fontSize: "clamp(28px, 6vw, 44px)", fontWeight: 700, margin: "0 0 8px" }}>NeverMiss</h1>
-        <p style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: "11px", letterSpacing: "0.2em", margin: 0 }}>READ · CONNECT · REMEMBER</p>
+        <p style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: "11px", letterSpacing: "0.2em", margin: 0 }}>READ · CONNECT · REMEMBER</p>
       </div>
 
       <h2 style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: "clamp(20px, 4vw, 30px)", fontWeight: 400, margin: "0 0 44px", animation: "splash-in 0.5s ease-out 0.1s both" }}>
@@ -14153,7 +14280,7 @@ function WhoIsReadingScreen({ onSelect }: { onSelect: (view: "nana" | "perry" | 
           title={getRoleLabel("nana")}
           subtitle="GRANDPARENT"
           accent="rgba(201,146,42,0.55)"
-          subtitleColor={AMBER}
+          subtitleColor={AMBER_T}
           delay="0.2s"
         />
         <SplashRoleCard
@@ -14167,7 +14294,7 @@ function WhoIsReadingScreen({ onSelect }: { onSelect: (view: "nana" | "perry" | 
         />
       </div>
 
-      <button onClick={() => onSelect("both")} style={{ background: "none", border: "1px solid rgba(247,240,227,0.18)", borderRadius: "20px", color: "rgba(247,240,227,0.38)", fontFamily: "DM Sans, sans-serif", fontSize: "12px", cursor: "pointer", padding: "8px 20px", letterSpacing: "0.05em", animation: "splash-in 0.5s ease-out 0.4s both" }}>
+      <button onClick={() => onSelect("both")} style={{ background: "none", border: "1px solid var(--lk-ink-180, rgba(247,240,227,0.18))", borderRadius: "20px", color: "var(--lk-ink-380, rgba(247,240,227,0.38))", fontFamily: "DM Sans, sans-serif", fontSize: "12px", cursor: "pointer", padding: "8px 20px", letterSpacing: "0.05em", animation: "splash-in 0.5s ease-out 0.4s both" }}>
         View demo (both screens) →
       </button>
     </div>
@@ -14214,9 +14341,9 @@ function ReactionRow({ onReact, vertical = false }: { onReact?: (e: ReactionEmoj
             width: 48,
             height: 48,
             borderRadius: 14,
-            border: `1px solid color-mix(in srgb, ${accent} 32%, rgba(255,255,255,0.10))`,
-            backgroundImage: `linear-gradient(155deg, color-mix(in srgb, ${accent} 18%, rgba(255,255,255,0.04)) 0%, rgba(255,255,255,0.04) 70%)`,
-            backgroundColor: "rgba(255,255,255,0.04)",
+            border: `1px solid color-mix(in srgb, ${accent} 32%, var(--lk-line-100, rgba(255,255,255,0.10)))`,
+            backgroundImage: `linear-gradient(155deg, color-mix(in srgb, ${accent} 18%, var(--lk-fill-040, rgba(255,255,255,0.04))) 0%, var(--lk-fill-040, rgba(255,255,255,0.04)) 70%)`,
+            backgroundColor: "var(--lk-fill-040, rgba(255,255,255,0.04))",
             color: "#fff",
             fontSize: 26,
             lineHeight: 1,
@@ -14232,12 +14359,12 @@ function ReactionRow({ onReact, vertical = false }: { onReact?: (e: ReactionEmoj
           onMouseEnter={(e) => {
             e.currentTarget.style.transform = "translateY(-2px) scale(1.06)";
             e.currentTarget.style.boxShadow = `0 8px 22px color-mix(in srgb, ${accent} 35%, transparent)`;
-            e.currentTarget.style.borderColor = `color-mix(in srgb, ${accent} 65%, rgba(255,255,255,0.10))`;
+            e.currentTarget.style.borderColor = `color-mix(in srgb, ${accent} 65%, var(--lk-glass-100, rgba(255,255,255,0.10)))`;
           }}
           onMouseLeave={(e) => {
             e.currentTarget.style.transform = "translateY(0) scale(1)";
             e.currentTarget.style.boxShadow = "none";
-            e.currentTarget.style.borderColor = `color-mix(in srgb, ${accent} 32%, rgba(255,255,255,0.10))`;
+            e.currentTarget.style.borderColor = `color-mix(in srgb, ${accent} 32%, var(--lk-glass-100, rgba(255,255,255,0.10)))`;
           }}
           onMouseDown={(e) => { e.currentTarget.style.transform = "scale(0.94)"; }}
           onMouseUp={(e) => { e.currentTarget.style.transform = "translateY(-2px) scale(1.06)"; }}
@@ -14287,7 +14414,7 @@ function SplashRoleCard({
           height: "clamp(120px, 22vw, 160px)",
           borderRadius: "50%",
           border: `3px solid ${accent}`,
-          boxShadow: "0 8px 32px rgba(0,0,0,0.4)",
+          boxShadow: "0 8px 32px var(--lk-shadow-400, rgba(0,0,0,0.4))",
           animation: `splash-float 3.2s ease-in-out infinite ${delay}`,
           transition: "transform 0.2s, box-shadow 0.2s",
           overflow: "hidden",
@@ -14364,9 +14491,9 @@ function LayoutSwitcher({ current, onChange }: { current: ReadingLayout; onChang
           display: "inline-flex", alignItems: "center", gap: 6,
           padding: "5px 10px",
           borderRadius: 999,
-          background: "rgba(201,146,42,0.14)",
-          border: "1px solid rgba(201,146,42,0.45)",
-          color: AMBER,
+          background: "var(--lk-accent-140, rgba(201,146,42,0.14))",
+          border: "1px solid var(--lk-accent-450, rgba(201,146,42,0.45))",
+          color: AMBER_T,
           fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700,
           cursor: "pointer", letterSpacing: "0.02em",
           flexShrink: 0,
@@ -14385,14 +14512,14 @@ function LayoutSwitcher({ current, onChange }: { current: ReadingLayout; onChang
             top: anchor.top, left: anchor.left,
             zIndex: 9999,
             minWidth: 240,
-            backgroundColor: "#0f1d36",
-            border: "1px solid rgba(201,146,42,0.55)",
+            backgroundColor: "var(--lk-n-0f1d36, #0f1d36)",
+            border: "1px solid var(--lk-accent-550, rgba(201,146,42,0.55))",
             borderRadius: 14,
             padding: 6,
-            boxShadow: "0 14px 36px rgba(0,0,0,0.7), 0 0 0 1px rgba(0,0,0,0.6)",
+            boxShadow: "0 14px 36px var(--lk-shadow-700, rgba(0,0,0,0.7)), 0 0 0 1px var(--lk-shadow-600, rgba(0,0,0,0.6))",
           }}
         >
-          <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800, letterSpacing: "0.18em", padding: "6px 10px 4px" }}>
+          <div style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800, letterSpacing: "0.18em", padding: "6px 10px 4px" }}>
             READING LAYOUT
           </div>
           {VISIBLE_READING_LAYOUTS.map(k => {
@@ -14409,21 +14536,21 @@ function LayoutSwitcher({ current, onChange }: { current: ReadingLayout; onChang
                   display: "flex", alignItems: "center", gap: 10,
                   padding: "8px 10px",
                   borderRadius: 10,
-                  background: active ? "rgba(201,146,42,0.18)" : "transparent",
-                  border: active ? "1px solid rgba(201,146,42,0.45)" : "1px solid transparent",
+                  background: active ? "var(--lk-accent-180, rgba(201,146,42,0.18))" : "transparent",
+                  border: active ? "1px solid var(--lk-accent-450, rgba(201,146,42,0.45))" : "1px solid transparent",
                   color: CREAM,
                   cursor: "pointer",
                   fontFamily: "DM Sans, sans-serif",
                 }}
-                onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = "rgba(255,255,255,0.05)"; }}
+                onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = "var(--lk-fill-050, rgba(255,255,255,0.05))"; }}
                 onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}
               >
                 <span style={{ fontSize: 18, width: 28, textAlign: "center", flexShrink: 0 }}>{m.icon}</span>
                 <span style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: active ? AMBER : CREAM }}>{m.label}</div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: active ? AMBER_T : CREAM }}>{m.label}</div>
                   <div style={{ fontSize: 10, opacity: 0.6, marginTop: 1 }}>{m.sub}</div>
                 </span>
-                {active && <span style={{ color: AMBER, fontSize: 12, fontWeight: 800 }}>✓</span>}
+                {active && <span style={{ color: AMBER_T, fontSize: 12, fontWeight: 800 }}>✓</span>}
               </button>
             );
           })}
@@ -14503,9 +14630,9 @@ function PageModeSwitcher({ current, onChange }: { current: "single" | "double";
           display: "inline-flex", alignItems: "center", gap: 6,
           padding: "5px 10px",
           borderRadius: 999,
-          background: "rgba(201,146,42,0.14)",
-          border: "1px solid rgba(201,146,42,0.45)",
-          color: AMBER,
+          background: "var(--lk-accent-140, rgba(201,146,42,0.14))",
+          border: "1px solid var(--lk-accent-450, rgba(201,146,42,0.45))",
+          color: AMBER_T,
           fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700,
           cursor: "pointer", letterSpacing: "0.02em",
           flexShrink: 0,
@@ -14524,14 +14651,14 @@ function PageModeSwitcher({ current, onChange }: { current: "single" | "double";
             top: anchor.top, left: anchor.left,
             zIndex: 9999,
             minWidth: 220,
-            backgroundColor: "#0f1d36",
-            border: "1px solid rgba(201,146,42,0.55)",
+            backgroundColor: "var(--lk-n-0f1d36, #0f1d36)",
+            border: "1px solid var(--lk-accent-550, rgba(201,146,42,0.55))",
             borderRadius: 14,
             padding: 6,
-            boxShadow: "0 14px 36px rgba(0,0,0,0.7), 0 0 0 1px rgba(0,0,0,0.6)",
+            boxShadow: "0 14px 36px var(--lk-shadow-700, rgba(0,0,0,0.7)), 0 0 0 1px var(--lk-shadow-600, rgba(0,0,0,0.6))",
           }}
         >
-          <div style={{ color: AMBER, fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800, letterSpacing: "0.18em", padding: "6px 10px 4px" }}>
+          <div style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 9, fontWeight: 800, letterSpacing: "0.18em", padding: "6px 10px 4px" }}>
             PAGE MODE
           </div>
           {options.map(o => {
@@ -14547,21 +14674,21 @@ function PageModeSwitcher({ current, onChange }: { current: "single" | "double";
                   display: "flex", alignItems: "center", gap: 10,
                   padding: "8px 10px",
                   borderRadius: 10,
-                  background: active ? "rgba(201,146,42,0.18)" : "transparent",
-                  border: active ? "1px solid rgba(201,146,42,0.45)" : "1px solid transparent",
+                  background: active ? "var(--lk-accent-180, rgba(201,146,42,0.18))" : "transparent",
+                  border: active ? "1px solid var(--lk-accent-450, rgba(201,146,42,0.45))" : "1px solid transparent",
                   color: CREAM,
                   cursor: "pointer",
                   fontFamily: "DM Sans, sans-serif",
                 }}
-                onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = "rgba(255,255,255,0.05)"; }}
+                onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = "var(--lk-fill-050, rgba(255,255,255,0.05))"; }}
                 onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}
               >
                 <span style={{ fontSize: 18, width: 28, textAlign: "center", flexShrink: 0 }}>{o.icon}</span>
                 <span style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: active ? AMBER : CREAM }}>{o.label}</div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: active ? AMBER_T : CREAM }}>{o.label}</div>
                   <div style={{ fontSize: 10, opacity: 0.6, marginTop: 1 }}>{o.sub}</div>
                 </span>
-                {active && <span style={{ color: AMBER, fontSize: 12, fontWeight: 800 }}>✓</span>}
+                {active && <span style={{ color: AMBER_T, fontSize: 12, fontWeight: 800 }}>✓</span>}
               </button>
             );
           })}
@@ -14613,17 +14740,17 @@ function PromptButton({ prompt, onStartChat }: { prompt: string | null; onStartC
         padding: "0 16px",
         borderRadius: 12,
         background: disabled
-          ? "rgba(255,255,255,0.04)"
-          : "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
+          ? "var(--lk-fill-040, rgba(255,255,255,0.04))"
+          : "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)",
         border: disabled
-          ? "1px solid rgba(255,255,255,0.10)"
+          ? "1px solid var(--lk-line-100, rgba(255,255,255,0.10))"
           : "none",
-        color: disabled ? "rgba(247,240,227,0.4)" : NAVY,
+        color: disabled ? "var(--lk-ink-400, rgba(247,240,227,0.4))" : NAVY,
         fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 800,
         cursor: disabled ? "not-allowed" : "pointer",
         letterSpacing: "0.02em",
         flexShrink: 0,
-        boxShadow: disabled ? "none" : "0 6px 18px rgba(201,146,42,0.42)",
+        boxShadow: disabled ? "none" : "0 6px 18px var(--lk-accent-420, rgba(201,146,42,0.42))",
         touchAction: "manipulation",
       }}
     >
@@ -14646,19 +14773,19 @@ function ReadingToolbarBtn({
 }) {
   const palette = kind === "primary"
     ? {
-        background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)",
-        color: "#0b172e", border: "none",
-        shadow: "0 6px 18px rgba(201,146,42,0.42)",
+        background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)",
+        color: "var(--lk-on-accent-0b, #0b172e)", border: "none",
+        shadow: "0 6px 18px var(--lk-accent-420, rgba(201,146,42,0.42))",
       }
     : kind === "success"
     ? {
         background: "linear-gradient(135deg, #34d399 0%, #10b981 100%)",
-        color: "#0b172e", border: "none",
+        color: "var(--lk-on-accent-0b, #0b172e)", border: "none",
         shadow: "0 6px 18px rgba(16,185,129,0.35)",
       }
     : {
-        background: "rgba(11,23,46,0.55)",
-        color: CREAM, border: "1px solid rgba(255,255,255,0.14)",
+        background: "var(--lk-bg-550, rgba(11,23,46,0.55))",
+        color: CREAM, border: "1px solid var(--lk-line-140, rgba(255,255,255,0.14))",
         shadow: "none",
       };
   return (
@@ -14670,8 +14797,8 @@ function ReadingToolbarBtn({
       style={{
         height: 46, minWidth: 46,
         padding: "0 18px", borderRadius: 12,
-        background: disabled ? "rgba(255,255,255,0.04)" : palette.background,
-        color: disabled ? "rgba(247,240,227,0.25)" : palette.color,
+        background: disabled ? "var(--lk-fill-040, rgba(255,255,255,0.04))" : palette.background,
+        color: disabled ? "var(--lk-ink-250, rgba(247,240,227,0.25))" : palette.color,
         border: palette.border,
         cursor: disabled ? "not-allowed" : "pointer",
         display: "inline-flex", alignItems: "center", justifyContent: "center",
@@ -14834,6 +14961,8 @@ export default function App() {
   const deviceView = deviceViewRaw;
   const deviceViewRef = useRef(deviceView);
   deviceViewRef.current = deviceView;
+  // Build 43: Nana's look choices are saved for this family (a new family too).
+  useEffect(() => { setLookFamily(deviceView === "perry" ? null : connectionId); }, [deviceView, connectionId]);
   const currentUserRef = useRef<SafeUser | null>(null);
   currentUserRef.current = currentUser;
   const signOutRef = useRef<(() => Promise<void>) | null>(null);
@@ -16068,10 +16197,12 @@ export default function App() {
   // (Rick's Build 40 review: first-time setup never shows to a Nana who
   // already has grandchildren); a family still waiting for its first
   // grandchild keeps the setup step that shows the family code.
-  const openNanaFamily = (conns: Array<{ connection: { id: string; status: "pending" | "active"; inviteToken: string }; childCount?: number }>): boolean => {
+  const openNanaFamily = (conns: Array<{ connection: { id: string; status: "pending" | "active"; inviteToken: string; look?: string | null; libraryStyle?: string | null }; childCount?: number }>): boolean => {
     const existing = conns[0];
     if (!existing) return false;
     setConnectionId(existing.connection.id);
+    // Build 43: the family's colours and Library style.
+    syncFamilyLookOnOpen(existing.connection.id, existing.connection);
     setInviteToken(existing.connection.inviteToken);
     // Reset any stale server-side session state. Without this, if Nana
     // was mid-reading-session and just refreshed her browser (no clean
@@ -16213,6 +16344,8 @@ export default function App() {
     try { presenceChild = localStorage.getItem("nm_authed_child_id"); } catch {}
     const es = new EventSource(api.sessions.streamUrl(connId, "perry", presenceChild), { withCredentials: true });
     sseRef.current = es;
+    // Build 43: follow the family's look (it may have changed while this iPad was away).
+    fetchFamilyLook(connId);
     es.onmessage = (event) => {
       // Track the last time ANY message arrived. The health check below
       // uses this to detect "open but silent" SSE — Cloudflare Quick
@@ -16325,6 +16458,7 @@ export default function App() {
             if (origin && origin === myLibraryOriginRef.current) {
               // own echo, ignore
             } else {
+              setLibraryScrollAnchor(parseLibraryAnchor(msg.payload.anchor));
               setLibraryScrollTop(msg.payload.top);
             }
           }
@@ -16633,6 +16767,9 @@ export default function App() {
           }
         } else if (msg.type === "challenge_state") {
           applyChallengeRef.current(msg.payload);
+        } else if (msg.type === "look_change") {
+          // Build 43: Nana changed the family's colours or Library style.
+          applyFamilyLook(msg.payload);
         } else if (msg.type === "nana_name") {
           // The grandparent renamed themselves in Settings.
           const name = typeof msg.payload.name === "string" ? msg.payload.name.trim() : "";
@@ -16794,6 +16931,7 @@ export default function App() {
             if (origin && origin === myLibraryOriginRef.current) {
               // own echo, ignore
             } else {
+              setLibraryScrollAnchor(parseLibraryAnchor(msg.payload.anchor));
               setLibraryScrollTop(msg.payload.top);
             }
           }
@@ -17010,6 +17148,9 @@ export default function App() {
           if (phase === 7) setMode("goodbye");
         } else if (msg.type === "challenge_state") {
           applyChallengeRef.current(msg.payload);
+        } else if (msg.type === "look_change") {
+          // Build 43: Nana changed the family's colours or Library style.
+          applyFamilyLook(msg.payload);
         } else if (msg.type === "nana_name") {
           // The grandparent renamed themselves in Settings.
           const name = typeof msg.payload.name === "string" ? msg.payload.name.trim() : "";
@@ -17738,6 +17879,7 @@ export default function App() {
       running = true;
       try {
         const index = await api.catalog.index();
+        rememberCovers(index);
         await keptReady;
         const order = index.map(e => e.id);
         const stale = index.filter(e => kept.get(e.id)?.updatedAt !== e.updatedAt).map(e => e.id);
@@ -17799,6 +17941,8 @@ export default function App() {
   // checks `payload.origin !== myLibraryOriginRef.current` to know
   // it's a partner's event, no value comparison needed.
   const [libraryScrollTop, setLibraryScrollTop] = useState(0);
+  // The book at the top of the other iPad's Library (cover styles only; older apps send none).
+  const [libraryScrollAnchor, setLibraryScrollAnchor] = useState<LibraryAnchor | null>(null);
   // Nana's library search and filters as the child's iPad last heard them.
   const [libraryFilters, setLibraryFilters] = useState<LibraryFilters | null>(null);
   const handleLibraryFilters = useCallback((f: LibraryFilters) => {
@@ -17823,8 +17967,10 @@ export default function App() {
       return out;
     })()
   );
-  const handleLibraryScroll = useCallback((top: number) => {
+  const libraryAnchorLatestRef = useRef<LibraryAnchor | null>(null);
+  const handleLibraryScroll = useCallback((top: number, anchor?: LibraryAnchor | null) => {
     libraryScrollLatestRef.current = top;
+    libraryAnchorLatestRef.current = anchor ?? null;
     if (libraryScrollPendingRef.current) return;
     libraryScrollPendingRef.current = true;
     requestAnimationFrame(() => {
@@ -17833,6 +17979,8 @@ export default function App() {
       api.sessions.publishEvent(connectionId, "library_scroll", {
         top: libraryScrollLatestRef.current,
         origin: myLibraryOriginRef.current,
+        // Extra field: apps from before looks ignore it and follow "top".
+        ...(libraryAnchorLatestRef.current ? { anchor: libraryAnchorLatestRef.current } : {}),
       }).catch(() => {});
     });
   }, [connectionId]);
@@ -20092,8 +20240,8 @@ export default function App() {
   };
 
   const btnStyle = (disabled: boolean) => ({
-    backgroundColor: disabled ? "rgba(201,146,42,0.25)" : AMBER,
-    color: disabled ? "rgba(247,240,227,0.35)" : NAVY,
+    backgroundColor: disabled ? "var(--lk-accent-250, rgba(201,146,42,0.25))" : AMBER,
+    color: disabled ? "var(--lk-ink-350, rgba(247,240,227,0.35))" : NAVY,
     border: "none", borderRadius: "12px", padding: "9px 18px",
     fontSize: "12px", fontFamily: "DM Sans, sans-serif", fontWeight: 700,
     cursor: disabled ? "not-allowed" : "pointer", transition: "all 0.15s",
@@ -20128,7 +20276,7 @@ export default function App() {
         <InstallHint />
         <div style={{
           height: "100dvh",
-          backgroundColor: NAVY,
+          backgroundColor: NAVY_FILL,
           display: "flex", flexDirection: "column",
           padding: "16px",
           fontFamily: "DM Sans, sans-serif",
@@ -20162,7 +20310,7 @@ export default function App() {
               📖 NeverMiss
             </div>
             <div style={{
-              color: AMBER,
+              color: AMBER_T,
               fontSize: 10,
               fontWeight: 700,
               letterSpacing: "0.22em",
@@ -20188,10 +20336,10 @@ export default function App() {
                 display: "flex", flexDirection: "column",
                 alignItems: "center", justifyContent: "center",
                 gap: 14, padding: "24px 20px",
-                background: "linear-gradient(135deg, rgba(247,201,93,0.18) 0%, rgba(201,146,42,0.32) 100%)",
-                border: "2px solid rgba(247,201,93,0.55)",
+                background: "linear-gradient(135deg, var(--lk-accent-hi-180, rgba(247,201,93,0.18)) 0%, var(--lk-accent-320, rgba(201,146,42,0.32)) 100%)",
+                border: "2px solid var(--lk-accent-hi-550, rgba(247,201,93,0.55))",
                 borderRadius: 22,
-                boxShadow: "0 12px 36px rgba(201,146,42,0.28), inset 0 0 0 1px rgba(247,201,93,0.18)",
+                boxShadow: "0 12px 36px var(--lk-accent-280, rgba(201,146,42,0.28)), inset 0 0 0 1px var(--lk-accent-hi-180, rgba(247,201,93,0.18))",
                 cursor: "pointer",
                 color: CREAM,
                 fontFamily: "DM Sans, sans-serif",
@@ -20205,7 +20353,7 @@ export default function App() {
                 filter: "drop-shadow(0 6px 14px rgba(201,146,42,0.45))",
               }} aria-hidden>👵</div>
               <div style={{
-                color: AMBER,
+                color: AMBER_T,
                 fontFamily: "Playfair Display, serif",
                 fontSize: "clamp(22px, 3vw, 32px)",
                 fontWeight: 700,
@@ -20214,7 +20362,7 @@ export default function App() {
                 I'm a Grandparent
               </div>
               <div style={{
-                color: "rgba(247,240,227,0.82)",
+                color: "var(--lk-ink-820, rgba(247,240,227,0.82))",
                 fontSize: "clamp(13px, 1.5vw, 16px)",
                 fontWeight: 500,
                 lineHeight: 1.4,
@@ -20258,7 +20406,7 @@ export default function App() {
                 filter: childChoiceDisabled ? "none" : "drop-shadow(0 6px 14px rgba(59,130,246,0.45))",
               }} aria-hidden>🧒</div>
               <div style={{
-                color: childChoiceDisabled ? "rgba(207,227,255,0.45)" : "#cfe3ff",
+                color: childChoiceDisabled ? "var(--lk-lt-cfe3ff-450, rgba(207,227,255,0.45))" : "var(--lk-lt-cfe3ff, #cfe3ff)",
                 fontFamily: "Playfair Display, serif",
                 fontSize: "clamp(22px, 3vw, 32px)",
                 fontWeight: 700,
@@ -20267,7 +20415,7 @@ export default function App() {
                 I'm a Grandchild
               </div>
               <div style={{
-                color: "rgba(247,240,227,0.72)",
+                color: "var(--lk-ink-720, rgba(247,240,227,0.72))",
                 fontSize: "clamp(13px, 1.5vw, 16px)",
                 fontWeight: 500,
                 lineHeight: 1.4,
@@ -20285,7 +20433,7 @@ export default function App() {
             flexShrink: 0,
             paddingTop: 14,
             textAlign: "center",
-            color: "rgba(247,240,227,0.4)",
+            color: "var(--lk-ink-400, rgba(247,240,227,0.4))",
             fontSize: 11,
             fontStyle: "italic",
             letterSpacing: "0.04em",
@@ -20310,7 +20458,7 @@ export default function App() {
       width: "100vw",
       height: "var(--nm-app-vh, 100dvh)",
       minHeight: "100dvh",
-      backgroundColor: NAVY,
+      backgroundColor: NAVY_FILL,
       display: "flex",
       flexDirection: "column",
       alignItems: "stretch",
@@ -20339,12 +20487,12 @@ export default function App() {
             top: 74, left: "50%", transform: "translateX(-50%)",
             zIndex: 130,
             width: "min(500px, calc(100vw - 32px))",
-            background: "linear-gradient(180deg, rgba(11,23,46,0.98), rgba(20,34,62,0.96))",
+            background: "linear-gradient(180deg, var(--lk-bg-980, rgba(11,23,46,0.98)), var(--lk-n-14223e-960, rgba(20,34,62,0.96)))",
             color: CREAM,
             border: "2px solid #86efac",
             borderRadius: 14,
             padding: "12px 16px 14px",
-            boxShadow: "0 16px 40px rgba(0,0,0,0.55), 0 0 0 1px rgba(134,239,172,0.35)",
+            boxShadow: "0 16px 40px var(--lk-shadow-550, rgba(0,0,0,0.55)), 0 0 0 1px rgba(134,239,172,0.35)",
             animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
           }}
         >
@@ -20357,7 +20505,7 @@ export default function App() {
                 : "👋"}
             </span>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: "0.14em", color: "#86efac", marginBottom: 2 }}>
+              <div style={{ fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800, letterSpacing: "0.14em", color: "var(--lk-ok-t, #86efac)", marginBottom: 2 }}>
                 {(dashboardPerryName || perryConnRef.current?.childName || "Perry").toUpperCase()} ASKED
               </div>
               <div style={{ fontFamily: "Merriweather, serif", fontSize: 15, fontWeight: 700, lineHeight: 1.35 }}>
@@ -20374,8 +20522,8 @@ export default function App() {
               onClick={() => setPerryRequest(null)}
               style={{
                 background: "transparent",
-                color: "rgba(247,240,227,0.55)",
-                border: "1px solid rgba(255,255,255,0.18)",
+                color: "var(--lk-ink-550, rgba(247,240,227,0.55))",
+                border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))",
                 borderRadius: 999,
                 padding: "8px 14px",
                 fontFamily: "DM Sans, sans-serif",
@@ -20398,7 +20546,7 @@ export default function App() {
               }}
               style={{
                 background: "linear-gradient(135deg, #86efac 0%, #22c55e 100%)",
-                color: "#0b172e",
+                color: "var(--lk-on-accent-0b, #0b172e)",
                 border: "none",
                 borderRadius: 999,
                 padding: "9px 18px",
@@ -20448,19 +20596,19 @@ export default function App() {
               : { top: 0, left: "50%", width: "min(520px, calc(100vw - 32px))", visibility: "hidden" as const }),
             transform: "translateX(-50%)",
             zIndex: 120,
-            background: "linear-gradient(180deg, #F7F0E3 0%, #f2e4c4 100%)",
+            background: "linear-gradient(180deg, var(--lk-paper, #F7F0E3) 0%, #f2e4c4 100%)",
             color: "#2D1A08",
-            border: "2px solid #C9922A",
+            border: "2px solid var(--lk-accent, #C9922A)",
             borderRadius: 16,
             padding: "16px 20px 18px",
-            boxShadow: "0 20px 44px rgba(0,0,0,0.55)",
+            boxShadow: "0 20px 44px var(--lk-shadow-550, rgba(0,0,0,0.55))",
             animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
           }}
         >
           <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
             <div style={{ display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap", flex: 1, minWidth: 0 }}>
               <span style={{
-                background: "#C9922A", color: "#F7F0E3",
+                background: "var(--lk-accent, #C9922A)", color: "var(--lk-ink, #F7F0E3)",
                 padding: "3px 10px", borderRadius: 999,
                 fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800,
                 letterSpacing: "0.14em", textTransform: "uppercase",
@@ -20507,11 +20655,11 @@ export default function App() {
               <span style={{
                 fontFamily: "Playfair Display, serif",
                 fontSize: 18, fontWeight: 700,
-                color: "#C9922A",
+                color: "var(--lk-accent-t, #C9922A)",
                 padding: "3px 12px",
-                background: "rgba(201,146,42,0.14)",
+                background: "var(--lk-accent-140, rgba(201,146,42,0.14))",
                 borderRadius: 8,
-                border: "1px solid rgba(201,146,42,0.35)",
+                border: "1px solid var(--lk-accent-350, rgba(201,146,42,0.35))",
                 letterSpacing: "0.08em",
               }}>{activeTarget}</span>
             </div>
@@ -20543,7 +20691,7 @@ export default function App() {
                   {steps.map((_, i) => (
                     <span key={i} style={{
                       width: 7, height: 7, borderRadius: "50%",
-                      background: i === stepIdx ? "#C9922A" : "rgba(92,58,30,0.22)",
+                      background: i === stepIdx ? "var(--lk-accent, #C9922A)" : "rgba(92,58,30,0.22)",
                     }} />
                   ))}
                 </div>
@@ -20552,14 +20700,14 @@ export default function App() {
                 <button
                   onClick={() => setSelPhonicsStep(i => Math.min(totalSteps - 1, i + 1))}
                   style={{
-                    background: "linear-gradient(135deg, #f7c95d 0%, #C9922A 100%)",
+                    background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 100%)",
                     color: NAVY,
                     border: "none",
                     borderRadius: 999,
                     padding: "7px 16px",
                     fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 800,
                     cursor: "pointer",
-                    boxShadow: "0 4px 10px rgba(201,146,42,0.35)",
+                    boxShadow: "0 4px 10px var(--lk-accent-350, rgba(201,146,42,0.35))",
                     touchAction: "manipulation",
                   }}
                 >Next →</button>
@@ -20625,12 +20773,12 @@ export default function App() {
               : { top: 0, left: "50%", width: "min(520px, calc(100vw - 32px))", visibility: "hidden" as const }),
             transform: "translateX(-50%)",
             zIndex: 120,
-            background: "linear-gradient(180deg, #F7F0E3 0%, #f2e4c4 100%)",
+            background: "linear-gradient(180deg, var(--lk-paper, #F7F0E3) 0%, #f2e4c4 100%)",
             color: "#2D1A08",
-            border: "2px solid #C9922A",
+            border: "2px solid var(--lk-accent, #C9922A)",
             borderRadius: 16,
             padding: "14px 18px",
-            boxShadow: "0 20px 44px rgba(0,0,0,0.55)",
+            boxShadow: "0 20px 44px var(--lk-shadow-550, rgba(0,0,0,0.55))",
             display: "flex", alignItems: "center", gap: 12,
             fontFamily: "DM Sans, sans-serif",
           }}
@@ -20638,7 +20786,7 @@ export default function App() {
           <style>{`@keyframes nm-word-spin { to { transform: rotate(360deg); } }`}</style>
           {selPhoState.status === "loading" ? (
             <>
-              <span aria-hidden style={{ width: 22, height: 22, borderRadius: "50%", border: "3px solid rgba(201,146,42,0.3)", borderTopColor: "#C9922A", animation: "nm-word-spin 0.9s linear infinite", flexShrink: 0 }} />
+              <span aria-hidden style={{ width: 22, height: 22, borderRadius: "50%", border: "3px solid var(--lk-accent-300, rgba(201,146,42,0.3))", borderTopColor: "var(--lk-accent, #C9922A)", animation: "nm-word-spin 0.9s linear infinite", flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 17, fontWeight: 800 }}>Working out how to sound out “{selPhoState.word}”…</div>
                 <PhonicsWaitNote key={selPhoState.word} />
@@ -20652,7 +20800,7 @@ export default function App() {
                   ? <>“{selPhoState.word}” is taking longer than usual. Try again in a moment.</>
                   : <>Couldn't reach NeverMiss for “{selPhoState.word}”. Check the internet and try again.</>}
               </div>
-              <button type="button" data-testid="phonics-retry" onClick={() => void handleSelectionPhonics(selPhoState.word)} style={{ minHeight: 44, padding: "0 14px", borderRadius: 999, border: "none", background: "#C9922A", color: "#F7F0E3", fontWeight: 800, cursor: "pointer" }}>Try again</button>
+              <button type="button" data-testid="phonics-retry" onClick={() => void handleSelectionPhonics(selPhoState.word)} style={{ minHeight: 44, padding: "0 14px", borderRadius: 999, border: "none", background: "var(--lk-accent, #C9922A)", color: "var(--lk-ink, #F7F0E3)", fontWeight: 800, cursor: "pointer" }}>Try again</button>
               <button type="button" aria-label="Close" onClick={() => setSelPhoState(null)} style={{ minWidth: 44, minHeight: 44, borderRadius: 999, border: "1px solid rgba(92,58,30,0.3)", background: "transparent", color: "#5C3A1E", fontWeight: 800, cursor: "pointer" }}>✕</button>
             </>
           )}
@@ -20676,19 +20824,19 @@ export default function App() {
               : { top: 0, left: "50%", width: "min(520px, calc(100vw - 32px))", visibility: "hidden" as const }),
             transform: "translateX(-50%)",
             zIndex: 120,
-            background: "linear-gradient(180deg, #F7F0E3 0%, #f2e4c4 100%)",
+            background: "linear-gradient(180deg, var(--lk-paper, #F7F0E3) 0%, #f2e4c4 100%)",
             color: "#2D1A08",
-            border: "2px solid #C9922A",
+            border: "2px solid var(--lk-accent, #C9922A)",
             borderRadius: 16,
             padding: "16px 20px 18px",
-            boxShadow: "0 20px 44px rgba(0,0,0,0.55)",
+            boxShadow: "0 20px 44px var(--lk-shadow-550, rgba(0,0,0,0.55))",
             animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
           }}
         >
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
             <div style={{ display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <span style={{
-                background: "#C9922A", color: "#F7F0E3",
+                background: "var(--lk-accent, #C9922A)", color: "var(--lk-ink, #F7F0E3)",
                 padding: "3px 10px", borderRadius: 999,
                 fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800,
                 letterSpacing: "0.14em", textTransform: "uppercase",
@@ -20739,15 +20887,15 @@ export default function App() {
             transform: "translateX(-50%)",
             zIndex: 100,
             background: childPromptsToast.on
-              ? "linear-gradient(135deg, rgba(201,146,42,0.96), rgba(141,98,28,0.96))"
-              : "rgba(11,23,46,0.92)",
+              ? "linear-gradient(135deg, var(--lk-accent-960, rgba(201,146,42,0.96)), rgba(141,98,28,0.96))"
+              : "var(--lk-bg-920, rgba(11,23,46,0.92))",
             color: childPromptsToast.on ? NAVY : CREAM,
             fontFamily: "DM Sans, sans-serif",
             fontSize: 14, fontWeight: 800,
             letterSpacing: "0.02em",
             padding: "12px 20px",
             borderRadius: 999,
-            boxShadow: "0 8px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(247,201,93,0.35)",
+            boxShadow: "0 8px 24px var(--lk-shadow-450, rgba(0,0,0,0.45)), 0 0 0 1px var(--lk-accent-hi-350, rgba(247,201,93,0.35))",
             display: "inline-flex", alignItems: "center", gap: 10,
             maxWidth: "calc(100% - 40px)",
             animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
@@ -20774,13 +20922,13 @@ export default function App() {
             transform: "translateX(-50%)",
             zIndex: 100,
             background: "linear-gradient(135deg, rgba(34,197,94,0.96), rgba(21,128,61,0.96))",
-            color: "#f0fdf4",
+            color: "var(--lk-lt-f0fdf4, #f0fdf4)",
             fontFamily: "DM Sans, sans-serif",
             fontSize: 14, fontWeight: 800,
             letterSpacing: "0.02em",
             padding: "12px 22px",
             borderRadius: 999,
-            boxShadow: "0 8px 24px rgba(0,0,0,0.45), 0 0 0 1px rgba(134,239,172,0.35)",
+            boxShadow: "0 8px 24px var(--lk-shadow-450, rgba(0,0,0,0.45)), 0 0 0 1px rgba(134,239,172,0.35)",
             display: "inline-flex", alignItems: "center", gap: 10,
             maxWidth: "calc(100% - 40px)",
             animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)",
@@ -20912,9 +21060,9 @@ export default function App() {
           style={{
             position: "absolute", top: 4, right: 8,
             display: "inline-flex", alignItems: "center", gap: 6,
-            background: "rgba(247,201,93,0.10)",
-            border: "1px solid rgba(247,201,93,0.45)",
-            color: AMBER,
+            background: "var(--lk-accent-hi-100, rgba(247,201,93,0.10))",
+            border: "1px solid var(--lk-accent-hi-450, rgba(247,201,93,0.45))",
+            color: AMBER_T,
             fontFamily: "DM Sans, sans-serif",
             fontSize: 12, fontWeight: 700,
             cursor: "pointer",
@@ -21135,6 +21283,7 @@ export default function App() {
           perryAuthenticated={perryAuthenticated}
           onLibraryScroll={handleLibraryScroll}
           libraryScrollTop={libraryScrollTop}
+          libraryScrollAnchor={libraryScrollAnchor}
           onLibraryFilters={handleLibraryFilters}
           libraryFilters={libraryFilters}
           catalogLoading={catalogLoading}
@@ -21332,6 +21481,7 @@ export default function App() {
           perryAuthenticated={perryAuthenticated}
           onLibraryScroll={handleLibraryScroll}
           libraryScrollTop={libraryScrollTop}
+          libraryScrollAnchor={libraryScrollAnchor}
           onLibraryFilters={handleLibraryFilters}
           libraryFilters={libraryFilters}
           catalogLoading={catalogLoading}
@@ -21353,16 +21503,16 @@ export default function App() {
           display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200,
         }}>
           <div style={{
-            backgroundColor: "#0b172e",
-            border: "1px solid rgba(201,146,42,0.5)",
+            backgroundColor: "var(--lk-bg, #0b172e)",
+            border: "1px solid var(--lk-accent-500, rgba(201,146,42,0.5))",
             borderRadius: "16px", padding: "24px", width: "300px",
-            boxShadow: "0 20px 60px rgba(0,0,0,0.8)",
+            boxShadow: "0 20px 60px var(--lk-shadow-800, rgba(0,0,0,0.8))",
           }}>
-            <div style={{ color: AMBER, fontFamily: "Playfair Display, serif", fontSize: "16px", fontWeight: 700, marginBottom: "4px", display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ color: AMBER_T, fontFamily: "Playfair Display, serif", fontSize: "16px", fontWeight: 700, marginBottom: "4px", display: "flex", alignItems: "center", gap: 8 }}>
               <Save size={16} strokeWidth={2} aria-hidden />
               Save to Memory Vault
             </div>
-            <div style={{ color: "rgba(247,240,227,0.5)", fontFamily: "DM Sans, sans-serif", fontSize: "10px", marginBottom: "14px" }}>
+            <div style={{ color: "var(--lk-ink-500, rgba(247,240,227,0.5))", fontFamily: "DM Sans, sans-serif", fontSize: "10px", marginBottom: "14px" }}>
               Give this memory a name before saving
             </div>
             <input
@@ -21372,8 +21522,8 @@ export default function App() {
               placeholder="Name this memory..."
               autoFocus
               style={{
-                width: "100%", backgroundColor: "rgba(255,255,255,0.08)",
-                border: "1px solid rgba(255,255,255,0.2)", borderRadius: "10px",
+                width: "100%", backgroundColor: "var(--lk-fill-080, rgba(255,255,255,0.08))",
+                border: "1px solid var(--lk-line-200, rgba(255,255,255,0.2))", borderRadius: "10px",
                 padding: "10px 14px", color: CREAM,
                 fontFamily: "DM Sans, sans-serif", fontSize: "13px",
                 marginBottom: "14px", boxSizing: "border-box",
@@ -21384,9 +21534,9 @@ export default function App() {
               <button
                 onClick={() => { setShowSaveDialog(false); setRecordingName(""); }}
                 style={{
-                  flex: 1, backgroundColor: "rgba(255,255,255,0.06)",
-                  color: "rgba(247,240,227,0.6)",
-                  border: "1px solid rgba(255,255,255,0.15)",
+                  flex: 1, backgroundColor: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+                  color: "var(--lk-ink-600, rgba(247,240,227,0.6))",
+                  border: "1px solid var(--lk-line-150, rgba(255,255,255,0.15))",
                   borderRadius: "10px", padding: "10px",
                   fontFamily: "DM Sans, sans-serif", fontSize: "12px", cursor: "pointer",
                 }}
@@ -21402,8 +21552,8 @@ export default function App() {
                 }}
                 disabled={!recordingName.trim()}
                 style={{
-                  flex: 2, backgroundColor: recordingName.trim() ? AMBER : "rgba(201,146,42,0.3)",
-                  color: recordingName.trim() ? "#0b172e" : "rgba(247,240,227,0.3)",
+                  flex: 2, backgroundColor: recordingName.trim() ? AMBER : "var(--lk-accent-300, rgba(201,146,42,0.3))",
+                  color: recordingName.trim() ? "var(--lk-on-accent-0b, #0b172e)" : "var(--lk-ink-300, rgba(247,240,227,0.3))",
                   border: "none", borderRadius: "10px", padding: "10px",
                   fontFamily: "DM Sans, sans-serif", fontSize: "12px",
                   fontWeight: 700, cursor: recordingName.trim() ? "pointer" : "default",
@@ -21429,7 +21579,7 @@ export default function App() {
           style={{
             position: "fixed", inset: 0, zIndex: 200,
             display: "flex", alignItems: "center", justifyContent: "center",
-            backgroundColor: "rgba(11, 23, 46, 0.85)",
+            backgroundColor: "var(--lk-bg-850, rgba(11, 23, 46, 0.85))",
             backdropFilter: "blur(6px)",
             WebkitBackdropFilter: "blur(6px)",
             animation: "page-arrived 320ms ease-out",
@@ -21439,11 +21589,11 @@ export default function App() {
           <div
             style={{
               maxWidth: 520, width: "100%",
-              background: "linear-gradient(160deg, #14264a 0%, #0d1d3c 100%)",
+              background: "linear-gradient(160deg, var(--lk-n-14264a, #14264a) 0%, var(--lk-n-0d1d3c, #0d1d3c) 100%)",
               border: `1.5px solid ${AMBER}`,
               borderRadius: 20,
               padding: "28px 28px 24px",
-              boxShadow: "0 24px 60px rgba(0,0,0,0.55), 0 0 0 1px rgba(247,201,93,0.18)",
+              boxShadow: "0 24px 60px var(--lk-shadow-550, rgba(0,0,0,0.55)), 0 0 0 1px var(--lk-accent-hi-180, rgba(247,201,93,0.18))",
               textAlign: "center",
               color: CREAM,
             }}
@@ -21452,7 +21602,7 @@ export default function App() {
                 Pure positive moment — no text wall. */}
             <div style={{ fontSize: 64, marginBottom: 8, animation: "bob 1.6s ease-in-out infinite" }}>🎉</div>
             <div style={{
-              color: "#86efac",
+              color: "var(--lk-ok-t, #86efac)",
               fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 800,
               letterSpacing: "0.18em", textTransform: "uppercase",
               marginBottom: 10,
@@ -21460,7 +21610,7 @@ export default function App() {
               Chapter Complete!
             </div>
             <div style={{
-              color: AMBER,
+              color: AMBER_T,
               fontFamily: "Playfair Display, serif", fontSize: 22, fontWeight: 700,
               lineHeight: 1.25, marginBottom: 18,
             }}>
@@ -21472,14 +21622,14 @@ export default function App() {
                 the old summary line — Rick: "the recap feels like
                 homework, the kids just lived through it." */}
             <div style={{
-              background: "rgba(247,201,93,0.08)",
-              border: "1px solid rgba(247,201,93,0.22)",
+              background: "var(--lk-accent-hi-080, rgba(247,201,93,0.08))",
+              border: "1px solid var(--lk-accent-hi-220, rgba(247,201,93,0.22))",
               borderRadius: 14,
               padding: "14px 18px",
               marginBottom: chapterEndOverlay.chapterTeaser ? 14 : 22,
             }}>
               <div style={{
-                color: "rgba(247,201,93,0.85)",
+                color: "var(--lk-accent-hi-t-850, rgba(247,201,93,0.85))",
                 fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800,
                 letterSpacing: "0.16em", textTransform: "uppercase",
                 marginBottom: 8,
@@ -21514,14 +21664,14 @@ export default function App() {
                 textAlign: "left",
               }}>
                 <div style={{
-                  color: "rgba(147,197,253,0.95)",
+                  color: "var(--lk-lt-93c5fd-950, rgba(147,197,253,0.95))",
                   fontFamily: "DM Sans, sans-serif", fontSize: 10, fontWeight: 800,
                   letterSpacing: "0.16em", textTransform: "uppercase",
                 }}>
                   Next time →
                 </div>
                 <div style={{
-                  color: "rgba(247,240,227,0.92)",
+                  color: "var(--lk-ink-920, rgba(247,240,227,0.92))",
                   fontFamily: "Merriweather, serif", fontSize: 14,
                   lineHeight: 1.5, fontStyle: "italic",
                 }}>
@@ -21547,7 +21697,7 @@ export default function App() {
                       border: "none", borderRadius: 24, padding: "12px 22px",
                       fontFamily: "DM Sans, sans-serif", fontSize: 14, fontWeight: 800,
                       cursor: "pointer", letterSpacing: "0.02em",
-                      boxShadow: "0 4px 14px rgba(201,146,42,0.35)",
+                      boxShadow: "0 4px 14px var(--lk-accent-350, rgba(201,146,42,0.35))",
                     }}
                   >
                     Next Chapter →
@@ -21567,7 +21717,7 @@ export default function App() {
                       border: "none", borderRadius: 24, padding: "12px 22px",
                       fontFamily: "DM Sans, sans-serif", fontSize: 14, fontWeight: 800,
                       cursor: "pointer", letterSpacing: "0.02em",
-                      boxShadow: "0 4px 14px rgba(201,146,42,0.35)",
+                      boxShadow: "0 4px 14px var(--lk-accent-350, rgba(201,146,42,0.35))",
                       display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8,
                     }}
                   >
@@ -21578,8 +21728,8 @@ export default function App() {
                 <button
                   onClick={handleChapterEndStopHere}
                   style={{
-                    backgroundColor: "transparent", color: "rgba(247,240,227,0.7)",
-                    border: "1px solid rgba(255,255,255,0.18)", borderRadius: 24,
+                    backgroundColor: "transparent", color: "var(--lk-ink-700, rgba(247,240,227,0.7))",
+                    border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))", borderRadius: 24,
                     padding: "10px 18px",
                     fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700,
                     cursor: "pointer", letterSpacing: "0.02em",
@@ -21590,7 +21740,7 @@ export default function App() {
               </div>
             ) : (
               <div style={{
-                color: "rgba(247,240,227,0.5)",
+                color: "var(--lk-ink-500, rgba(247,240,227,0.5))",
                 fontFamily: "DM Sans, sans-serif", fontSize: 12, fontStyle: "italic",
                 padding: "10px",
               }}>
@@ -21632,18 +21782,18 @@ export default function App() {
             backgroundColor: "rgba(34,197,94,0.16)",
             border: "1px solid rgba(34,197,94,0.55)",
             backdropFilter: "blur(10px)",
-            boxShadow: "0 12px 32px rgba(0,0,0,0.45)",
-            color: "#dcfce7",
+            boxShadow: "0 12px 32px var(--lk-shadow-450, rgba(0,0,0,0.45))",
+            color: "var(--lk-lt-dcfce7, #dcfce7)",
             fontFamily: "DM Sans, sans-serif",
             animation: "phase-card-up 0.32s cubic-bezier(0.22,1,0.36,1)",
           }}
         >
           <span aria-hidden style={{ fontSize: 28, lineHeight: 1, flexShrink: 0 }}>👋</span>
           <div style={{ display: "flex", flexDirection: "column", gap: 2, lineHeight: 1.4 }}>
-            <div style={{ color: "#86efac", fontSize: 14, fontWeight: 800 }}>
+            <div style={{ color: "var(--lk-ok-t, #86efac)", fontSize: 14, fontWeight: 800 }}>
               {addChildToast.name} added!
             </div>
-            <div style={{ fontSize: 12, color: "rgba(220,252,231,0.85)" }}>
+            <div style={{ fontSize: 12, color: "var(--lk-lt-dcfce7-850, rgba(220,252,231,0.85))" }}>
               Same iPad as the others — have {addChildToast.name} enter the new PIN to take over.
               {addChildToast.photoFailed && " The photo didn't save; tap Add photo on Home to try again."}
             </div>
@@ -21656,7 +21806,7 @@ export default function App() {
               marginLeft: 4,
               background: "transparent",
               border: "none",
-              color: "rgba(220,252,231,0.6)",
+              color: "var(--lk-lt-dcfce7-600, rgba(220,252,231,0.6))",
               cursor: "pointer",
               fontSize: 18,
               padding: 4,

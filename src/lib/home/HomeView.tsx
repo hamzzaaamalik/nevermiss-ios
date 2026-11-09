@@ -3,9 +3,10 @@ import type { Child } from "../api";
 import { compressPhoto, pickPhotoFile } from "./photo";
 import { PinPad } from "../pin/PinPad";
 
-const NAVY = "#1B2B4B";
-const AMBER = "#C9922A";
-const CREAM = "#F7F0E3";
+const NAVY = "var(--lk-navy, #1B2B4B)";
+const AMBER = "var(--lk-accent, #C9922A)";
+const AMBER_T = "var(--lk-accent-t, #C9922A)";  // amber used as text
+const CREAM = "var(--lk-ink, #F7F0E3)";
 const FONT = "DM Sans, sans-serif";
 const SERIF = "Playfair Display, serif";
 
@@ -19,15 +20,15 @@ function colorFor(id: string): string {
 /** A grandchild's face: their photo, or a warm initial when there isn't one. */
 export function ChildAvatar({ child, size, ring, style }: { child: Pick<Child, "id" | "name" | "photoUrl">; size: number; ring?: "selected" | "plain" | "none"; style?: CSSProperties }) {
   const r = ring ?? "none";
-  const border = r === "selected" ? `${Math.max(4, Math.round(size / 36))}px solid ${AMBER}` : r === "plain" ? "2px solid rgba(255,255,255,0.35)" : "none";
-  const shadow = r === "selected" ? "0 0 0 6px rgba(201,146,42,0.18), 0 14px 40px rgba(201,146,42,0.35)" : "0 8px 24px rgba(0,0,0,0.35)";
+  const border = r === "selected" ? `${Math.max(4, Math.round(size / 36))}px solid ${AMBER}` : r === "plain" ? "2px solid var(--lk-line-350, rgba(255,255,255,0.35))" : "none";
+  const shadow = r === "selected" ? "0 0 0 6px var(--lk-accent-180, rgba(201,146,42,0.18)), 0 14px 40px var(--lk-accent-350, rgba(201,146,42,0.35))" : "0 8px 24px var(--lk-shadow-350, rgba(0,0,0,0.35))";
   const base: CSSProperties = {
     width: size, height: size, borderRadius: "50%", flexShrink: 0,
     border, boxShadow: shadow, boxSizing: "border-box",
     ...style,
   };
   if (child.photoUrl) {
-    return <img src={child.photoUrl} alt="" draggable={false} style={{ ...base, objectFit: "cover", display: "block", background: "#0d1424" }} />;
+    return <img src={child.photoUrl} alt="" draggable={false} style={{ ...base, objectFit: "cover", display: "block", background: "var(--lk-n-0d1424, #0d1424)" }} />;
   }
   return (
     <div aria-hidden style={{
@@ -155,8 +156,8 @@ export function HomeView({
       flex: 1, minHeight: 0, overflowY: "auto",
       display: "flex", flexDirection: "column", alignItems: "center",
       padding: "28px 20px 32px",
-      backgroundColor: "#0b172e",
-      backgroundImage: "radial-gradient(900px 520px at 50% -10%, rgba(247,201,93,0.16), transparent 70%), radial-gradient(700px 420px at 100% 110%, rgba(96,165,250,0.10), transparent 70%)",
+      backgroundColor: "var(--lk-bg, #0b172e)",
+      backgroundImage: "radial-gradient(900px 520px at 50% -10%, var(--lk-accent-hi-160, rgba(247,201,93,0.16)), transparent 70%), radial-gradient(700px 420px at 100% 110%, rgba(96,165,250,0.10), transparent 70%)",
     }}>
       <style>{`
         .nm-home-kid { transition: transform 220ms cubic-bezier(0.22,1,0.36,1), opacity 220ms ease; }
@@ -168,16 +169,16 @@ export function HomeView({
 
       <div style={{ flex: "1 1 0", minHeight: 8, maxHeight: 60 }} />
 
-      <div style={{ color: "rgba(247,240,227,0.7)", fontFamily: FONT, fontSize: 18, fontWeight: 600, letterSpacing: "0.01em", animation: "nm-home-in 0.4s ease-out both" }}>
+      <div style={{ color: "var(--lk-ink-700, rgba(247,240,227,0.7))", fontFamily: FONT, fontSize: 18, fontWeight: 600, letterSpacing: "0.01em", animation: "nm-home-in 0.4s ease-out both" }}>
         {greeting()}, {nanaName || "Nana"}
       </div>
 
       {loading && children.length === 0 ? (
-        <div style={{ color: "rgba(247,240,227,0.6)", fontFamily: FONT, fontSize: 18, marginTop: 40 }}>Loading…</div>
+        <div style={{ color: "var(--lk-ink-600, rgba(247,240,227,0.6))", fontFamily: FONT, fontSize: 18, marginTop: 40 }}>Loading…</div>
       ) : loadError && children.length === 0 ? (
         <div data-testid="home-load-error" style={{ marginTop: 36, display: "flex", flexDirection: "column", alignItems: "center", gap: 16, maxWidth: 520, textAlign: "center" }}>
           <div style={{ color: CREAM, fontFamily: SERIF, fontSize: 28, fontWeight: 700 }}>Couldn't load your grandchildren</div>
-          <div style={{ color: "rgba(247,240,227,0.75)", fontFamily: FONT, fontSize: 17, lineHeight: 1.5 }}>Check that this iPad is online, then try again.</div>
+          <div style={{ color: "var(--lk-ink-750, rgba(247,240,227,0.75))", fontFamily: FONT, fontSize: 17, lineHeight: 1.5 }}>Check that this iPad is online, then try again.</div>
           {onRetry && <button type="button" data-testid="home-retry" onClick={onRetry} className="nm-home-cta" style={ctaStyle(true)}>Try again</button>}
         </div>
       ) : children.length === 0 ? (
@@ -187,7 +188,7 @@ export function HomeView({
           {onOpenLibrary && (
             <button type="button" data-testid="home-empty-library" onClick={onOpenLibrary} className="nm-home-cta" style={{
               minHeight: 56, padding: "12px 26px", borderRadius: 999,
-              background: "rgba(255,255,255,0.06)", border: "1.5px solid rgba(201,146,42,0.55)",
+              background: "var(--lk-fill-060, rgba(255,255,255,0.06))", border: "1.5px solid var(--lk-accent-550, rgba(201,146,42,0.55))",
               color: CREAM, fontFamily: FONT, fontSize: 18, fontWeight: 700,
               cursor: "pointer", touchAction: "manipulation",
             }}>
@@ -196,16 +197,16 @@ export function HomeView({
           )}
           <div data-testid="home-connect-help" style={{
             marginTop: 18, maxWidth: 480, padding: "16px 20px", borderRadius: 18,
-            background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.12)",
+            background: "var(--lk-fill-050, rgba(255,255,255,0.05))", border: "1px solid var(--lk-line-120, rgba(255,255,255,0.12))",
             textAlign: "center", display: "flex", flexDirection: "column", gap: 10, alignItems: "center",
           }}>
-            <div style={{ color: "rgba(247,240,227,0.82)", fontFamily: FONT, fontSize: 16, lineHeight: 1.5 }}>
+            <div style={{ color: "var(--lk-ink-820, rgba(247,240,227,0.82))", fontFamily: FONT, fontSize: 16, lineHeight: 1.5 }}>
               To connect your grandchild's iPad, open NeverMiss there, tap <strong>I'm a Grandchild</strong> and enter your family code{familyCode ? ":" : <>. You'll find it in <strong>Menu › Settings › Family</strong>.</>}
             </div>
             {familyCode ? <FamilyCodeLine code={familyCode} /> : onOpenSettings && (
               <button type="button" data-testid="home-open-family" onClick={onOpenSettings} style={{
                 minHeight: 48, padding: "10px 20px", borderRadius: 999,
-                background: "transparent", border: "1.5px solid rgba(201,146,42,0.55)",
+                background: "transparent", border: "1.5px solid var(--lk-accent-550, rgba(201,146,42,0.55))",
                 color: CREAM, fontFamily: FONT, fontSize: 16, fontWeight: 700, cursor: "pointer", touchAction: "manipulation",
               }}>
                 Show my family code
@@ -213,8 +214,8 @@ export function HomeView({
             )}
           </div>
           {accountLabel && (
-            <div data-testid="home-account" style={{ color: "rgba(247,240,227,0.55)", fontFamily: FONT, fontSize: 14, lineHeight: 1.5, textAlign: "center", maxWidth: 480 }}>
-              Signed in as <strong style={{ color: "rgba(247,240,227,0.8)" }}>{accountLabel}</strong>. Not your family? Sign out from the Menu.
+            <div data-testid="home-account" style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: FONT, fontSize: 14, lineHeight: 1.5, textAlign: "center", maxWidth: 480 }}>
+              Signed in as <strong style={{ color: "var(--lk-ink-800, rgba(247,240,227,0.8))" }}>{accountLabel}</strong>. Not your family? Sign out from the Menu.
             </div>
           )}
         </div>
@@ -255,12 +256,12 @@ export function HomeView({
                       <span aria-label={`${c.name} is here`} style={{
                         position: "absolute", right: size * 0.08, bottom: size * 0.08,
                         width: Math.max(22, size * 0.13), height: Math.max(22, size * 0.13), borderRadius: "50%",
-                        background: "#22c55e", border: "4px solid #0b172e",
+                        background: "#22c55e", border: "4px solid var(--lk-bg, #0b172e)",
                         animation: "nm-here-pulse 2s ease-in-out infinite",
                       }} />
                     )}
                   </button>
-                  <span style={{ color: selected ? CREAM : "rgba(247,240,227,0.85)", fontFamily: SERIF, fontSize: n <= 2 ? 26 : 22, fontWeight: 700 }}>
+                  <span style={{ color: selected ? CREAM : "var(--lk-ink-850, rgba(247,240,227,0.85))", fontFamily: SERIF, fontSize: n <= 2 ? 26 : 22, fontWeight: 700 }}>
                     {c.name}
                   </span>
                   {!c.photoUrl && (
@@ -271,7 +272,7 @@ export function HomeView({
                       data-testid={`home-add-photo-${c.name}`}
                       style={{
                         marginTop: -4, background: "transparent", border: "none",
-                        color: AMBER, fontFamily: FONT, fontSize: 15, fontWeight: 700,
+                        color: AMBER_T, fontFamily: FONT, fontSize: 15, fontWeight: 700,
                         cursor: "pointer", padding: "6px 10px", minHeight: 36, touchAction: "manipulation",
                       }}
                     >
@@ -287,26 +288,26 @@ export function HomeView({
           <div data-testid="home-status" style={{ marginTop: 22, minHeight: 34, display: "flex", alignItems: "center", gap: 10, fontFamily: FONT, fontSize: 18, fontWeight: 700 }}>
             {!active ? (
               onKidsIpad ? (
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 10, color: "#86efac" }}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 10, color: "var(--lk-ok-t, #86efac)" }}>
                   <span aria-hidden style={{ width: 12, height: 12, borderRadius: "50%", background: "#22c55e", animation: "nm-here-pulse 2s ease-in-out infinite" }} />
                   {onKidsIpad.name} is on the kids' iPad
                 </span>
               ) : next ? (
-                <span style={{ color: "rgba(247,240,227,0.85)" }}>📅 Next • {next}</span>
+                <span style={{ color: "var(--lk-ink-850, rgba(247,240,227,0.85))" }}>📅 Next • {next}</span>
               ) : (
-                <span style={{ color: "rgba(247,240,227,0.6)", fontWeight: 600 }}>Tap a grandchild to start</span>
+                <span style={{ color: "var(--lk-ink-600, rgba(247,240,227,0.6))", fontWeight: 600 }}>Tap a grandchild to start</span>
               )
             ) : here ? (
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 10, color: "#86efac" }}>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 10, color: "var(--lk-ok-t, #86efac)" }}>
                 <span aria-hidden style={{ width: 12, height: 12, borderRadius: "50%", background: "#22c55e", animation: "nm-here-pulse 2s ease-in-out infinite" }} />
                 {name} is here
               </span>
             ) : otherHere ? (
-              <span style={{ color: "rgba(247,240,227,0.75)" }}>{otherHere.name} is on the kids' iPad</span>
+              <span style={{ color: "var(--lk-ink-750, rgba(247,240,227,0.75))" }}>{otherHere.name} is on the kids' iPad</span>
             ) : next ? (
-              <span style={{ color: "rgba(247,240,227,0.85)" }}>📅 Next • {next}</span>
+              <span style={{ color: "var(--lk-ink-850, rgba(247,240,227,0.85))" }}>📅 Next • {next}</span>
             ) : (
-              <span style={{ color: "rgba(247,240,227,0.55)", fontWeight: 600 }}>Waiting for {name} to join</span>
+              <span style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontWeight: 600 }}>Waiting for {name} to join</span>
             )}
           </div>
 
@@ -326,16 +327,16 @@ export function HomeView({
             data-testid="home-add-child"
             style={{
               marginTop: 16, background: "transparent", border: "none",
-              color: "rgba(247,240,227,0.7)", fontFamily: FONT, fontSize: 16, fontWeight: 700,
+              color: "var(--lk-ink-700, rgba(247,240,227,0.7))", fontFamily: FONT, fontSize: 16, fontWeight: 700,
               cursor: "pointer", padding: "10px 14px", minHeight: 44, touchAction: "manipulation",
             }}
           >
             + Add a grandchild
           </button>
-          {photoError && <div role="alert" style={{ color: "#fca5a5", fontFamily: FONT, fontSize: 15, marginTop: 6 }}>{photoError}</div>}
+          {photoError && <div role="alert" style={{ color: "var(--lk-bad-t, #fca5a5)", fontFamily: FONT, fontSize: 15, marginTop: 6 }}>{photoError}</div>}
           {familyCode && (
             <div data-testid="home-family" style={{ marginTop: 18, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-              <span style={{ color: "rgba(247,240,227,0.55)", fontFamily: FONT, fontSize: 13, fontWeight: 600 }}>
+              <span style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: FONT, fontSize: 13, fontWeight: 600 }}>
                 Family code, for a grandchild's iPad
               </span>
               <FamilyCodeLine code={familyCode} small />
@@ -363,10 +364,10 @@ function FamilyCodeLine({ code, small }: { code: string; small?: boolean }) {
   };
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", justifyContent: "center" }}>
-      <span data-testid="home-family-code" style={{ color: AMBER, fontFamily: FONT, fontSize: small ? 24 : 30, fontWeight: 900, letterSpacing: "0.22em" }}>{code}</span>
+      <span data-testid="home-family-code" style={{ color: AMBER_T, fontFamily: FONT, fontSize: small ? 24 : 30, fontWeight: 900, letterSpacing: "0.22em" }}>{code}</span>
       <button type="button" data-testid="home-family-copy" onClick={() => void copy()} style={{
         minHeight: 44, padding: "0 16px", borderRadius: 999,
-        background: "rgba(255,255,255,0.06)", border: "1px solid rgba(201,146,42,0.5)",
+        background: "var(--lk-fill-060, rgba(255,255,255,0.06))", border: "1px solid var(--lk-accent-500, rgba(201,146,42,0.5))",
         color: CREAM, fontFamily: FONT, fontSize: 15, fontWeight: 700, cursor: "pointer", touchAction: "manipulation",
       }}>
         {copied === "yes" ? "Copied ✓" : copied === "no" ? "Couldn't copy" : "📋 Copy"}
@@ -379,10 +380,10 @@ function ctaStyle(enabled: boolean): CSSProperties {
   return {
     minHeight: 72, minWidth: "min(460px, 100%)", maxWidth: "100%",
     padding: "0 34px", borderRadius: 999, border: "none",
-    background: enabled ? "linear-gradient(135deg, #f7c95d 0%, #C9922A 60%, #d97706 100%)" : "rgba(255,255,255,0.08)",
-    color: enabled ? NAVY : "rgba(247,240,227,0.4)",
+    background: enabled ? "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 60%, var(--lk-accent-2, #d97706) 100%)" : "var(--lk-fill-080, rgba(255,255,255,0.08))",
+    color: enabled ? NAVY : "var(--lk-ink-400, rgba(247,240,227,0.4))",
     fontFamily: FONT, fontSize: 22, fontWeight: 800, letterSpacing: "0.01em",
-    boxShadow: enabled ? "0 12px 34px rgba(201,146,42,0.42), inset 0 1px 0 rgba(255,255,255,0.35)" : "none",
+    boxShadow: enabled ? "0 12px 34px var(--lk-accent-420, rgba(201,146,42,0.42)), inset 0 1px 0 var(--lk-glass-350, rgba(255,255,255,0.35))" : "none",
     cursor: enabled ? "pointer" : "not-allowed", touchAction: "manipulation",
     whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
     transition: "transform 120ms ease",
@@ -392,13 +393,13 @@ function ctaStyle(enabled: boolean): CSSProperties {
 /* ── Add a grandchild ─────────────────────────────────────────────── */
 
 const fieldLabel: CSSProperties = {
-  display: "block", color: "rgba(247,240,227,0.8)", fontFamily: FONT,
+  display: "block", color: "var(--lk-ink-800, rgba(247,240,227,0.8))", fontFamily: FONT,
   fontSize: 14, fontWeight: 800, marginBottom: 6,
 };
 const fieldInput: CSSProperties = {
   width: "100%", boxSizing: "border-box",
   padding: "14px 16px", borderRadius: 14,
-  border: "1px solid rgba(255,255,255,0.18)", backgroundColor: "rgba(255,255,255,0.06)",
+  border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))", backgroundColor: "var(--lk-fill-060, rgba(255,255,255,0.06))",
   color: CREAM, fontFamily: FONT, fontSize: 18, outline: "none",
 };
 
@@ -443,12 +444,12 @@ export function AddChildModal({
 
   return (
     <div role="dialog" aria-modal="true" aria-labelledby="add-child-title" data-testid="add-child-modal" className="nm-kb-lift"
-      style={{ position: "absolute", inset: 0, zIndex: 90, backgroundColor: "rgba(8,15,30,0.8)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, animation: "phase-intro-fade 0.2s ease-out" }}
+      style={{ position: "absolute", inset: 0, zIndex: 90, backgroundColor: "var(--lk-deep-800, rgba(8,15,30,0.8))", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, animation: "phase-intro-fade 0.2s ease-out" }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div style={{ backgroundColor: "#162240", border: "1px solid rgba(201,146,42,0.35)", borderRadius: 22, padding: "22px 24px 20px", width: "100%", maxWidth: 780, maxHeight: "100%", overflowY: "auto", boxShadow: "0 18px 60px rgba(0,0,0,0.55)", animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)" }}>
+      <div style={{ backgroundColor: "var(--lk-n-162240, #162240)", border: "1px solid var(--lk-accent-350, rgba(201,146,42,0.35))", borderRadius: 22, padding: "22px 24px 20px", width: "100%", maxWidth: 780, maxHeight: "100%", overflowY: "auto", boxShadow: "0 18px 60px var(--lk-shadow-550, rgba(0,0,0,0.55))", animation: "phase-card-up 0.28s cubic-bezier(0.22,1,0.36,1)" }}>
         <div id="add-child-title" style={{ color: CREAM, fontFamily: SERIF, fontSize: 28, fontWeight: 700, textAlign: "center" }}>Add a grandchild</div>
-        <div style={{ color: "rgba(247,240,227,0.7)", fontFamily: FONT, fontSize: 15, lineHeight: 1.5, textAlign: "center", margin: "6px 0 16px" }}>
+        <div style={{ color: "var(--lk-ink-700, rgba(247,240,227,0.7))", fontFamily: FONT, fontSize: 15, lineHeight: 1.5, textAlign: "center", margin: "6px 0 16px" }}>
           They sign in on their iPad by tapping their picture and a 4-digit PIN.
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 28, alignItems: "flex-start", justifyContent: "center" }}>
@@ -458,13 +459,13 @@ export function AddChildModal({
           <button type="button" onClick={() => void choosePhoto()} aria-label={photo ? "Change photo" : "Add a photo"} style={{ padding: 0, border: "none", background: "transparent", cursor: "pointer", borderRadius: "50%" }}>
             {photo
               ? <img src={photo} alt="" style={{ width: 84, height: 84, borderRadius: "50%", objectFit: "cover", border: `3px solid ${AMBER}` }} />
-              : <span style={{ width: 84, height: 84, borderRadius: "50%", display: "inline-flex", alignItems: "center", justifyContent: "center", border: "2px dashed rgba(201,146,42,0.7)", color: AMBER, fontSize: 30 }}>📷</span>}
+              : <span style={{ width: 84, height: 84, borderRadius: "50%", display: "inline-flex", alignItems: "center", justifyContent: "center", border: "2px dashed var(--lk-accent-700, rgba(201,146,42,0.7))", color: AMBER_T, fontSize: 30 }}>📷</span>}
           </button>
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            <button type="button" onClick={() => void choosePhoto()} style={{ background: "transparent", border: "none", color: AMBER, fontFamily: FONT, fontSize: 17, fontWeight: 800, padding: 0, textAlign: "left", cursor: "pointer" }}>
+            <button type="button" onClick={() => void choosePhoto()} style={{ background: "transparent", border: "none", color: AMBER_T, fontFamily: FONT, fontSize: 17, fontWeight: 800, padding: 0, textAlign: "left", cursor: "pointer" }}>
               {photo ? "Change photo" : "Add a photo"}
             </button>
-            <span style={{ color: "rgba(247,240,227,0.55)", fontFamily: FONT, fontSize: 13 }}>Optional. You can add it later.</span>
+            <span style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: FONT, fontSize: 13 }}>Optional. You can add it later.</span>
           </div>
         </div>
 
@@ -474,7 +475,7 @@ export function AddChildModal({
           onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
           style={{ ...fieldInput, marginBottom: 14 }} />
 
-        <label style={{ display: "flex", alignItems: "flex-start", gap: 12, cursor: "pointer", padding: "12px 14px", borderRadius: 14, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.12)" }}>
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 12, cursor: "pointer", padding: "12px 14px", borderRadius: 14, background: "var(--lk-fill-040, rgba(255,255,255,0.04))", border: "1px solid var(--lk-line-120, rgba(255,255,255,0.12))" }}>
           <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} data-testid="add-child-consent"
             style={{ width: 24, height: 24, marginTop: 2, accentColor: AMBER, flexShrink: 0 }} />
           <span style={{ color: CREAM, fontFamily: FONT, fontSize: 15, lineHeight: 1.45 }}>
@@ -488,12 +489,12 @@ export function AddChildModal({
         </div>
         </div>
 
-        {error && <div role="alert" style={{ color: "#fca5a5", fontFamily: FONT, fontSize: 14, marginTop: 10, textAlign: "center" }}>{error}</div>}
+        {error && <div role="alert" style={{ color: "var(--lk-bad-t, #fca5a5)", fontFamily: FONT, fontSize: 14, marginTop: 10, textAlign: "center" }}>{error}</div>}
 
         <div style={{ display: "flex", gap: 12, marginTop: 18 }}>
-          <button type="button" onClick={onClose} disabled={submitting} style={{ flex: 1, minHeight: 56, backgroundColor: "rgba(255,255,255,0.07)", color: CREAM, border: "1px solid rgba(255,255,255,0.18)", borderRadius: 999, fontFamily: FONT, fontWeight: 800, fontSize: 17, cursor: "pointer" }}>Cancel</button>
+          <button type="button" onClick={onClose} disabled={submitting} style={{ flex: 1, minHeight: 56, backgroundColor: "var(--lk-fill-070, rgba(255,255,255,0.07))", color: CREAM, border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))", borderRadius: 999, fontFamily: FONT, fontWeight: 800, fontSize: 17, cursor: "pointer" }}>Cancel</button>
           <button type="button" onClick={() => void submit()} disabled={!valid || submitting} data-testid="add-child-submit"
-            style={{ flex: 1, minHeight: 56, background: valid && !submitting ? "linear-gradient(135deg, #f7c95d 0%, #C9922A 55%, #d97706 100%)" : "rgba(255,255,255,0.08)", color: valid && !submitting ? NAVY : "rgba(247,240,227,0.4)", border: "none", borderRadius: 999, fontFamily: FONT, fontWeight: 800, fontSize: 17, cursor: valid && !submitting ? "pointer" : "not-allowed" }}>
+            style={{ flex: 1, minHeight: 56, background: valid && !submitting ? "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)" : "var(--lk-fill-080, rgba(255,255,255,0.08))", color: valid && !submitting ? NAVY : "var(--lk-ink-400, rgba(247,240,227,0.4))", border: "none", borderRadius: 999, fontFamily: FONT, fontWeight: 800, fontSize: 17, cursor: valid && !submitting ? "pointer" : "not-allowed" }}>
             {submitting ? "Adding…" : "Add"}
           </button>
         </div>
@@ -544,7 +545,7 @@ export function GrandchildrenCard({
 
   const smallBtn: CSSProperties = {
     minHeight: 44, padding: "0 14px", borderRadius: 999,
-    background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.16)",
+    background: "var(--lk-fill-060, rgba(255,255,255,0.06))", border: "1px solid var(--lk-line-160, rgba(255,255,255,0.16))",
     color: CREAM, fontFamily: FONT, fontSize: 14, fontWeight: 700, cursor: "pointer", touchAction: "manipulation",
   };
 
@@ -554,7 +555,7 @@ export function GrandchildrenCard({
     {sharing.length > 1 && (
       <div data-testid="settings-pin-shared" role="note" style={{
         marginBottom: 12, padding: "12px 16px", borderRadius: 14,
-        background: "rgba(201,146,42,0.12)", border: "1px solid rgba(201,146,42,0.45)",
+        background: "var(--lk-accent-120, rgba(201,146,42,0.12))", border: "1px solid var(--lk-accent-450, rgba(201,146,42,0.45))",
         color: CREAM, fontFamily: FONT, fontSize: 15, lineHeight: 1.5,
       }}>
         {sharing.map(c => c.name).join(" and ")} have the same PIN. Give each their own, so they can sign in by just typing it.
@@ -562,7 +563,7 @@ export function GrandchildrenCard({
     )}
     <div data-testid="settings-grandchildren" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 12 }}>
       {children.map(c => (
-        <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 14px", borderRadius: 16, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", flexWrap: "wrap" }}>
+        <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 14px", borderRadius: 16, background: "var(--lk-fill-040, rgba(255,255,255,0.04))", border: "1px solid var(--lk-line-100, rgba(255,255,255,0.1))", flexWrap: "wrap" }}>
           <ChildAvatar child={c} size={64} ring="plain" />
           <span style={{ color: CREAM, fontFamily: SERIF, fontSize: 22, fontWeight: 700, flex: "1 1 120px", minWidth: 0 }}>{c.name}</span>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -573,23 +574,23 @@ export function GrandchildrenCard({
             <button type="button" style={smallBtn} onClick={() => setEditing({ child: c, field: "name" })}>Rename</button>
             <button type="button" style={smallBtn} onClick={() => setEditing({ child: c, field: "pin" })}>Change PIN</button>
             {onRemove && (
-              <button type="button" data-testid={`remove-child-${c.name}`} style={{ ...smallBtn, color: "#fca5a5", borderColor: "rgba(248,113,113,0.45)" }} disabled={busy === c.id} onClick={() => setRemoving(c)}>Remove</button>
+              <button type="button" data-testid={`remove-child-${c.name}`} style={{ ...smallBtn, color: "var(--lk-bad-t, #fca5a5)", borderColor: "rgba(248,113,113,0.45)" }} disabled={busy === c.id} onClick={() => setRemoving(c)}>Remove</button>
             )}
           </div>
         </div>
       ))}
-      <button type="button" onClick={onAddChild} style={{ ...smallBtn, alignSelf: "flex-start", color: AMBER, borderColor: "rgba(201,146,42,0.5)" }}>+ Add a grandchild</button>
-      {msg && <div role="status" style={{ color: msg.bad ? "#fca5a5" : "#86efac", fontFamily: FONT, fontSize: 15 }}>{msg.text}</div>}
+      <button type="button" onClick={onAddChild} style={{ ...smallBtn, alignSelf: "flex-start", color: AMBER_T, borderColor: "var(--lk-accent-500, rgba(201,146,42,0.5))" }}>+ Add a grandchild</button>
+      {msg && <div role="status" style={{ color: msg.bad ? "var(--lk-bad-t, #fca5a5)" : "var(--lk-ok-t, #86efac)", fontFamily: FONT, fontSize: 15 }}>{msg.text}</div>}
       {removing && onRemove && (
-        <div role="dialog" aria-modal="true" data-testid="remove-child-confirm" style={{ position: "fixed", inset: 0, zIndex: 95, backgroundColor: "rgba(8,15,30,0.8)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+        <div role="dialog" aria-modal="true" data-testid="remove-child-confirm" style={{ position: "fixed", inset: 0, zIndex: 95, backgroundColor: "var(--lk-deep-800, rgba(8,15,30,0.8))", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
           onClick={(e) => { if (e.target === e.currentTarget) setRemoving(null); }}>
-          <div style={{ backgroundColor: "#162240", border: "1px solid rgba(248,113,113,0.45)", borderRadius: 22, padding: 24, width: "100%", maxWidth: 440, textAlign: "center" }}>
+          <div style={{ backgroundColor: "var(--lk-n-162240, #162240)", border: "1px solid rgba(248,113,113,0.45)", borderRadius: 22, padding: 24, width: "100%", maxWidth: 440, textAlign: "center" }}>
             <div style={{ color: CREAM, fontFamily: SERIF, fontSize: 26, fontWeight: 700 }}>Remove {removing.name}?</div>
-            <div style={{ color: "rgba(247,240,227,0.78)", fontFamily: FONT, fontSize: 16, lineHeight: 1.5, margin: "10px 0 20px" }}>
+            <div style={{ color: "var(--lk-ink-780, rgba(247,240,227,0.78))", fontFamily: FONT, fontSize: 16, lineHeight: 1.5, margin: "10px 0 20px" }}>
               {removing.name} will no longer appear on Home or on the kids' iPad. Their bookmarks, saved words and reading history are deleted too. This can't be undone.
             </div>
             <div style={{ display: "flex", gap: 12 }}>
-              <button type="button" onClick={() => setRemoving(null)} style={{ flex: 1, minHeight: 56, backgroundColor: "rgba(255,255,255,0.07)", color: CREAM, border: "1px solid rgba(255,255,255,0.18)", borderRadius: 999, fontFamily: FONT, fontWeight: 800, fontSize: 17, cursor: "pointer" }}>Keep</button>
+              <button type="button" onClick={() => setRemoving(null)} style={{ flex: 1, minHeight: 56, backgroundColor: "var(--lk-fill-070, rgba(255,255,255,0.07))", color: CREAM, border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))", borderRadius: 999, fontFamily: FONT, fontWeight: 800, fontSize: 17, cursor: "pointer" }}>Keep</button>
               <button type="button" data-testid="remove-child-ok" onClick={() => {
                 const c = removing;
                 setRemoving(null);
@@ -630,9 +631,9 @@ function ChildEditModal({ child, field, onClose, onSave }: { child: Child; field
     finally { setSaving(false); }
   };
   return (
-    <div role="dialog" aria-modal="true" className="nm-kb-lift" style={{ position: "fixed", inset: 0, zIndex: 95, backgroundColor: "rgba(8,15,30,0.8)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
+    <div role="dialog" aria-modal="true" className="nm-kb-lift" style={{ position: "fixed", inset: 0, zIndex: 95, backgroundColor: "var(--lk-deep-800, rgba(8,15,30,0.8))", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div style={{ backgroundColor: "#162240", border: "1px solid rgba(201,146,42,0.35)", borderRadius: 22, padding: 24, width: "100%", maxWidth: 420, maxHeight: "100%", overflowY: "auto" }}>
+      <div style={{ backgroundColor: "var(--lk-n-162240, #162240)", border: "1px solid var(--lk-accent-350, rgba(201,146,42,0.35))", borderRadius: 22, padding: 24, width: "100%", maxWidth: 420, maxHeight: "100%", overflowY: "auto" }}>
         <div style={{ color: CREAM, fontFamily: SERIF, fontSize: 24, fontWeight: 700, marginBottom: 14, textAlign: "center" }}>
           {field === "name" ? `Rename ${child.name}` : `New PIN for ${child.name}`}
         </div>
@@ -645,11 +646,11 @@ function ChildEditModal({ child, field, onClose, onSave }: { child: Child; field
             <PinPad value={value} onChange={setValue} keySize={60} testId="edit-pin-pad" />
           </div>
         )}
-        {error && <div role="alert" style={{ color: "#fca5a5", fontFamily: FONT, fontSize: 14, marginTop: 10, textAlign: "center" }}>{error}</div>}
+        {error && <div role="alert" style={{ color: "var(--lk-bad-t, #fca5a5)", fontFamily: FONT, fontSize: 14, marginTop: 10, textAlign: "center" }}>{error}</div>}
         <div style={{ display: "flex", gap: 12, marginTop: 18 }}>
-          <button type="button" onClick={onClose} style={{ flex: 1, minHeight: 54, backgroundColor: "rgba(255,255,255,0.07)", color: CREAM, border: "1px solid rgba(255,255,255,0.18)", borderRadius: 999, fontFamily: FONT, fontWeight: 800, fontSize: 17, cursor: "pointer" }}>Cancel</button>
+          <button type="button" onClick={onClose} style={{ flex: 1, minHeight: 54, backgroundColor: "var(--lk-fill-070, rgba(255,255,255,0.07))", color: CREAM, border: "1px solid var(--lk-line-180, rgba(255,255,255,0.18))", borderRadius: 999, fontFamily: FONT, fontWeight: 800, fontSize: 17, cursor: "pointer" }}>Cancel</button>
           <button type="button" onClick={() => void save()} disabled={!valid || saving}
-            style={{ flex: 1, minHeight: 54, background: valid && !saving ? AMBER : "rgba(255,255,255,0.08)", color: valid && !saving ? NAVY : "rgba(247,240,227,0.4)", border: "none", borderRadius: 999, fontFamily: FONT, fontWeight: 800, fontSize: 17, cursor: valid ? "pointer" : "not-allowed" }}>
+            style={{ flex: 1, minHeight: 54, background: valid && !saving ? AMBER : "var(--lk-fill-080, rgba(255,255,255,0.08))", color: valid && !saving ? NAVY : "var(--lk-ink-400, rgba(247,240,227,0.4))", border: "none", borderRadius: 999, fontFamily: FONT, fontWeight: 800, fontSize: 17, cursor: valid ? "pointer" : "not-allowed" }}>
             {saving ? "Saving…" : "Save"}
           </button>
         </div>

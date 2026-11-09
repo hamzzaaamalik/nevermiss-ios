@@ -23,20 +23,20 @@ const SIZE: Record<Size, number> = {
 
 const TONE: Record<Tone, { bg: string; bgActive: string; bgHover: string; fg: string; fgActive: string; border: string }> = {
   default: {
-    bg: "rgba(255,255,255,0.06)",
-    bgHover: "rgba(255,255,255,0.11)",
-    bgActive: "rgba(201,146,42,0.22)",
+    bg: "var(--lk-fill-060, rgba(255,255,255,0.06))",
+    bgHover: "var(--lk-fill-110, rgba(255,255,255,0.11))",
+    bgActive: "var(--lk-accent-220, rgba(201,146,42,0.22))",
     fg: COLOR.textMuted,
     fgActive: COLOR.amber,
-    border: "1px solid rgba(255,255,255,0.10)",
+    border: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))",
   },
   amber: {
-    bg: "rgba(201,146,42,0.14)",
-    bgHover: "rgba(201,146,42,0.22)",
-    bgActive: "rgba(201,146,42,0.30)",
+    bg: "var(--lk-accent-140, rgba(201,146,42,0.14))",
+    bgHover: "var(--lk-accent-220, rgba(201,146,42,0.22))",
+    bgActive: "var(--lk-accent-300, rgba(201,146,42,0.30))",
     fg: COLOR.amber,
     fgActive: COLOR.amber,
-    border: "1px solid rgba(201,146,42,0.45)",
+    border: "1px solid var(--lk-accent-450, rgba(201,146,42,0.45))",
   },
   danger: {
     bg: "rgba(239,68,68,0.14)",

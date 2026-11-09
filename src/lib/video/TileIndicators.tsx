@@ -136,7 +136,7 @@ function YouPill({ compact }: { compact: boolean }) {
     letterSpacing: "0.06em",
     color: "#fff",
     backgroundColor: "rgba(0,0,0,0.55)",
-    border: "1px solid rgba(255,255,255,0.22)",
+    border: "1px solid var(--lk-line-220, rgba(255,255,255,0.22))",
     borderRadius: 999,
     padding: compact ? "2px 7px" : "3px 9px",
     fontFamily: "Inter, DM Sans, sans-serif",
