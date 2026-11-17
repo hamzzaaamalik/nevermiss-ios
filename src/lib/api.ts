@@ -23,6 +23,21 @@ function setSessionToken(tok: string | null) {
   } catch {}
 }
 
+// Build 44: the kids' iPad has no grandparent sign-in. A child's PIN
+// sign-in hands it a device key, which lets it open the family's bought
+// books (sent like a sign-in; a grandparent's own sign-in comes first).
+const DEVICE_TOKEN_KEY = "nm_device_token";
+let deviceToken: string | null = (() => {
+  try { return localStorage.getItem(DEVICE_TOKEN_KEY); } catch { return null; }
+})();
+function setDeviceToken(tok: string | null) {
+  deviceToken = tok;
+  try {
+    if (tok) localStorage.setItem(DEVICE_TOKEN_KEY, tok);
+    else localStorage.removeItem(DEVICE_TOKEN_KEY);
+  } catch {}
+}
+
 export class ApiError extends Error {
   status: number;
   reason?: string;
@@ -41,7 +56,8 @@ export class ApiError extends Error {
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = {};
   if (body) headers["Content-Type"] = "application/json";
-  if (sessionToken) headers["Authorization"] = `Bearer ${sessionToken}`;
+  const bearer = sessionToken ?? deviceToken;
+  if (bearer) headers["Authorization"] = `Bearer ${bearer}`;
 
   const res = await fetch(`${BASE}${path}`, {
     method,
@@ -78,6 +94,8 @@ export interface Connection {
   /** Build 43: the family's look and Library style (older servers send neither). */
   look?: string | null;
   libraryStyle?: string | null;
+  /** Build 44: the home's name, for a grandparent with several homes. */
+  name?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -167,8 +185,21 @@ export const api = {
       return res;
     },
   },
+  /** Build 44: the Book Store on Nana's iPad (books from NeverMiss authors). */
+  store: {
+    status: () => req<{ enabled: boolean; currency: string }>("GET", "/store/status"),
+    books: () => req<{ enabled: boolean; books: StoreBook[] }>("GET", "/store/books"),
+    sample: (bookId: string) => req<{ book: { id: string; title: string; author: string; pages: StorePage[]; sampleOf: string } }>("GET", `/store/books/${encodeURIComponent(bookId)}/sample`),
+    checkout: (bookId: string, connectionId: string | null) =>
+      req<{ purchaseId: string; url: string }>("POST", "/store/checkout", { bookId, ...(connectionId ? { connectionId } : {}) }),
+    purchase: (purchaseId: string) => req<{ id: string; bookId: string; status: string }>("GET", `/store/purchases/${purchaseId}`),
+  },
   connections: {
-    invite: () => req<{ connection: Connection; inviteToken: string }>("POST", "/connections/invite"),
+    /** Build 44: `name` names a new home ("Add another home"). */
+    invite: (name?: string) => req<{ connection: Connection; inviteToken: string }>("POST", "/connections/invite", name ? { name } : undefined),
+    /** Build 44: rename a home. */
+    rename: (connectionId: string, name: string) =>
+      req<{ connection: Connection }>("PATCH", `/connections/${encodeURIComponent(connectionId)}`, { name }),
     lookup: (token: string) =>
       req<{ valid: boolean; connectionId: string; nanaName: string; needsPin: boolean }>("GET", `/connections/lookup/${token}`),
     list: () => req<{ connections: Array<{ connection: Connection; nana: SafeUser | null; childCount?: number }> }>("GET", "/connections"),
@@ -207,13 +238,19 @@ export const api = {
       req<{ child: Child }>("PUT", `/children/${childId}/photo`, { photo }),
     removePhoto: (childId: string) =>
       req<{ child: Child }>("DELETE", `/children/${childId}/photo`),
+    /** Build 44: move a grandchild (with their bookmarks and words) to another home. */
+    move: (childId: string, connectionId: string) =>
+      req<{ child: Child }>("POST", `/children/${childId}/move`, { connectionId }),
     list: (connectionId: string) => req<Child[]>("GET", `/children/${connectionId}`),
     /** With `childId` (the picture the child tapped) the PIN is checked
      *  for that child only. */
     /** `unique`: a PIN only one grandchild has signs that child in even
      *  if another picture (or none) was tapped (Build 42). */
-    pinLogin: (connectionId: string, pin: string, childId?: string | null, unique = false) =>
-      req<{ child: Child; nanaName: string; connectionId: string }>("POST", "/children/pin-login", { connectionId, pin, ...(childId ? { childId } : {}), ...(unique ? { unique: true } : {}) }),
+    pinLogin: async (connectionId: string, pin: string, childId?: string | null, unique = false) => {
+      const r = await req<{ child: Child; nanaName: string; connectionId: string; deviceToken?: string }>("POST", "/children/pin-login", { connectionId, pin, ...(childId ? { childId } : {}), ...(unique ? { unique: true } : {}) });
+      if (r.deviceToken) setDeviceToken(r.deviceToken);
+      return r;
+    },
   },
   sessions: {
     publishEvent: (connectionId: string, type: string, payload: unknown) =>
@@ -655,3 +692,26 @@ export const api = {
     withdrawParentalConsent: () => req<{ ok: boolean; childrenRemoved: number; sessionsRemoved: number; progressRemoved: number }>("POST", "/account/withdraw-parental-consent"),
   },
 };
+
+
+/** Build 44: a book in the Book Store. */
+export interface StoreBook {
+  id: string;
+  title: string;
+  author: string;
+  authorBio: string;
+  tagline: string;
+  ageTier: string | null;
+  priceCents: number;
+  /** Free, or this family bought it: it's in their Library. */
+  owned: boolean;
+  pageCount: number;
+  samplePages: number;
+  cover: string | null;
+  emoji: string;
+  spineColor: string;
+}
+export interface StorePage {
+  imageUrl?: string; leftBody?: string; rightBody?: string; leftChapter?: string;
+  rightTitle?: string; rightTitleSub?: string; rightIsTitle?: boolean;
+}

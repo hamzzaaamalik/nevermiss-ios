@@ -2,6 +2,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { DailyVideo } from "@daily-co/daily-react";
 import { Avatar, getRoleLabel } from "./Avatar";
+import { usePersonPhoto } from "./personPhotos";
 import { AudioLevelMeter } from "./AudioLevelMeter";
 import { TileIndicators } from "./TileIndicators";
 import { QUALITY_COLOR, QUALITY_LABEL, type VideoPerson } from "./types";
@@ -338,12 +339,15 @@ function Fallback({
   objectFit: "cover" | "contain";
   objectPosition: string;
 }) {
-  if (fallbackSrc) {
+  // Build 44: the person's photo, when we have one, instead of a letter.
+  const photo = usePersonPhoto(person);
+  if (fallbackSrc || photo) {
     return (
       <img
-        src={fallbackSrc}
+        src={fallbackSrc || photo || undefined}
         alt={label}
-        style={{ width: "100%", height: "100%", objectFit, objectPosition, display: "block" }}
+        data-testid="video-photo-fallback"
+        style={{ width: "100%", height: "100%", objectFit: fallbackSrc ? objectFit : "cover", objectPosition, display: "block" }}
       />
     );
   }

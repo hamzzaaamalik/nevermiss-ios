@@ -49,8 +49,9 @@ export function ReactionOverlay({ reaction, style }: ReactionOverlayProps) {
       delay: i * 90,
     }));
     setParticles(next);
-    // Clear particles after the longest animation completes.
-    const t = setTimeout(() => setParticles([]), 2300);
+    // Clear once the last one has finished: 2 s plus the 450 ms stagger.
+    // (It used to clear at 2.3 s, cutting the sixth emoji off mid-air.)
+    const t = setTimeout(() => setParticles([]), 2600);
     return () => clearTimeout(t);
   }, [reaction?.ts]);
 
@@ -59,6 +60,7 @@ export function ReactionOverlay({ reaction, style }: ReactionOverlayProps) {
   return (
     <div
       aria-hidden
+      data-testid="reaction-overlay"
       style={{
         position: "absolute",
         inset: 0,
@@ -68,6 +70,10 @@ export function ReactionOverlay({ reaction, style }: ReactionOverlayProps) {
         ...style,
       }}
     >
+      {/* Rick's Build 43 review: the emoji jittered as they rose. Each one
+          now moves on its own graphics layer and only its position, size
+          and fade animate. The soft shadow is a text shadow drawn once
+          with the glyph, instead of a filter recomputed on every frame. */}
       {particles.map((p) => (
         <span
           key={p.id}
@@ -76,8 +82,13 @@ export function ReactionOverlay({ reaction, style }: ReactionOverlayProps) {
             bottom: -40,
             left: p.left,
             fontSize: 56,
+            lineHeight: 1,
+            opacity: 0,
             animation: `reaction-float 2s cubic-bezier(0.22, 0.6, 0.35, 1) ${p.delay}ms forwards`,
-            filter: "drop-shadow(0 4px 12px rgba(0,0,0,0.45))",
+            textShadow: "0 4px 12px rgba(0,0,0,0.35)",
+            willChange: "transform, opacity",
+            backfaceVisibility: "hidden",
+            WebkitBackfaceVisibility: "hidden",
             userSelect: "none",
           }}
         >

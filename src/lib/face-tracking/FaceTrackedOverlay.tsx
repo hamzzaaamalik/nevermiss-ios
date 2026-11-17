@@ -19,7 +19,7 @@ const DETECT_INTERVAL_MS_SINGLE = 50;
 const DETECT_INTERVAL_MS_DOUBLE = 100;
 
 // Module-level counter of how many TrackedCanvas instances are currently
-// mounted with a non-floater sticker. The tick loop reads this each tick
+// mounted. The tick loop reads this each tick
 // (live, not closure-captured) so adding/removing a tile changes the
 // detection cadence immediately.
 let activeTrackerCount = 0;
@@ -55,11 +55,6 @@ interface FaceTrackedOverlayProps {
 export function FaceTrackedOverlay({ filterId, mirrored = false, paused = false }: FaceTrackedOverlayProps) {
   const mappedId = mapLegacyFilterId(filterId);
   const sticker = findSticker(mappedId);
-
-  // Floaters use the legacy CSS overlay — no canvas + no MediaPipe.
-  if (sticker && sticker.kind === "floater") {
-    return <FilterOverlay filter={mappedId} />;
-  }
 
   // For unknown ids that aren't "none", fall back to legacy CSS too.
   if (filterId && filterId !== "none" && mappedId !== "none" && !sticker) {
@@ -254,6 +249,32 @@ function TrackedCanvas({
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(sticker.emoji, 0, 0);
+      } else if (sticker.kind === "crown") {
+        // A small arc of emoji just above the hairline, tilting with the
+        // head, each glyph bobbing gently out of step with the others.
+        const unit = pose.faceWidth * scale;
+        const faceH = pose.faceHeight * scale;
+        const glyphs = sticker.glyphs?.length ? sticker.glyphs : [sticker.emoji];
+        const n = glyphs.length;
+        const base = 0.3 * unit;
+        const R = 0.62 * unit;
+        const spread = (65 * Math.PI) / 180;
+        const now = performance.now() / 1000;
+        ctx.translate(tx(pose.forehead.x), ty(pose.forehead.y));
+        ctx.rotate(pose.roll);
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        for (let i = 0; i < n; i++) {
+          const t = n === 1 ? 0 : (i / (n - 1)) * 2 - 1;
+          const a = t * spread;
+          const x = Math.sin(a) * R;
+          const y = -0.3 * faceH + (1 - Math.cos(a)) * R * 0.42
+            + Math.sin(now * 3.5 + i * 0.9) * 0.025 * unit;
+          const pulse = 1 + 0.06 * Math.sin(now * 4.5 + i * 1.3);
+          const px = base * (sticker.sizes?.[i] ?? 1) * pulse;
+          ctx.font = `${px}px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif`;
+          ctx.fillText(glyphs[i], x, y);
+        }
       } else {
         // mask
         const sScale = sticker.scale ?? 1.4;
@@ -348,7 +369,10 @@ function TrackedCanvas({
   // loop holds on to this canvas, so swapping it out left a slow first
   // load with an invisible sticker until another one was picked (Rick's
   // Build 40 review: Silly Faces' first start).
-  const fallback = initFailed ? (sticker ? <StaticStickerFallback sticker={sticker} /> : <FilterOverlay filter={legacyFilterId} />) : null;
+  // Crowns fall back to the older full-tile decorations of the same name.
+  const fallback = initFailed
+    ? (sticker && sticker.kind !== "crown" ? <StaticStickerFallback sticker={sticker} /> : <FilterOverlay filter={legacyFilterId} />)
+    : null;
 
   return (
     <>

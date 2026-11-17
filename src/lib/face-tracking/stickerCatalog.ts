@@ -2,9 +2,7 @@ import type { Sticker } from "./types";
 
 // Curated for Nana + grandchild fun. Head stickers ride above the forehead
 // and tilt with head roll. Mask stickers sit on the nose and cover the
-// whole face. Floaters are the legacy CSS-positioned decorations — kept
-// because some entries (stars, hearts, rainbow) are joyful ambient art
-// that doesn't need a face anchor.
+// whole face. Crowns are a small arc of emoji just above the head.
 export const STICKERS: Sticker[] = [
   // ── Head stickers (anchored above forehead, tilt with head) ──
   { id: "crown",    emoji: "👑", label: "Crown",    kind: "head", yOffset: -0.55, scale: 1.0  },
@@ -30,12 +28,14 @@ export const STICKERS: Sticker[] = [
   { id: "cool_shades",  emoji: "😎", label: "Cool",   kind: "mask", scale: 1.5  },
   { id: "nerd_glasses", emoji: "🤓", label: "Nerd",   kind: "mask", scale: 1.5  },
 
-  // ── Floaters (legacy CSS-positioned ambient decorations) ──
-  { id: "stars",    emoji: "⭐", label: "Stars",    kind: "floater" },
-  { id: "flowers",  emoji: "🌸", label: "Flowers",  kind: "floater" },
-  { id: "rainbow",  emoji: "🌈", label: "Rainbow",  kind: "floater" },
-  { id: "hearts",   emoji: "💖", label: "Hearts",   kind: "floater" },
-  { id: "sparkles", emoji: "✨", label: "Sparkles", kind: "floater" },
+  // ── Crowns: a small arc of emoji just above the head, following it ──
+  // Rick's Build 43 review: these used to sit at fixed spots along the top
+  // of the video, well above the head, and Hearts and Sparkles drew nothing.
+  { id: "stars",    emoji: "⭐", label: "Stars",    kind: "crown", glyphs: ["✨", "⭐", "🌟", "⭐", "✨"], sizes: [0.75, 0.95, 1.15, 0.95, 0.75] },
+  { id: "flowers",  emoji: "🌸", label: "Flowers",  kind: "crown", glyphs: ["🌸", "🌷", "🌻", "🌷", "🌸"], sizes: [0.85, 0.95, 1.15, 0.95, 0.85] },
+  { id: "rainbow",  emoji: "🌈", label: "Rainbow",  kind: "crown", glyphs: ["☁️", "🌈", "☁️"],            sizes: [0.8, 2.1, 0.8] },
+  { id: "hearts",   emoji: "💖", label: "Hearts",   kind: "crown", glyphs: ["💕", "💖", "💗", "💖", "💕"], sizes: [0.75, 0.95, 1.15, 0.95, 0.75] },
+  { id: "sparkles", emoji: "✨", label: "Sparkles", kind: "crown", glyphs: ["✨", "💫", "✨", "💫", "✨"], sizes: [0.8, 0.95, 1.1, 0.95, 0.8] },
 ];
 
 export function findSticker(id: string): Sticker | undefined {

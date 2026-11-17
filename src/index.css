@@ -542,10 +542,10 @@ html.nm-tap-pulse {
 /* Reaction emoji float — burst rises from below screen, drifts slightly,
    fades. Used by ReactionOverlay. */
 @keyframes reaction-float {
-  0%   { transform: translateY(0)     scale(0.6) rotate(-8deg); opacity: 0; }
-  15%  { transform: translateY(-30vh) scale(1.0) rotate(4deg);  opacity: 1; }
-  85%  { transform: translateY(-90vh) scale(1.0) rotate(-4deg); opacity: 1; }
-  100% { transform: translateY(-110vh) scale(0.7) rotate(8deg); opacity: 0; }
+  0%   { transform: translate3d(0, 0, 0)      scale(0.6) rotate(-8deg); opacity: 0; }
+  15%  { transform: translate3d(0, -30vh, 0)  scale(1.0) rotate(4deg);  opacity: 1; }
+  85%  { transform: translate3d(0, -90vh, 0)  scale(1.0) rotate(-4deg); opacity: 1; }
+  100% { transform: translate3d(0, -110vh, 0) scale(0.7) rotate(8deg);  opacity: 0; }
 }
 
 /* iOS / iPadOS Safari resilience ─────────────────────────────────────────── */

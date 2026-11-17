@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import DailyIframe, { type DailyCall, type DailyEventObjectCameraError, type DailyEventObjectFatalError } from "@daily-co/daily-js";
+import { characterBus, isCharMsg, type CharMsg } from "../characters/characterBus";
 import { DailyAudio, DailyProvider, useDaily, useDailyEvent } from "@daily-co/daily-react";
 import { ReconnectBanner } from "./ReconnectBanner";
 import { VideoDebugOverlay } from "./VideoDebugOverlay";
@@ -209,7 +210,21 @@ export function VideoSessionProvider({
       await teardownActiveCallObject();
       if (cancelled) return;
       try {
-        created = DailyIframe.createCallObject();
+        // Build 44 (Rick's Build 43 review: fill the video boxes): ask
+        // for the camera's own 4:3 picture instead of Daily's default
+        // 16:9, which is a crop of it. Tall reading tiles then lose much
+        // less at the sides when they fill. "ideal" only, so an iPad that
+        // can't match still starts its camera.
+        created = DailyIframe.createCallObject({
+          dailyConfig: {
+            userMediaVideoConstraints: {
+              width: { ideal: 960 },
+              height: { ideal: 720 },
+              aspectRatio: { ideal: 4 / 3 },
+              frameRate: { ideal: 30, max: 30 },
+            },
+          },
+        });
         activeCallObject = created;
         setPreProblem(null);
       } catch (err) {
@@ -526,13 +541,22 @@ function SessionController({
   useEffect(() => {
     if (!daily || status !== "connected") return;
     pointerBus.setDailySender((m: PointerMsg) => {
+      // Daily logs an error for a send outside a joined meeting (joining or
+      // leaving), so check first; the bus then uses the session stream.
+      if (daily.meetingState() !== "joined-meeting") return false;
       try { daily.sendAppMessage(m, "*"); return true; } catch { return false; }
     });
-    return () => pointerBus.setDailySender(null);
+    // Build 44: animated characters ride the same channel.
+    characterBus.setDailySender((m: CharMsg) => {
+      if (daily.meetingState() !== "joined-meeting") return false;
+      try { daily.sendAppMessage(m, "*"); return true; } catch { return false; }
+    });
+    return () => { pointerBus.setDailySender(null); characterBus.setDailySender(null); };
   }, [daily, status]);
   useDailyEvent("app-message", (ev) => {
     const data = ev?.data as unknown;
     if (isPointerMsg(data)) { pointerBus.receive(data); return; }
+    if (isCharMsg(data)) { characterBus.receive(data); return; }
     // Camera messages (Show & Tell): the other iPad asks this one to
     // turn its camera around, or says which camera it is on.
     const cam = data as { nmCamera?: unknown; flipped?: unknown } | null;
@@ -603,6 +627,7 @@ function SessionController({
 
   const flipPartnerCamera = useCallback(() => {
     if (!daily || status !== "connected") return;
+    if (daily.meetingState() !== "joined-meeting") return;
     try { daily.sendAppMessage({ nmCamera: "flip" }, "*"); } catch { /* not joined */ }
   }, [daily, status]);
   // Tell the other iPad which camera this one is on, so Nana's button
@@ -610,7 +635,17 @@ function SessionController({
   // its camera goes back to the front).
   useEffect(() => {
     if (!daily || status !== "connected") return;
-    try { daily.sendAppMessage({ nmCamera: "state", flipped: isCameraFlipped }, "*"); } catch { /* not joined */ }
+    // Not joined yet (still joining): try again shortly, a few times.
+    let tries = 0, timer = 0;
+    const send = () => {
+      if (daily.meetingState() !== "joined-meeting") {
+        if (++tries < 10) timer = window.setTimeout(send, 500);
+        return;
+      }
+      try { daily.sendAppMessage({ nmCamera: "state", flipped: isCameraFlipped }, "*"); } catch { /* not joined */ }
+    };
+    send();
+    return () => window.clearTimeout(timer);
   }, [daily, status, isCameraFlipped]);
   useEffect(() => { if (status !== "connected") setPartnerCameraFlipped(false); }, [status]);
 

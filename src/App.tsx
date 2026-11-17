@@ -65,11 +65,17 @@ import { PARA_INDENT_EM, tokenizeHalf, type WordTok } from "./lib/reading/words"
 import { spokenPrompt } from "./lib/reading/spokenPrompt";
 import { ClosingPage } from "./lib/reading/ClosingPage";
 import { useLooks } from "./lib/theme/useLooks";
-import { applyFamilyLook, chooseFamilyLook, fetchFamilyLook, setLookFamily, syncFamilyLookOnOpen } from "./lib/theme/familyLook";
+import { applyFamilyLook, chooseFamilyLook, fetchFamilyLook, setLookFamilies, setLookFamily, syncFamilyLookOnOpen } from "./lib/theme/familyLook";
+import { HomesPanel, homeLabel } from "./lib/home/HomesPanel";
 import { LookPicker } from "./lib/theme/LookPicker";
 import { LooksIntro } from "./lib/theme/LooksIntro";
 import { ShelfStyle, StorefrontStyle, CleanListStyle, groupBooks, readAnchor, applyAnchor, type LibraryAnchor } from "./lib/library/LibraryStyles";
 import { APP_BUILD } from "./lib/build";
+import { FpsMeter, tapForFpsMeter } from "./lib/ui/FpsMeter";
+import { BookStore } from "./lib/store/BookStore";
+import { CharacterLayer } from "./lib/characters/CharacterLayer";
+import { CHARACTERS, type CharacterId } from "./lib/characters/characterBus";
+import { setPersonPhoto } from "./lib/video/personPhotos";
 import { pointerBus, type PointerMsg } from "./lib/reading/pointerBus";
 import { ReadingPointerLayer, localPointer } from "./lib/reading/ReadingPointer";
 import {
@@ -206,6 +212,7 @@ const FEATURES = {
   requestBook: false,   // Request a Book (library search + request flow)
   recording: false,     // Rec button, consent overlay, REC badge
   childQuestions: false, // "Let Perry ask questions" on the conversation screen (Rick's Build 41 review: hidden for now)
+  characters: true,     // Build 44: animated characters in Silly Faces (Rick's Animated Characters brief)
 } as const;
 type FamilyStoriesSubMode = "write" | "browse";
 
@@ -409,8 +416,11 @@ const childIcebreakerPrompts = [
 // Face-covering filters only: the head-top ones (crowns, hats, bunny and
 // cat ears, halo) are out of the picker (Rick's Build 36 #6). They stay
 // in the catalog so one sent by an iPad on an older build still draws.
+// Rick's Build 43 review: "Normal" was a smiley with no name, so it read as
+// a reaction that did nothing. It is now a plain ✕ named "None", and every
+// button has its name underneath.
 const sillyFilters = [
-  { id: "none", label: "Normal", emoji: "😊" },
+  { id: "none", label: "None", emoji: "✕" },
   ...STICKERS.filter(s => s.kind !== "head").map(s => ({ id: s.id, label: s.label, emoji: s.emoji })),
 ];
 
@@ -470,6 +480,26 @@ export function FilterOverlay({ filter }: { filter: string }) {
         </div>
         <span style={{ position: "absolute", top: "18%", left: "4%",  fontSize: "38px", pointerEvents: "none", display: "inline-block", animation: "float-sm 3s ease-in-out infinite" }}>☁️</span>
         <span style={{ position: "absolute", top: "18%", right: "4%", fontSize: "38px", pointerEvents: "none", display: "inline-block", animation: "float-sm 3s ease-in-out infinite 0.5s" }}>☁️</span>
+      </>
+    ),
+    // Build 44: Hearts and Sparkles were in the picker with nothing to draw
+    // (Rick's Build 43 review). These show while face tracking starts up.
+    hearts: (
+      <>
+        <span style={{ position: "absolute", top: "6%",  left: "12%", fontSize: "44px", pointerEvents: "none", display: "inline-block", animation: "float-sm 2.1s ease-in-out infinite" }}>💕</span>
+        <div style={{ position: "absolute", top: "2%", left: "50%", transform: "translateX(-50%)", pointerEvents: "none" }}>
+          <span style={{ fontSize: "58px", display: "inline-block", animation: "pulse-sm 1.2s ease-in-out infinite" }}>💖</span>
+        </div>
+        <span style={{ position: "absolute", top: "6%",  right: "12%", fontSize: "44px", pointerEvents: "none", display: "inline-block", animation: "float-sm 2.1s ease-in-out infinite 0.4s" }}>💗</span>
+      </>
+    ),
+    sparkles: (
+      <>
+        <span style={{ position: "absolute", top: "6%",  left: "12%", fontSize: "42px", pointerEvents: "none", display: "inline-block", animation: "twinkle 1.7s ease-in-out infinite" }}>✨</span>
+        <div style={{ position: "absolute", top: "2%", left: "50%", transform: "translateX(-50%)", pointerEvents: "none" }}>
+          <span style={{ fontSize: "52px", display: "inline-block", animation: "twinkle 1.7s ease-in-out infinite 0.35s" }}>💫</span>
+        </div>
+        <span style={{ position: "absolute", top: "6%",  right: "12%", fontSize: "42px", pointerEvents: "none", display: "inline-block", animation: "twinkle 1.7s ease-in-out infinite 0.6s" }}>✨</span>
       </>
     ),
     tophat: (
@@ -654,6 +684,9 @@ interface Book {
   /** Came from the server catalog (imported or written in the admin),
    *  not the bundled hand-made stories. */
   fromCatalog?: boolean;
+  /** Build 44: a Book Store book this family bought (a paid book is only
+   *  in the catalog for a family that owns it). */
+  purchased?: boolean;
 }
 
 /** Build a Book from an array of chapters. The flat `pages` array is
@@ -1390,6 +1423,7 @@ function mergeServerCatalog(serverBooks: unknown[]): void {
       // From the book index first (always current); a whole-book download carries it too.
       coverThumbUrl: catalogCovers.get(id) ?? (typeof b.coverThumbUrl === "string" && /^https?:\/\//.test(b.coverThumbUrl) ? b.coverThumbUrl : undefined),
       fromCatalog: true,
+      purchased: typeof b.priceCents === "number" && b.priceCents > 0,
     };
   }
 }
@@ -2749,14 +2783,14 @@ function ChatModeView({
  * driven entirely by Nana's iPad publishing the next phase_change.
  */
 /** One of Nana's equal choices on the greeting screen. */
-function GreetingChoice({ testId, icon, label, onClick }: { testId: string; icon: string; label: ReactNode; onClick: () => void }) {
+function GreetingChoice({ testId, icon, label, kicker, onClick }: { testId: string; icon: string; label: ReactNode; kicker?: string; onClick: () => void }) {
   return (
     <button
       type="button"
       data-testid={testId}
       onClick={onClick}
       style={{
-        flex: "1 1 0", minWidth: 200, maxWidth: 300, minHeight: 58,
+        flex: "1 1 0", minWidth: 200, maxWidth: kicker ? 340 : 300, minHeight: 58,
         background: "var(--lk-accent-hi-100, rgba(247,201,93,0.10))",
         color: CREAM,
         border: "1.5px solid var(--lk-accent-hi-700, rgba(247,201,93,0.7))",
@@ -2771,7 +2805,16 @@ function GreetingChoice({ testId, icon, label, onClick }: { testId: string; icon
       }}
     >
       <span aria-hidden style={{ fontSize: 20, flexShrink: 0 }}>{icon}</span>
-      <span style={{ overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{label}</span>
+      {kicker ? (
+        // Build 44: a small "Continue reading" line, then the whole title on
+        // up to two lines of its own (it used to share them and got cut off).
+        <span style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, minWidth: 0 }}>
+          <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: "0.06em", textTransform: "uppercase", opacity: 0.75 }}>{kicker}</span>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", fontSize: "clamp(14px, 1.6vw, 16px)" }}>{label}</span>
+        </span>
+      ) : (
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{label}</span>
+      )}
     </button>
   );
 }
@@ -2796,7 +2839,7 @@ function GreetingView({
   nanaName: string;
   /** Nana: the other grandchildren, to switch to without ending the visit
    *  (Rick's Build 41 review). */
-  switchTargets?: Array<{ id: string; name: string }>;
+  switchTargets?: Array<{ id: string; name: string; photoUrl?: string | null }>;
   onSwitchTo?: (childId: string) => void;
   /** Nana, after a switch: who the kids' iPad is waiting for ("" = the
    *  next reader); null when nobody is being waited for. */
@@ -2823,6 +2866,10 @@ function GreetingView({
 }) {
   const otherName = isNana ? (childName || getRoleLabel("child")) : (nanaName || getRoleLabel("nana"));
   const selfName  = isNana ? (nanaName  || getRoleLabel("nana"))  : (childName || getRoleLabel("child"));
+  // Three or more other grandchildren: one "Switch grandchild" button that
+  // opens their photos (Rick's 8 grandchildren stacked 7 buttons over the
+  // child's video in his Build 43 screenshots).
+  const [switchOpen, setSwitchOpen] = useState(false);
   // Rick: "I would prefer Nana to control when they move from chat to
   // the library, not a timer. This gives them time to say hello, get
   // settled, and then Nana taps a button to move forward when they are
@@ -2883,7 +2930,68 @@ function GreetingView({
         </div>
         {isNana && onSwitchTo && switchTargets.length > 0 && waitingFor === null && (
           <div data-testid="greeting-switch" style={{ position: "absolute", right: 16, bottom: 16, zIndex: 5, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
-            {switchTargets.map(c => (
+            {switchTargets.length > 2 ? (
+              <>
+                {switchOpen && (
+                  <div
+                    role="dialog"
+                    aria-label="Switch grandchild"
+                    data-testid="greeting-switch-panel"
+                    style={{
+                      display: "grid", gridTemplateColumns: `repeat(${Math.min(4, switchTargets.length)}, 88px)`, gap: 12,
+                      padding: "16px 16px 14px", borderRadius: 22,
+                      background: "var(--lk-bg-820, rgba(11,23,46,0.82))", border: "1.5px solid var(--lk-accent-650, rgba(201,146,42,0.65))",
+                      boxShadow: "0 12px 32px var(--lk-shadow-450, rgba(0,0,0,0.45))",
+                      animation: "fade-in 0.18s ease-out",
+                    }}
+                  >
+                    {switchTargets.map(c => (
+                      <button
+                        key={c.id}
+                        type="button"
+                        data-testid={`greeting-switch-${c.name}`}
+                        onClick={() => { setSwitchOpen(false); onSwitchTo(c.id); }}
+                        style={{
+                          display: "flex", flexDirection: "column", alignItems: "center", gap: 6,
+                          background: "none", border: "none", padding: 0,
+                          color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 800,
+                          cursor: "pointer", touchAction: "manipulation",
+                        }}
+                      >
+                        <span style={{
+                          width: 68, height: 68, borderRadius: "50%", overflow: "hidden",
+                          border: "2.5px solid var(--lk-accent-650, rgba(201,146,42,0.65))",
+                          background: "var(--lk-fill-120, rgba(255,255,255,0.12))",
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          fontFamily: "Playfair Display, serif", fontSize: 28, fontWeight: 700,
+                        }}>
+                          {c.photoUrl
+                            ? <img src={c.photoUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                            : c.name.charAt(0).toUpperCase()}
+                        </span>
+                        <span style={{ maxWidth: 88, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  data-testid="greeting-switch-open"
+                  aria-expanded={switchOpen}
+                  onClick={() => setSwitchOpen(o => !o)}
+                  style={{
+                    minHeight: 52, padding: "0 20px", borderRadius: 999,
+                    background: "var(--lk-bg-820, rgba(11,23,46,0.82))", border: "1.5px solid var(--lk-accent-650, rgba(201,146,42,0.65))",
+                    color: CREAM, fontFamily: "DM Sans, sans-serif", fontSize: 16, fontWeight: 800,
+                    cursor: "pointer", touchAction: "manipulation",
+                    boxShadow: "0 6px 18px var(--lk-shadow-400, rgba(0,0,0,0.4))",
+                    display: "inline-flex", alignItems: "center", gap: 8,
+                  }}
+                >
+                  <span aria-hidden>{switchOpen ? "✕" : "👥"}</span> {switchOpen ? "Close" : "Switch grandchild"}
+                </button>
+              </>
+            ) : switchTargets.map(c => (
               <button
                 key={c.id}
                 type="button"
@@ -2925,7 +3033,7 @@ function GreetingView({
                 book is pushed as the only obvious next step. */}
             <div data-testid="greeting-choices" style={{ display: "flex", gap: 10, flex: "1 1 auto", justifyContent: "center", flexWrap: "wrap", maxWidth: 960 }}>
               {continueTitle && (
-                <GreetingChoice testId="greeting-continue" icon="📖" label={<>Continue <i style={{ fontFamily: "Merriweather, serif" }}>{continueTitle}</i></>} onClick={onReady} />
+                <GreetingChoice testId="greeting-continue" icon="📖" kicker="Continue reading" label={<i style={{ fontFamily: "Merriweather, serif" }}>{continueTitle}</i>} onClick={onReady} />
               )}
               <GreetingChoice
                 testId="greeting-pick-book"
@@ -4185,7 +4293,7 @@ function parseLibraryAnchor(v: unknown): LibraryAnchor | null {
 
 type LibraryFilters = {
   q: string;
-  status: "all" | "in-progress" | "not-started" | "finished";
+  status: "all" | "in-progress" | "not-started" | "finished" | "purchased";
   age: "any" | "4-5" | "5-7" | "7-10" | "10-13";
 };
 
@@ -4204,7 +4312,10 @@ function LibraryView({
   mirroredFilters = null,
   nanaName = "",
   catalogLoading = false,
+  onOpenStore,
 }: {
+  /** Build 44: Nana opens the Book Store (books from NeverMiss authors). */
+  onOpenStore?: () => void;
   selectedBookId: string;
   onSelectBook: (id: string) => void;
   onConfirmBook: (startPage: number, startOff?: number) => void;
@@ -4280,7 +4391,7 @@ function LibraryView({
   // author, and tagline. Status filter uses the per-book progress
   // record from the prop above.
   const [searchQuery, setSearchQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | "in-progress" | "not-started" | "finished">("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "in-progress" | "not-started" | "finished" | "purchased">("all");
   // Rick's Build 32 review #B-3: age-tier filter. AI-suggested tiers
   // come from the /api/books catalog (ageRange like "Ages 4-5" through
   // "Ages 10-13"). "any" = show all tiers.
@@ -4317,6 +4428,8 @@ function LibraryView({
       const range = (book.ageRange ?? "").toLowerCase().replace(/[–—]/g, "-");
       if (!range.includes(ageFilter)) return false;
     }
+    // Build 44: books this family bought in the Book Store.
+    if (statusFilter === "purchased") return !!book.purchased;
     if (statusFilter !== "all") {
       const p = progressByBookId.get(book.id);
       const total = book.pages.length;
@@ -4342,6 +4455,7 @@ function LibraryView({
       const p = progressByBookId.get(b.id);
       return p && p.currentPage >= b.pages.length;
     }).length,
+    purchased: allBooks.filter(b => b.purchased).length,
   };
 
   // Child's iPad: Nana's scroll can arrive before her search or filter has
@@ -4370,6 +4484,8 @@ function LibraryView({
     { key: "in-progress",  label: "Reading",     icon: "📖" },
     { key: "not-started",  label: "New",         icon: "✨" },
     { key: "finished",     label: "Finished",    icon: "✓" },
+    // Build 44: only once the family has bought a book.
+    ...(counts.purchased > 0 || statusFilter === "purchased" ? [{ key: "purchased" as const, label: "Purchased", icon: "🛍️" }] : []),
   ];
 
   return (
@@ -4377,7 +4493,7 @@ function LibraryView({
       {/* Header — back chevron on the left, centered title, balance spacer right.
           In readOnly (Perry's mirrored view) the back button disappears
           and the subtitle changes to a "Watching with Nana" hint. */}
-      <div style={{ padding: "10px 14px 10px", borderBottom: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))", flexShrink: 0, display: "grid", gridTemplateColumns: "32px 1fr 32px", alignItems: "center" }}>
+      <div style={{ padding: "10px 14px 10px", borderBottom: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))", flexShrink: 0, display: "grid", gridTemplateColumns: onOpenStore && !readOnly ? "minmax(32px, 1fr) auto minmax(32px, 1fr)" : "32px 1fr 32px", alignItems: "center" }}>
         {(!readOnly && onCancel) ? (
           <button
             onClick={onCancel}
@@ -4399,7 +4515,23 @@ function LibraryView({
             {readOnly ? `👀 Watching with ${nanaName || getRoleLabel("nana")}` : "Tap to select · both sides see your choice"}
           </div>
         </div>
-        <span />
+        {onOpenStore && !readOnly ? (
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              data-testid="library-open-store"
+              onClick={onOpenStore}
+              style={{
+                minHeight: 44, padding: "0 16px", borderRadius: 999, cursor: "pointer", touchAction: "manipulation",
+                background: "var(--lk-accent-160, rgba(201,146,42,0.16))", border: "1.5px solid var(--lk-accent-550, rgba(201,146,42,0.55))",
+                color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 800,
+                display: "inline-flex", alignItems: "center", gap: 8, whiteSpace: "nowrap",
+              }}
+            >
+              <span aria-hidden>🛍️</span> Find a New Book
+            </button>
+          </div>
+        ) : <span />}
       </div>
 
       {/* Search + status filter row — pinned above the scroll so it stays
@@ -4420,7 +4552,7 @@ function LibraryView({
             {nanaName || getRoleLabel("nana")} is looking
             {searchQuery.trim() ? <> for <span style={{ color: AMBER_T }}>“{searchQuery.trim()}”</span></> : null}
             {ageFilter !== "any" ? <> · Ages {ageFilter.replace("-", "–")}</> : null}
-            {statusFilter !== "all" ? <> · {statusFilter === "in-progress" ? "Reading" : statusFilter === "not-started" ? "New" : "Finished"}</> : null}
+            {statusFilter !== "all" ? <> · {statusFilter === "in-progress" ? "Reading" : statusFilter === "not-started" ? "New" : statusFilter === "purchased" ? "Purchased" : "Finished"}</> : null}
           </span>
         </div>
       )}
@@ -5073,18 +5205,24 @@ function LibraryView({
                   : `Continue reading · ${chapterRef}, page ${savedPage} of ${pagesTotal} →`)
                 : "Start Reading →"}
             </button>
+            {/* Rick's Build 43 review: restarting a book is common, and the
+                old 12 px "Start over from page 1" was easy to miss. */}
             {hasProgress && (
               <button
+                type="button"
+                data-testid="book-start-beginning"
                 onClick={() => onConfirmBook(1)}
                 style={{
-                  width: "100%", backgroundColor: "transparent", color: "var(--lk-ink-550, rgba(247,240,227,0.55))",
-                  border: "1px solid var(--lk-line-140, rgba(255,255,255,0.14))", borderRadius: "28px", padding: "12px",
-                  fontSize: "12px", fontFamily: "DM Sans, sans-serif", fontWeight: 600,
-                  cursor: "pointer", letterSpacing: "0.02em",
-                  minHeight: 40,
+                  width: "100%", background: "var(--lk-fill-060, rgba(255,255,255,0.06))", color: "var(--lk-ink-850, rgba(247,240,227,0.85))",
+                  border: "1.5px solid var(--lk-line-250, rgba(255,255,255,0.25))", borderRadius: "32px", padding: "14px 20px",
+                  fontSize: "17px", fontFamily: "DM Sans, sans-serif", fontWeight: 700,
+                  cursor: "pointer", letterSpacing: "0.01em",
+                  minHeight: 56, touchAction: "manipulation",
+                  display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 10,
                 }}
               >
-                Start over from page 1
+                <span aria-hidden style={{ fontSize: 20, lineHeight: 1 }}>↺</span>
+                Start from the beginning
               </button>
             )}
           </div>
@@ -6873,6 +7011,8 @@ function SettingsView({
   grandchildren = null,
   familyCode,
   onNewFamilyCode,
+  homesPanel = null,
+  multipleHomes = false,
   onBack,
   onSwitchDevice,
   onSignOut,
@@ -6903,6 +7043,9 @@ function SettingsView({
    *  screen), with Copy and "Make a new code". */
   familyCode?: string;
   onNewFamilyCode?: () => Promise<string>;
+  /** Build 44: Settings › Homes (several homes, each with its own code). */
+  homesPanel?: ReactNode;
+  multipleHomes?: boolean;
   onBack: () => void;
   onSwitchDevice: () => void;
   onSignOut?: () => void;
@@ -7097,8 +7240,10 @@ function SettingsView({
         )}
 
         {familyCode && (
-          <SettingsCard title="Family" icon="🔑" delay="0s" wide>
-            <FamilyCodePanel code={familyCode} onNewCode={onNewFamilyCode} />
+          <SettingsCard title={homesPanel && multipleHomes ? "Homes" : "Family"} icon="🔑" delay="0s" wide>
+            {/* Build 44: with several homes, each shows its own code. */}
+            {!(homesPanel && multipleHomes) && <FamilyCodePanel code={familyCode} onNewCode={onNewFamilyCode} />}
+            {homesPanel}
           </SettingsCard>
         )}
 
@@ -9341,6 +9486,18 @@ function GoodbyeView({
   /** Nana only: lets the child hang up. */
   onAllowHangUp?: () => void;
 }) {
+  // Rick's Build 43 review: the 5 stayed up about twice as long as 4-3-2-1.
+  // Nana's tap starts the countdown 1.2 s ahead so both iPads begin on the
+  // same moment, and that wait used to show the 5. Now the wait shows
+  // "Get ready" and every number gets exactly one second on both iPads.
+  const [leadIn, setLeadIn] = useState(() => goodbyeStartTime !== null && Date.now() < goodbyeStartTime);
+  useEffect(() => {
+    const wait = goodbyeStartTime === null ? 0 : goodbyeStartTime - Date.now();
+    if (wait <= 0) { setLeadIn(false); return; }
+    setLeadIn(true);
+    const t = window.setTimeout(() => setLeadIn(false), wait);
+    return () => window.clearTimeout(t);
+  }, [goodbyeStartTime]);
   // Child's "Bye Nana! Tap to Hang Up!" → short celebration → hang up.
   const [celebrating, setCelebrating] = useState(false);
   const hangUpRef = useRef(onChildHangUp);
@@ -9369,7 +9526,9 @@ function GoodbyeView({
 
   const nanaLabel = nanaName || getRoleLabel("nana");
   const childLabel = childName || getRoleLabel("child");
-  const hint = isCountdown
+  const hint = isCountdown && leadIn
+    ? "Get ready to count down!"
+    : isCountdown
     ? `${GOODBYE_NUMS[goodbyePhase]} … put up your fingers!`
     : isKisses ? "Blow kisses back and forth!"
     : isLove ? "Say I love you! ❤️"
@@ -9547,9 +9706,21 @@ function GoodbyeView({
         )}
 
         {/* === Countdown === centred on the seam between the two faces */}
-        {isCountdown && (
+        {isCountdown && leadIn && (
+          <div
+            key="countdown-ready"
+            data-testid="goodbye-get-ready"
+            style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", textAlign: "center", zIndex: 20, pointerEvents: "none", animation: "fade-in 0.3s ease-out forwards" }}
+          >
+            <div style={{ fontSize: "clamp(48px, 9vh, 76px)", lineHeight: 1, fontWeight: 900, fontFamily: "DM Sans, sans-serif", color: "#ffffff", textShadow: "0 6px 36px rgba(0,0,0,1.0), 0 0 60px rgba(255,255,255,0.35)" }}>
+              Get ready…
+            </div>
+          </div>
+        )}
+        {isCountdown && !leadIn && (
           <div
             key={`countdown-${goodbyePhase}`}
+            data-testid="goodbye-number"
             className="nm-num-pop"
             style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)", textAlign: "center", zIndex: 20, pointerEvents: "none" }}
           >
@@ -9815,6 +9986,8 @@ function SillyFacesView({
 }) {
   const childLabel = childName || getRoleLabel("child");
   const nanaLabel = nanaName || getRoleLabel("nana");
+  // Build 44: each person can become a character that copies their face.
+  const [myCharacter, setMyCharacter] = useState<CharacterId | null>(null);
 
   const challengeActive = sillyChallenge !== "idle";
   // The rule is "first to laugh LOSES". `laughWinner` stores who
@@ -9903,11 +10076,14 @@ function SillyFacesView({
           autoMirror={isNana}
           compact={false}
           isRecording={isRecording}
-          overlay={<FaceTrackedOverlay
-            filterId={isNana ? theirFilter : myFilter}
-            mirrored={isNana}
-            paused={sillyChallenge === "counting" || sillyChallenge === "flash" || sillyChallenge === "holding"}
-          />}
+          overlay={<>
+            {!(isNana && myCharacter) && <FaceTrackedOverlay
+              filterId={isNana ? theirFilter : myFilter}
+              mirrored={isNana}
+              paused={sillyChallenge === "counting" || sillyChallenge === "flash" || sillyChallenge === "holding"}
+            />}
+            {FEATURES.characters && <CharacterLayer mode={isNana ? "local" : "remote"} character={isNana ? myCharacter : null} />}
+          </>}
           style={{ flex: "1 1 0", maxWidth: "calc(50% - 6px)", maxHeight: 420, flexShrink: 1 }}
         />
         <FaceVideo
@@ -9925,11 +10101,14 @@ function SillyFacesView({
           autoMirror={!isNana}
           compact={false}
           isRecording={isRecording}
-          overlay={<FaceTrackedOverlay
-            filterId={isNana ? myFilter : theirFilter}
-            mirrored={!isNana}
-            paused={sillyChallenge === "counting" || sillyChallenge === "flash" || sillyChallenge === "holding"}
-          />}
+          overlay={<>
+            {!(!isNana && myCharacter) && <FaceTrackedOverlay
+              filterId={isNana ? myFilter : theirFilter}
+              mirrored={!isNana}
+              paused={sillyChallenge === "counting" || sillyChallenge === "flash" || sillyChallenge === "holding"}
+            />}
+            {FEATURES.characters && <CharacterLayer mode={isNana ? "remote" : "local"} character={isNana ? null : myCharacter} />}
+          </>}
           style={{ flex: "1 1 0", maxWidth: "calc(50% - 6px)", maxHeight: 420, flexShrink: 1 }}
         />
 
@@ -10087,6 +10266,36 @@ function SillyFacesView({
       {/* Bottom strip — gaps tightened from 8 → 6 and padding pulled in so
           the row stays comfortably within the viewport on small iPads. */}
       <div style={{ backgroundColor: "var(--lk-bg, #0b172e)", padding: "6px 12px 8px", borderTop: "1px solid var(--lk-line-080, rgba(255,255,255,0.08))", display: "flex", flexDirection: "column", gap: "6px", flexShrink: 0 }}>
+        {/* Build 44: be a character (it copies your face; the other iPad sees it). */}
+        {FEATURES.characters && (
+          <div role="radiogroup" aria-label="Be a character" data-testid="character-picker" style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "center", flexWrap: "wrap" }}>
+            <span style={{ color: "var(--lk-glass-400, rgba(255,255,255,0.4))", fontFamily: "DM Sans, sans-serif", fontSize: "9px", fontWeight: 700, letterSpacing: "0.12em" }}>🎭 BE A CHARACTER</span>
+            {([{ id: null, label: "Me", emoji: "📷" }, ...CHARACTERS] as Array<{ id: CharacterId | null; label: string; emoji: string }>).map(ch => {
+              const on = myCharacter === ch.id;
+              return (
+                <button
+                  key={ch.label}
+                  type="button"
+                  role="radio"
+                  aria-checked={on}
+                  data-testid={`character-${ch.id ?? "me"}`}
+                  onClick={() => setMyCharacter(ch.id)}
+                  style={{
+                    minHeight: 40, padding: "0 14px", borderRadius: 999, cursor: "pointer", touchAction: "manipulation",
+                    background: on ? "rgba(192,132,252,0.35)" : "var(--lk-fill-080, rgba(255,255,255,0.08))",
+                    border: `1.5px solid ${on ? "#c084fc" : "var(--lk-line-250, rgba(255,255,255,0.25))"}`,
+                    color: on ? "var(--lk-purple-t, #c084fc)" : "var(--lk-ink-850, rgba(247,240,227,0.85))",
+                    fontFamily: "DM Sans, sans-serif", fontSize: 14, fontWeight: 800,
+                    display: "inline-flex", alignItems: "center", gap: 6,
+                  }}
+                >
+                  <span aria-hidden style={{ fontSize: 18, lineHeight: 1 }}>{ch.emoji}</span>{ch.label}
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         {/* Filter label + Clear button row. Rick's Build 30 review #6:
             Nana's "Clear" needs to reset BOTH sides (she's in control).
             Perry still only clears her own. Also Rick's #10: bumped
@@ -10149,9 +10358,14 @@ function SillyFacesView({
         <div style={{ display: "flex", gap: "6px", overflowX: "auto", paddingBottom: "2px", scrollbarWidth: "none" as const, justifyContent: "center" }}>
           {sillyFilters.map(f => {
             const sel = myFilter === f.id;
+            const isNone = f.id === "none";
             return (
               <button
                 key={f.id}
+                type="button"
+                data-testid={`silly-filter-${f.id}`}
+                aria-label={isNone ? "No mask" : f.label}
+                aria-pressed={sel}
                 onClick={() => onSetMyFilter(f.id)}
                 onTouchStart={(e) => {
                   // Rick's Build 30 #10: instant response — no 300ms wait
@@ -10161,17 +10375,29 @@ function SillyFacesView({
                   onSetMyFilter(f.id);
                 }}
                 style={{
-                  flexShrink: 0, width: "52px", height: "52px", borderRadius: "50%",
-                  backgroundColor: sel ? "rgba(192,132,252,0.35)" : "var(--lk-fill-080, rgba(255,255,255,0.08))",
-                  border: `2px solid ${sel ? "#c084fc" : "var(--lk-line-160, rgba(255,255,255,0.16))"}`,
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  cursor: "pointer", transition: "all 0.15s",
-                  boxShadow: sel ? "0 0 14px rgba(192,132,252,0.55)" : "none",
-                  touchAction: "manipulation",
+                  flexShrink: 0, width: 58, padding: 0, background: "none", border: "none",
+                  display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
+                  cursor: "pointer", touchAction: "manipulation",
                   WebkitTapHighlightColor: "transparent",
                 }}
               >
-                <span style={{ fontSize: "22px", lineHeight: 1 }}>{f.emoji}</span>
+                <span style={{
+                  width: "52px", height: "52px", borderRadius: "50%",
+                  backgroundColor: sel ? "rgba(192,132,252,0.35)" : "var(--lk-fill-080, rgba(255,255,255,0.08))",
+                  border: `2px ${isNone && !sel ? "dashed" : "solid"} ${sel ? "#c084fc" : "var(--lk-line-250, rgba(255,255,255,0.25))"}`,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  transition: "all 0.15s",
+                  boxShadow: sel ? "0 0 14px rgba(192,132,252,0.55)" : "none",
+                }}>
+                  <span style={isNone
+                    ? { fontSize: "20px", lineHeight: 1, fontWeight: 800, fontFamily: "DM Sans, sans-serif", color: "var(--lk-ink-750, rgba(247,240,227,0.75))" }
+                    : { fontSize: "22px", lineHeight: 1 }}>{f.emoji}</span>
+                </span>
+                <span style={{
+                  fontFamily: "DM Sans, sans-serif", fontSize: 10.5, fontWeight: 700, lineHeight: 1.1,
+                  color: sel ? "var(--lk-purple-t, #c084fc)" : "var(--lk-ink-650, rgba(247,240,227,0.65))",
+                  whiteSpace: "nowrap", maxWidth: 58, overflow: "hidden", textOverflow: "ellipsis",
+                }}>{f.label}</span>
               </button>
             );
           })}
@@ -11401,6 +11627,14 @@ function DeviceFrame({
   onOpenSettings,
   onSwitchDevice,
   childrenList,
+  homeChildren,
+  homeHereIds,
+  homeFamilyLabel,
+  homeFamilyCodes,
+  homesPanel,
+  multipleHomes = false,
+  onOpenStore,
+  nanaInStore = false,
   activeChildId,
   onSelectChild,
   onOpenAddChild,
@@ -11635,6 +11869,21 @@ function DeviceFrame({
   familyStoriesSubMode: FamilyStoriesSubMode;
   familyStoryEntries: FamilyStoryEntry[];
   childrenList: Child[];
+  /** Build 44: every grandchild across Nana's homes, for Home (else childrenList). */
+  homeChildren?: Child[];
+  /** Build 44: grandchildren signed in on their home's iPad right now. */
+  homeHereIds?: string[];
+  /** Build 44: whose iPad the family code on Home is for. */
+  homeFamilyLabel?: string;
+  /** Build 44: every home's code, shown on Home before a grandchild is picked. */
+  homeFamilyCodes?: Array<{ label: string; code: string }>;
+  /** Build 44: Settings › Homes. */
+  homesPanel?: ReactNode;
+  multipleHomes?: boolean;
+  /** Build 44: Nana opens the Book Store from the Library. */
+  onOpenStore?: () => void;
+  /** Build 44: the child's iPad, while Nana is in the Book Store. */
+  nanaInStore?: boolean;
   activeChildId: string | null;
   onSelectChild: (childId: string) => void;
   onOpenAddChild: () => void;
@@ -12122,7 +12371,7 @@ function DeviceFrame({
             {isRecording && (
               <div style={{ width: 6, height: 6, borderRadius: "50%", backgroundColor: "#ef4444", animation: "rec-pulse 1.4s ease-in-out infinite", flexShrink: 0 }} />
             )}
-            <span style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 17, fontWeight: 700, lineHeight: 1, letterSpacing: "-0.005em" }}>
+            <span onClick={tapForFpsMeter} style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 17, fontWeight: 700, lineHeight: 1, letterSpacing: "-0.005em" }}>
               NeverMiss
             </span>
             <span className="nm-tagline" style={{ color: AMBER_T, fontFamily: "DM Sans, sans-serif", fontSize: 8, letterSpacing: "0.18em", opacity: 0.7, fontWeight: 700 }}>
@@ -12266,7 +12515,10 @@ function DeviceFrame({
           <>
           <HomeView
             nanaName={nanaName}
-            children={childrenList}
+            children={homeChildren ?? childrenList}
+            hereIds={homeHereIds}
+            familyLabel={homeFamilyLabel}
+            familyCodes={homeFamilyCodes}
             activeChildId={homeSelectedChildId}
             onSelectChild={onHomeSelectChild ?? onSelectChild}
             perryOnline={perryConnected}
@@ -12312,7 +12564,7 @@ function DeviceFrame({
           <SettingsView
             grandchildren={onSetChildPhoto && onRemoveChildPhoto && onUpdateChild ? (
               <GrandchildrenCard
-                children={childrenList}
+                children={homeChildren ?? childrenList}
                 onSetPhoto={onSetChildPhoto}
                 onRemovePhoto={onRemoveChildPhoto}
                 onUpdate={onUpdateChild}
@@ -12322,6 +12574,8 @@ function DeviceFrame({
             ) : null}
             familyCode={isNana ? inviteToken : undefined}
             onNewFamilyCode={isNana ? onNewFamilyCode : undefined}
+            homesPanel={isNana ? homesPanel : undefined}
+            multipleHomes={multipleHomes}
             onBack={() => (onBackFromPanel ?? onGoHome)?.()}
             onSwitchDevice={onSwitchDevice ?? (() => {})}
             onSignOut={onSignOut}
@@ -12385,7 +12639,7 @@ function DeviceFrame({
             onPerryAskNana={!isNana ? onPerryAskNana : undefined}
             continueTitle={isNana ? greetingContinueTitle : null}
             onPickDifferent={isNana ? onGreetingPickDifferent : undefined}
-            switchTargets={isNana && onSwitchVisitTo ? childrenList.filter(c => c.id !== activeChildId).map(c => ({ id: c.id, name: c.name })) : []}
+            switchTargets={isNana && onSwitchVisitTo ? childrenList.filter(c => c.id !== activeChildId).map(c => ({ id: c.id, name: c.name, photoUrl: c.photoUrl })) : []}
             onSwitchTo={isNana ? onSwitchVisitTo : undefined}
             waitingFor={isNana ? awaitingReaderName : null}
           />
@@ -12433,6 +12687,7 @@ function DeviceFrame({
             nanaName={nanaName}
             catalogLoading={catalogLoading}
             onFindMoreBooks={FEATURES.requestBook && isNana && onOpenBookRequest ? (q) => onOpenBookRequest(q) : undefined}
+            onOpenStore={isNana ? onOpenStore : undefined}
           />
         ) : isShowAndTell ? (
           <ShowAndTellView
@@ -12575,6 +12830,7 @@ function DeviceFrame({
                 childName={childName}
                 readingTheme={readingTheme}
                 onThemeChange={isNana ? onThemeChange : undefined}
+                readingSetup={isNana ? { pageMode, onPageModeChange, fontScale, onFontScaleChange, pointerMode, onPointerModeChange } : undefined}
                 onReact={onReact}
                 cue={isNana && bookPages.length > 0 ? (spreadCue(bookPages, plan, safePage, displayOff) || spreadPrompt(bookPages, plan, safePage, displayOff)) : null}
                 onLetsTalk={isNana ? onStartChat : undefined}
@@ -12585,6 +12841,20 @@ function DeviceFrame({
               />
             );
           })()
+        )}
+
+        {/* Build 44: Nana is in the Book Store (during a visit). */}
+        {!isNana && nanaInStore && (
+          <div data-testid="kids-nana-in-store" style={{
+            position: "absolute", inset: 0, zIndex: 40, display: "flex", alignItems: "center", justifyContent: "center",
+            background: "var(--lk-deep-720, rgba(8,15,30,0.72))", animation: "fade-in 0.25s ease-out",
+          }}>
+            <div style={{ textAlign: "center", padding: "28px 34px", borderRadius: 26, background: "var(--lk-n-0f1d36, #0f1d36)", border: "1px solid var(--lk-accent-450, rgba(201,146,42,0.45))", maxWidth: 520 }}>
+              <div style={{ fontSize: 54, animation: "bob 1.6s ease-in-out infinite", display: "inline-block" }}>📚</div>
+              <div style={{ fontFamily: "Playfair Display, serif", fontSize: 30, fontWeight: 700, color: "var(--lk-strong, #F7F0E3)", marginTop: 6 }}>{nanaName || getRoleLabel("nana")} is finding a new book</div>
+              <div style={{ fontFamily: "DM Sans, sans-serif", fontSize: 18, color: "var(--lk-ink-750, rgba(247,240,227,0.75))", marginTop: 8 }}>It'll be ready in a moment.</div>
+            </div>
+          </div>
         )}
 
         {/* Recording consent overlay — sits above all iPad content */}
@@ -12695,9 +12965,10 @@ function DeviceFrame({
                   showLabel
                   borderRadius={14}
                   compact
-                  // Reading-mode recipe (cover + objectPosition "center
-                  // 35%" inherited from FaceVideo default). Same look
-                  // as the in-session sidebar PiPs.
+                  // Reading-mode recipe: fill the tile, face in the upper
+                  // third. Same look as the in-session sidebar PiPs.
+                  objectFit="cover"
+                  objectPosition="center 35%"
                   isRecording={isRecording}
                   autoMirror={false}
                 />
@@ -12766,6 +13037,7 @@ function FullPageReading({
   childName,
   readingTheme,
   onThemeChange,
+  readingSetup,
   onReact,
   cue,
   onLetsTalk,
@@ -12780,6 +13052,8 @@ function FullPageReading({
   childName: string;
   readingTheme: ReadingTheme;
   onThemeChange?: (t: ReadingTheme) => void;
+  /** Nana only: the rest of the reading choices for the Reading button. */
+  readingSetup?: ReadingSetupProps;
   onReact?: (e: ReactionEmoji) => void;
   /** Nana only: this spread's conversation cue. */
   cue: string | null;
@@ -12877,6 +13151,9 @@ function FullPageReading({
       {/* Presence column */}
       <aside className="nm-fp-side" style={{ display: "flex", flexDirection: "column", gap: 10, flexShrink: 0, minHeight: 0 }}>
         <div style={{ flex: "1 1 0", minHeight: 110, display: "flex" }}>
+          {/* Rick's Build 43 review: fill the tiles (no black bands), a
+              little zoomed in on the person. Cameras now send 4:3, so a
+              filled tile keeps the middle two thirds of the picture. */}
           <FaceVideo
             person={isNana ? "child" : "nana"}
             width="100%"
@@ -12885,6 +13162,8 @@ function FullPageReading({
             showLabel
             borderRadius={16}
             autoMirror={false}
+            objectFit="cover"
+            objectPosition="center 35%"
           />
         </div>
         <div style={{ flex: "1 1 0", minHeight: 110, display: "flex" }}>
@@ -12895,6 +13174,8 @@ function FullPageReading({
             label={isNana ? `${nanaLabel} (you)` : `${childLabel} (you)`}
             showLabel
             borderRadius={16}
+            objectFit="cover"
+            objectPosition="center 35%"
           />
         </div>
         {/* Nana only: the child asks from the Menu, and their videos take
@@ -12925,18 +13206,7 @@ function FullPageReading({
           <RoundMicCam />
           {onReact && <ReactionsDropdown onReact={onReact} autoCloseMs={isNana ? undefined : 7000} variant="round" />}
           {isNana && onThemeChange && (
-            <RoundButton
-              label="Light"
-              ariaLabel={`Page light: ${READING_THEME_LABEL[readingTheme]}. Tap to change.`}
-              onClick={() => onThemeChange(NEXT_THEME[readingTheme])}
-              testId="round-theme"
-            >
-              <span aria-hidden style={{
-                width: 22, height: 22, borderRadius: "50%",
-                background: READING_THEMES[readingTheme].page,
-                border: `2px solid ${READING_THEMES[readingTheme].text}`,
-              }} />
-            </RoundButton>
+            <ReadingQuickButton theme={readingTheme} onThemeChange={onThemeChange} setup={readingSetup} />
           )}
         </div>
       </aside>
@@ -12989,6 +13259,130 @@ function RoundButton({ label, ariaLabel, onClick, on, children, testId, disabled
       </span>
       <span style={{ color: "var(--lk-ink-750, rgba(247,240,227,0.75))", fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700 }}>{label}</span>
     </button>
+  );
+}
+
+type ReadingSetupProps = {
+  pageMode: "single" | "double"; onPageModeChange?: (m: "single" | "double") => void;
+  fontScale: number; onFontScaleChange?: (s: number) => void;
+  pointerMode: PointerMode; onPointerModeChange?: (m: PointerMode) => void;
+};
+
+/**
+ * Nana's "Reading" round button (Rick's Build 43 idea): one tap opens the
+ * reading choices right by the controls, the way React opens the
+ * reactions: page light, text size, one or two pages and the pointer.
+ * The Menu keeps Reading Setup too. It closes on a tap outside, on ✕, or
+ * after a quiet spell.
+ */
+function ReadingQuickButton({ theme, onThemeChange, setup }: {
+  theme: ReadingTheme; onThemeChange?: (t: ReadingTheme) => void; setup?: ReadingSetupProps;
+}) {
+  const [open, setOpen] = useState(false);
+  const [anchor, setAnchor] = useState<{ right: number; bottom: number; maxHeight: number } | null>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  useIdleAutoClose(open, () => setOpen(false), 15000, popRef);
+
+  useEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const r = btnRef.current?.getBoundingClientRect();
+      if (!r) return;
+      setAnchor({ right: Math.max(8, window.innerWidth - r.right), bottom: window.innerHeight - r.top + 10, maxHeight: Math.max(240, r.top - 20) });
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (btnRef.current?.contains(t) || popRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    document.addEventListener("pointerdown", onDoc);
+    return () => document.removeEventListener("pointerdown", onDoc);
+  }, [open]);
+
+  const c = READING_THEMES[theme];
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        className="nm-fp-round"
+        data-testid="round-reading"
+        onClick={() => setOpen(o => !o)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={`Reading choices: page light ${READING_THEME_LABEL[theme]}, text size, pages and pointer`}
+        style={{
+          flex: "1 1 0", minWidth: 0,
+          display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
+          background: "transparent", border: "none", padding: 0,
+          cursor: "pointer", touchAction: "manipulation",
+        }}
+      >
+        <span style={{
+          width: 52, height: 52, borderRadius: "50%",
+          display: "inline-flex", alignItems: "center", justifyContent: "center",
+          background: c.page, color: c.text,
+          border: `1.5px solid ${open ? "var(--lk-accent, #C9922A)" : "var(--lk-line-250, rgba(255,255,255,0.25))"}`,
+          boxShadow: open ? "0 0 0 3px var(--lk-accent-300, rgba(201,146,42,0.3))" : "none",
+          fontFamily: "Playfair Display, serif", fontSize: 19, fontWeight: 700,
+        }}>Aa</span>
+        <span style={{ color: "var(--lk-ink-750, rgba(247,240,227,0.75))", fontFamily: "DM Sans, sans-serif", fontSize: 12, fontWeight: 700 }}>Reading</span>
+      </button>
+      {open && anchor && createPortal(
+        <div
+          ref={popRef}
+          role="dialog"
+          aria-label="Reading choices"
+          data-testid="reading-quick-panel"
+          style={{
+            position: "fixed", right: anchor.right, bottom: anchor.bottom, zIndex: 9999,
+            width: "min(420px, calc(100vw - 24px))", maxHeight: anchor.maxHeight, overflowY: "auto",
+            display: "flex", flexDirection: "column", gap: 14,
+            padding: "14px 16px 16px",
+            background: "var(--lk-n-0f1d36, #0f1d36)",
+            border: "1px solid var(--lk-accent-450, rgba(201,146,42,0.45))",
+            borderRadius: 20,
+            boxShadow: "0 18px 44px var(--lk-shadow-700, rgba(0,0,0,0.7))",
+            animation: "fade-in 0.18s ease-out",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <span style={{ color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 20, fontWeight: 700 }}>Reading</span>
+            <button
+              type="button"
+              aria-label="Close reading choices"
+              data-testid="reading-quick-close"
+              onClick={() => setOpen(false)}
+              style={{
+                width: 40, height: 40, borderRadius: "50%",
+                background: "var(--lk-fill-080, rgba(255,255,255,0.08))", border: "1px solid var(--lk-line-200, rgba(255,255,255,0.2))",
+                color: CREAM, fontSize: 18, fontWeight: 700, cursor: "pointer", touchAction: "manipulation",
+              }}
+            >✕</button>
+          </div>
+          <ReadingSetupPanel
+            quick
+            pageMode={setup?.pageMode ?? "double"}
+            onPageModeChange={setup?.onPageModeChange}
+            fontScale={setup?.fontScale ?? 1}
+            onFontScaleChange={setup?.onFontScaleChange}
+            theme={theme}
+            onThemeChange={onThemeChange}
+            pointerMode={setup?.pointerMode ?? "finger"}
+            onPointerModeChange={setup?.onPointerModeChange}
+          />
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }
 
@@ -13083,6 +13477,7 @@ function ReadingPiPSidebar({
           label={nanaName || getRoleLabel("nana")}
           borderRadius={12}
           compact
+          objectFit="cover"
           objectPosition="center 35%"
           isRecording={isRecording}
         />
@@ -13096,6 +13491,7 @@ function ReadingPiPSidebar({
           label={childName || getRoleLabel("child")}
           borderRadius={12}
           compact
+          objectFit="cover"
           objectPosition="center 35%"
           isRecording={isRecording}
         />
@@ -14963,6 +15359,18 @@ export default function App() {
   deviceViewRef.current = deviceView;
   // Build 43: Nana's look choices are saved for this family (a new family too).
   useEffect(() => { setLookFamily(deviceView === "perry" ? null : connectionId); }, [deviceView, connectionId]);
+
+  // ── Several homes per grandparent (Build 44, Rick's Build 43 note) ──
+  // Each home is a connection with its own family code and its own kids'
+  // iPad. The open home is `connectionId` (its grandchildren are
+  // `children`); Home shows every home's grandchildren together, and
+  // picking one from another home opens that home.
+  type NanaHome = { id: string; name: string | null; inviteToken: string; status: "pending" | "active"; childCount: number };
+  const [nanaHomes, setNanaHomes] = useState<NanaHome[]>([]);
+  const [otherHomeKids, setOtherHomeKids] = useState<Record<string, Child[]>>({});
+  const [otherHomeHere, setOtherHomeHere] = useState<Record<string, string | null>>({});
+  const multiHome = deviceView !== "perry" && nanaHomes.length > 1;
+  useEffect(() => { setLookFamilies(deviceView === "perry" ? [] : nanaHomes.map(h => h.id)); }, [deviceView, nanaHomes]);
   const currentUserRef = useRef<SafeUser | null>(null);
   currentUserRef.current = currentUser;
   const signOutRef = useRef<(() => Promise<void>) | null>(null);
@@ -15229,6 +15637,11 @@ export default function App() {
   // Derived: the active child object + display name. All existing
   // callsites that referenced `dashboardPerryName` continue to read
   // this — semantics unchanged for single-child families.
+  // Build 44: a video tile whose camera is off shows the child's photo.
+  useEffect(() => {
+    const id = activeChildId ?? authenticatedChildId;
+    setPersonPhoto("child", children.find(k => k.id === id)?.photoUrl ?? null);
+  }, [children, activeChildId, authenticatedChildId]);
   const activeChildIdLatestRef = useRef(activeChildId);
   activeChildIdLatestRef.current = activeChildId;
   const activeChild = children.find((c) => c.id === activeChildId) ?? children[0] ?? null;
@@ -16197,9 +16610,25 @@ export default function App() {
   // (Rick's Build 40 review: first-time setup never shows to a Nana who
   // already has grandchildren); a family still waiting for its first
   // grandchild keeps the setup step that shows the family code.
-  const openNanaFamily = (conns: Array<{ connection: { id: string; status: "pending" | "active"; inviteToken: string; look?: string | null; libraryStyle?: string | null }; childCount?: number }>): boolean => {
-    const existing = conns[0];
+  /** Build 44: the homes to show: the open one, any with grandchildren,
+   *  and any added by name (an old empty duplicate stays hidden). */
+  // Oldest home first, so the grandchildren keep their places on Home.
+  const homesFromList = (conns: Array<{ connection: { id: string; status: "pending" | "active"; inviteToken: string; name?: string | null; createdAt?: string }; childCount?: number }>, openId: string | null): NanaHome[] =>
+    conns
+      .filter(c => c.connection.id === openId || (c.childCount ?? 0) > 0 || !!c.connection.name)
+      .slice()
+      .sort((a, b) => String(a.connection.createdAt ?? "").localeCompare(String(b.connection.createdAt ?? "")))
+      .map(c => ({ id: c.connection.id, name: c.connection.name ?? null, inviteToken: c.connection.inviteToken, status: c.connection.status, childCount: c.childCount ?? 0 }));
+  const openNanaFamily = (conns: Array<{ connection: { id: string; status: "pending" | "active"; inviteToken: string; look?: string | null; libraryStyle?: string | null; name?: string | null; createdAt?: string }; childCount?: number }>): boolean => {
+    // Build 44: reopen the home Nana used last on this iPad (else the
+    // server's first: the home with grandchildren).
+    const lastHome = (() => { try { return localStorage.getItem("nm_home_id"); } catch { return null; } })();
+    const existing = conns.find(c => c.connection.id === lastHome && (c.childCount ?? 0) > 0) ?? conns[0];
     if (!existing) return false;
+    try { localStorage.setItem("nm_home_id", existing.connection.id); } catch {}
+    setNanaHomes(homesFromList(conns, existing.connection.id));
+    setOtherHomeKids({});
+    setOtherHomeHere({});
     setConnectionId(existing.connection.id);
     // Build 43: the family's colours and Library style.
     syncFamilyLookOnOpen(existing.connection.id, existing.connection);
@@ -16806,6 +17235,13 @@ export default function App() {
           });
         } else if (msg.type === "chapter_end_dismiss") {
           setChapterEndOverlay(null);
+        } else if (msg.type === "book_unlocked" || msg.type === "book_revoked") {
+          // Build 44: a book bought (or refunded) for this family.
+          try { refreshCatalogRef.current?.(); } catch {}
+          try { window.dispatchEvent(new CustomEvent("nm-book-unlocked", { detail: msg.payload })); } catch {}
+        } else if (msg.type === "store_open" || msg.type === "store_close") {
+          // Build 44: Nana is in the Book Store during the visit.
+          if (deviceViewRef.current === "perry") setNanaInStore(msg.type === "store_open");
         } else if (msg.type === "catalog_updated") {
           // Rick's Aug 14: admin created/edited/deleted a book. Refetch
           // the public catalog so this iPad's library reflects the
@@ -16916,6 +17352,13 @@ export default function App() {
             lastAppliedPointerTsRef.current = ts;
             setPointerHighlight({ x: p.x, y: p.y, page: p.page, ts });
           }
+        } else if (msg.type === "book_unlocked" || msg.type === "book_revoked") {
+          // Build 44: a book bought (or refunded) for this family.
+          try { refreshCatalogRef.current?.(); } catch {}
+          try { window.dispatchEvent(new CustomEvent("nm-book-unlocked", { detail: msg.payload })); } catch {}
+        } else if (msg.type === "store_open" || msg.type === "store_close") {
+          // Build 44: Nana is in the Book Store during the visit.
+          if (deviceViewRef.current === "perry") setNanaInStore(msg.type === "store_open");
         } else if (msg.type === "catalog_updated") {
           // Rick, Oct 8: a book he had just added didn't show up in
           // search. Only the child's stream listened for this; Nana, who
@@ -17410,14 +17853,18 @@ export default function App() {
   // grandchildren, Start Reading appears once Nana has picked one on Home
   // this time; a family with one grandchild has them picked already.
   const [homePicked, setHomePicked] = useState(false);
+  // Build 44: picking a grandchild from another home opens that home
+  // (set further down, where the visit state is known).
+  const switchToHomeRef = useRef<((childId: string) => boolean) | null>(null);
   const handleHomeSelectChild = useCallback((childId: string) => {
+    if (switchToHomeRef.current?.(childId)) return;
     // Always tells the kids' iPad, even when this was the last child read
     // with, so a sibling signed in there is asked for this child's PIN.
     if (childId === activeChildId) setActiveChildId(childId);
     else handleSelectChild(childId);
     setHomePicked(true);
   }, [activeChildId, handleSelectChild, setActiveChildId]);
-  const homeSelectedChildId = children.length === 1
+  const homeSelectedChildId = children.length === 1 && !multiHome
     ? children[0].id
     : homePicked && activeChildId && children.some(c => c.id === activeChildId) ? activeChildId : null;
 
@@ -17451,6 +17898,7 @@ export default function App() {
   const handleRemoveChild = useCallback(async (childId: string) => {
     await api.children.remove(childId);
     setChildren(curr => curr.filter(c => c.id !== childId));
+    setOtherHomeKids(curr => Object.fromEntries(Object.entries(curr).map(([id, kids]) => [id, kids.filter(c => c.id !== childId)])));
     if (activeChildIdLatestRef.current === childId) {
       setActiveChildIdRaw(null);
       try { localStorage.removeItem("nm_active_child_id"); } catch {}
@@ -17467,7 +17915,16 @@ export default function App() {
 
   // Grandchild profile edits (Build 38). The server broadcasts
   // child_updated, so the child's PIN screen refreshes too.
-  const replaceChild = (c: Child) => setChildren(curr => curr.map(x => (x.id === c.id ? c : x)));
+  const replaceChild = (c: Child) => {
+    setChildren(curr => curr.map(x => (x.id === c.id ? c : x)));
+    // Build 44: a grandchild in another home (Settings lists everyone).
+    setOtherHomeKids(curr => {
+      let hit = false;
+      const next: Record<string, Child[]> = {};
+      for (const [id, kids] of Object.entries(curr)) next[id] = kids.map(x => (x.id === c.id ? ((hit = true), c) : x));
+      return hit ? next : curr;
+    });
+  };
   const handleSetChildPhoto = async (childId: string, dataUrl: string) => {
     replaceChild((await api.children.setPhoto(childId, dataUrl)).child);
   };
@@ -17847,6 +18304,20 @@ export default function App() {
   // refresh function without needing to close over it (avoids
   // "refetch uses stale state" pitfalls in the SSE listener).
   const refreshCatalogRef = useRef<() => void>(() => {});
+
+  // ── Build 44: the Book Store ──
+  // Nana sees "Find a New Book" in the Library when the store has books
+  // (free author books, or paid ones once NeverMiss opens the store).
+  const [storeOpen, setStoreOpen] = useState(false);
+  const [storeAvail, setStoreAvail] = useState(false);
+  const [nanaInStore, setNanaInStore] = useState(false);
+  useEffect(() => {
+    if (deviceView === "perry" || mode !== "library" || nanaOnboardingStep !== 3) return;
+    let alive = true;
+    api.store.books().then(r => { if (alive) setStoreAvail(r.enabled || r.books.length > 0); }).catch(() => {});
+    return () => { alive = false; };
+  }, [deviceView, mode, nanaOnboardingStep]);
+  useEffect(() => { if (mode !== "library") setNanaInStore(false); }, [mode]);
   // True until this launch has the server's current catalog: the library
   // says it is getting the newest books instead of "No books match".
   const [catalogLoading, setCatalogLoading] = useState(true);
@@ -19429,6 +19900,108 @@ export default function App() {
   // Each visit counts its own pages turned.
   useEffect(() => { if (visitActive) pagesTurnedRef.current = 0; }, [visitActive]);
 
+  // ── Build 44: several homes (see nanaHomes above) ──
+  // The other homes' grandchildren (refreshed every minute) and who is
+  // signed in on each home's iPad (every 8 s while Nana is on Home).
+  const onHomeScreen = mode === "home";
+  useEffect(() => {
+    if (!multiHome || nanaOnboardingStep !== 3) return;
+    let alive = true;
+    const others = nanaHomes.filter(h => h.id !== connectionId);
+    const loadKids = () => Promise.all(others.map(h => api.children.list(h.id).then(k => [h.id, k] as const).catch(() => [h.id, null] as const)))
+      .then(rows => { if (!alive) return; setOtherHomeKids(curr => { const next = { ...curr }; for (const [id, k] of rows) if (k) next[id] = k; return next; }); });
+    const loadHere = () => Promise.all(others.map(h => api.connections.status(h.id).then(r => [h.id, r.perryOnline ? (r.perryChildId ?? "") : null] as const).catch(() => [h.id, null] as const)))
+      .then(rows => { if (alive) setOtherHomeHere(Object.fromEntries(rows)); });
+    void loadKids();
+    void loadHere();
+    const kidsTimer = window.setInterval(() => void loadKids(), 60000);
+    const hereTimer = onHomeScreen ? window.setInterval(() => void loadHere(), 8000) : 0;
+    return () => { alive = false; window.clearInterval(kidsTimer); if (hereTimer) window.clearInterval(hereTimer); };
+  }, [multiHome, nanaHomes, connectionId, onHomeScreen, nanaOnboardingStep]);
+
+  const refreshHomes = useCallback(async () => {
+    const { connections } = await api.connections.list();
+    setNanaHomes(homesFromList(connections, connectionId));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectionId]);
+
+  // Picking a grandchild from another home opens that home: its live
+  // stream, its kids' iPad (told who was picked) and its grandchildren.
+  // Not during a visit: the call belongs to the open home.
+  switchToHomeRef.current = (childId: string) => {
+    if (!multiHome || children.some(c => c.id === childId)) return false;
+    const home = nanaHomes.find(h => h.id !== connectionId && (otherHomeKids[h.id] ?? []).some(c => c.id === childId));
+    if (!home) return false;
+    if (visitActive) return true;
+    const prevId = connectionId;
+    const prevKids = children;
+    const prevHere = perryConnected ? (perryHereChildId ?? "") : null;
+    try { localStorage.setItem("nm_active_child_id", childId); } catch {}
+    setOtherHomeKids(curr => { const next = { ...curr }; delete next[home.id]; if (prevId) next[prevId] = prevKids; return next; });
+    setOtherHomeHere(curr => { const next = { ...curr }; delete next[home.id]; if (prevId) next[prevId] = prevHere; return next; });
+    setChildren(otherHomeKids[home.id] ?? []);
+    setActiveChildIdRaw(childId);
+    setPerryConnected(false);
+    setPerryHereChildId(null);
+    setConnectionId(home.id);
+    setInviteToken(home.inviteToken);
+    try { localStorage.setItem("nm_home_id", home.id); } catch {}
+    sessionStartedFiredRef.current = false;
+    void (async () => {
+      await api.sessions.publishEvent(home.id, "session_reset", {}).catch(() => {});
+      await api.sessions.publishEvent(home.id, "active_child_change", { childId, by: "nana" }).catch(() => {});
+    })();
+    startNanaSSE(home.id);
+    setPreSelectedBook(null);
+    setSelectedBookId("");
+    setHomePicked(true);
+    return true;
+  };
+
+  const handleAddHome = useCallback(async (name: string) => {
+    await api.connections.invite(name.trim());
+    await refreshHomes();
+  }, [refreshHomes]);
+  const handleRenameHome = useCallback(async (homeId: string, name: string) => {
+    await api.connections.rename(homeId, name);
+    await refreshHomes();
+  }, [refreshHomes]);
+  const handleMoveChild = useCallback(async (childId: string, toHomeId: string) => {
+    await api.children.move(childId, toHomeId);
+    if (connectionId) setChildren(await api.children.list(connectionId));
+    const others = nanaHomes.filter(h => h.id !== connectionId);
+    const rows = await Promise.all(others.map(h => api.children.list(h.id).then(k => [h.id, k] as const).catch(() => [h.id, [] as Child[]] as const)));
+    setOtherHomeKids(Object.fromEntries(rows));
+    if (activeChildId === childId) { setActiveChildIdRaw(null); setHomePicked(false); }
+    await refreshHomes();
+  }, [connectionId, nanaHomes, activeChildId, refreshHomes]);
+
+  const handleNewHomeCode = useCallback(async (homeId: string) => {
+    const r = await api.connections.newInviteCode(homeId);
+    if (homeId === connectionId) setInviteToken(r.inviteToken);
+    await refreshHomes();
+  }, [connectionId, refreshHomes]);
+
+  const homeEntries = nanaHomes.map(h => ({
+    id: h.id,
+    name: h.name,
+    inviteToken: h.id === connectionId ? inviteToken : h.inviteToken,
+    children: h.id === connectionId ? children : (otherHomeKids[h.id] ?? []),
+  }));
+  const homesPanel = deviceView === "perry" ? null : (
+    <HomesPanel homes={homeEntries} activeId={connectionId} onAddHome={handleAddHome} onRename={handleRenameHome} onMoveChild={handleMoveChild} onNewCode={handleNewHomeCode} />
+  );
+  const homeChildren = multiHome ? homeEntries.flatMap(h => h.children) : undefined;
+  const homeHereIds = multiHome
+    ? [
+        ...(perryConnected && perryHereChildId ? [perryHereChildId] : []),
+        ...Object.entries(otherHomeHere).filter(([id, c]) => id !== connectionId && !!c).map(([, c]) => c as string),
+      ]
+    : undefined;
+  const openHomeEntry = homeEntries.find(h => h.id === connectionId);
+  const homeFamilyLabel = multiHome && openHomeEntry ? homeLabel(openHomeEntry) : undefined;
+  const homeFamilyCodes = multiHome ? homeEntries.map(h => ({ label: homeLabel(h), code: h.inviteToken })) : undefined;
+
   // ── Switch grandchildren mid-visit (Rick's Build 41 review) ──────────
   // Nana's "Switch to Cooper" (Menu, or the chat screen), or a sibling
   // signing in on the kids' iPad mid-visit. The call stays up: the kids'
@@ -20957,6 +21530,34 @@ export default function App() {
           onVisitChild={(id) => { closeVisitEndCard(); setHomePicked(true); void handleReadWithChild(id); }}
         />
       )}
+      {/* Build 44: hidden frame meter (five taps on the NeverMiss name). */}
+      <FpsMeter />
+      {/* Build 44: the Book Store, over the Library on Nana's iPad. */}
+      {storeOpen && deviceView !== "perry" && (
+        <BookStore
+          connectionId={connectionId}
+          onClose={() => {
+            setStoreOpen(false);
+            if (connectionId && visitActive) api.sessions.publishEvent(connectionId, "store_close", {}).catch(() => {});
+          }}
+          onReadNow={(bookId) => {
+            // The book joins the Library first (the catalog refreshes),
+            // then it's selected there, on both iPads.
+            refreshCatalogRef.current?.();
+            const started = Date.now();
+            const tick = () => {
+              if (booksLibrary[bookId] || Date.now() - started > 8000) {
+                setStoreOpen(false);
+                if (connectionId && visitActive) api.sessions.publishEvent(connectionId, "store_close", {}).catch(() => {});
+                if (booksLibrary[bookId]) handleSelectBook(bookId);
+                return;
+              }
+              window.setTimeout(tick, 300);
+            };
+            tick();
+          }}
+        />
+      )}
       {/* Rick's Sep 25 (C-3): Send Feedback modal. Accessible from
           Menu on every screen. Auto-captures the current mode as
           page context so Rick can jump to the right screen when he
@@ -21193,6 +21794,17 @@ export default function App() {
           accountLabel={currentUser?.email ?? undefined}
           onSwitchDevice={handleSwitchDevice}
           childrenList={children}
+          homeChildren={homeChildren}
+          homeHereIds={homeHereIds}
+          homeFamilyLabel={homeFamilyLabel}
+          homeFamilyCodes={homeFamilyCodes}
+          homesPanel={homesPanel}
+          multipleHomes={multiHome}
+          onOpenStore={storeAvail ? () => {
+            setStoreOpen(true);
+            if (connectionId && visitActive) api.sessions.publishEvent(connectionId, "store_open", {}).catch(() => {});
+          } : undefined}
+          nanaInStore={nanaInStore}
           activeChildId={activeChildId}
           onSelectChild={handleSelectChild}
           onReadWithChild={(id) => { void handleReadWithChild(id); }}
@@ -21403,6 +22015,17 @@ export default function App() {
           // are Nana-side dashboard screens. Top-bar Home stays in-session.
           onGoHome={() => setMode("icebreaker")}
           childrenList={children}
+          homeChildren={homeChildren}
+          homeHereIds={homeHereIds}
+          homeFamilyLabel={homeFamilyLabel}
+          homeFamilyCodes={homeFamilyCodes}
+          homesPanel={homesPanel}
+          multipleHomes={multiHome}
+          onOpenStore={storeAvail ? () => {
+            setStoreOpen(true);
+            if (connectionId && visitActive) api.sessions.publishEvent(connectionId, "store_open", {}).catch(() => {});
+          } : undefined}
+          nanaInStore={nanaInStore}
           activeChildId={activeChildId}
           onSelectChild={handleSelectChild}
           onOpenAddChild={() => setAddChildModalOpen(true)}

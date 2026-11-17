@@ -478,41 +478,18 @@ export function ReadingSetupPanel({
   fontScale, onFontScaleChange,
   theme, onThemeChange,
   pointerMode, onPointerModeChange,
+  quick = false,
 }: {
   pageMode: "single" | "double"; onPageModeChange?: (m: "single" | "double") => void;
   fontScale: number; onFontScaleChange?: (s: number) => void;
   theme: ReadingTheme; onThemeChange?: (t: ReadingTheme) => void;
   pointerMode: PointerMode; onPointerModeChange?: (m: PointerMode) => void;
+  /** Build 44 quick panel by the reading controls: page light first, no
+   *  pointer explanation (the Menu's Reading Setup keeps both). */
+  quick?: boolean;
 }) {
   const sizeKey = fontScale >= 1.5 ? 1.5 : fontScale >= 1.25 ? 1.25 : fontScale >= 1 ? 1 : 0.85;
-  return (
-    <>
-      {onPageModeChange && (
-        <PanelSection title="Pages">
-          <Segmented
-            testId="setup-pages"
-            value={pageMode}
-            onChange={onPageModeChange}
-            options={[{ value: "single", label: "One page" }, { value: "double", label: "Two pages" }]}
-          />
-        </PanelSection>
-      )}
-      {onFontScaleChange && (
-        <PanelSection title="Text size (both iPads)">
-          <Segmented
-            testId="setup-size"
-            value={sizeKey}
-            onChange={onFontScaleChange}
-            options={[
-              { value: 0.85, label: <span style={{ fontSize: 14 }}>A</span>, sub: "Small" },
-              { value: 1, label: <span style={{ fontSize: 17 }}>A</span>, sub: "Medium" },
-              { value: 1.25, label: <span style={{ fontSize: 20 }}>A</span>, sub: "Large" },
-              { value: 1.5, label: <span style={{ fontSize: 23 }}>A</span>, sub: "Extra" },
-            ]}
-          />
-        </PanelSection>
-      )}
-      {onThemeChange && (
+  const light = onThemeChange && (
         <PanelSection title="Light / Dark">
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }} role="radiogroup" data-testid="setup-theme">
             {(["day", "bright", "sepia", "night"] as ReadingTheme[]).map(t => {
@@ -541,7 +518,36 @@ export function ReadingSetupPanel({
             })}
           </div>
         </PanelSection>
+  );
+  return (
+    <>
+      {quick && light}
+      {onPageModeChange && (
+        <PanelSection title="Pages">
+          <Segmented
+            testId="setup-pages"
+            value={pageMode}
+            onChange={onPageModeChange}
+            options={[{ value: "single", label: "One page" }, { value: "double", label: "Two pages" }]}
+          />
+        </PanelSection>
       )}
+      {onFontScaleChange && (
+        <PanelSection title="Text size (both iPads)">
+          <Segmented
+            testId="setup-size"
+            value={sizeKey}
+            onChange={onFontScaleChange}
+            options={[
+              { value: 0.85, label: <span style={{ fontSize: 14 }}>A</span>, sub: "Small" },
+              { value: 1, label: <span style={{ fontSize: 17 }}>A</span>, sub: "Medium" },
+              { value: 1.25, label: <span style={{ fontSize: 20 }}>A</span>, sub: "Large" },
+              { value: 1.5, label: <span style={{ fontSize: 23 }}>A</span>, sub: "Extra" },
+            ]}
+          />
+        </PanelSection>
+      )}
+      {!quick && light}
       {onPointerModeChange && (
         <PanelSection title="Reading pointer">
           <Segmented
@@ -554,9 +560,11 @@ export function ReadingSetupPanel({
               { value: "off", label: "Off" },
             ]}
           />
-          <span style={{ color: "var(--lk-ink-600, rgba(247,240,227,0.6))", fontFamily: FONT, fontSize: 13, lineHeight: 1.4 }}>
-            Slide your finger slowly along the words; the child sees it move. A quick flick still turns the page.
-          </span>
+          {!quick && (
+            <span style={{ color: "var(--lk-ink-600, rgba(247,240,227,0.6))", fontFamily: FONT, fontSize: 13, lineHeight: 1.4 }}>
+              Slide your finger slowly along the words; the child sees it move. A quick flick still turns the page.
+            </span>
+          )}
         </PanelSection>
       )}
     </>

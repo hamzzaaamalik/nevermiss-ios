@@ -1,4 +1,8 @@
-export type StickerKind = "head" | "mask" | "floater";
+/** head: one emoji riding above the forehead. mask: one emoji over the
+ *  whole face. crown: a small arc of emoji just above the head that
+ *  follows and tilts with it (Build 44; these were "floaters" fixed to
+ *  the top of the tile before). */
+export type StickerKind = "head" | "mask" | "crown";
 
 export interface Sticker {
   id: string;
@@ -13,6 +17,10 @@ export interface Sticker {
   /** Sticker font size as a multiple of face width. Default 1.2 for hats,
    *  1.4 for masks. */
   scale?: number;
+  /** Crown only: the emoji along the arc, left to right. */
+  glyphs?: string[];
+  /** Crown only: size of each glyph relative to the others (default 1). */
+  sizes?: number[];
 }
 
 export interface FacePose {

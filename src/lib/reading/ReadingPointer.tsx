@@ -9,7 +9,10 @@ export const localPointer = {
   subscribe(fn: LocalListener) { localListeners.add(fn); return () => { localListeners.delete(fn); }; },
 };
 
-const FADE_AFTER_UP_MS = 2500;
+// Rick's Build 43 review: the hand and line lingered about 2.5 s after
+// Nana lifted her finger; he asked for 0.5 to 1.0 s. They start fading
+// 0.6 s after the lift and are gone by about 0.9 s (260 ms fade below).
+const FADE_AFTER_UP_MS = 600;
 
 function escapeAttr(v: string): string {
   return typeof CSS !== "undefined" && CSS.escape ? CSS.escape(v) : v.replace(/["\\]/g, "\\$&");

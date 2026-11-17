@@ -12,7 +12,11 @@ import { getLibraryStyle, getLook, isLibraryStyle, isLookId, setLooks, type Libr
 const PENDING_KEY = "nm_look_pending";
 /** Nana's family on this iPad (set by the app when her family opens or is created). */
 let familyId: string | null = null;
+/** Build 44: all of Nana's homes; her look goes to each of them. */
+let otherFamilyIds: string[] = [];
 export function setLookFamily(id: string | null): void { familyId = id; }
+export function setLookFamilies(ids: string[]): void { otherFamilyIds = ids.filter(Boolean); }
+const allFamilies = (first: string) => [first, ...otherFamilyIds.filter(id => id !== first)];
 
 /** Apply a look from the server or an event. Missing or unknown parts leave this iPad as it is. */
 export function applyFamilyLook(v: { look?: unknown; libraryStyle?: unknown } | null | undefined): void {
@@ -24,7 +28,11 @@ export function applyFamilyLook(v: { look?: unknown; libraryStyle?: unknown } | 
 }
 
 async function push(connectionId: string): Promise<void> {
-  await api.connections.setLook(connectionId, { look: getLook(), libraryStyle: getLibraryStyle() });
+  const body = { look: getLook(), libraryStyle: getLibraryStyle() };
+  // The open home must take it; the others are best effort (each also
+  // gets it the next time it opens, from Nana's pending change).
+  await api.connections.setLook(connectionId, body);
+  await Promise.all(allFamilies(connectionId).slice(1).map(id => api.connections.setLook(id, body).catch(() => {})));
   try { localStorage.removeItem(PENDING_KEY); } catch { /* fine */ }
 }
 

@@ -66,6 +66,9 @@ function formatNext(iso: string): string {
 export function HomeView({
   nanaName,
   children,
+  hereIds,
+  familyLabel,
+  familyCodes,
   activeChildId,
   onSelectChild,
   perryOnline,
@@ -89,6 +92,13 @@ export function HomeView({
   activeChildId: string | null;
   onSelectChild: (id: string) => void;
   perryOnline: boolean;
+  /** Build 44, several homes: grandchildren signed in on their home's iPad
+   *  (the open home's from perryOnline/perryHereChildId, the others polled). */
+  hereIds?: string[];
+  /** Build 44, several homes: the home the family code below is for. */
+  familyLabel?: string;
+  /** Build 44, several homes: every home's code, shown until a grandchild is picked. */
+  familyCodes?: Array<{ label: string; code: string }>;
   /** Who is logged in on the child's iPad right now, if anyone. */
   perryHereChildId: string | null;
   nextVisitIso: string | null;
@@ -128,6 +138,11 @@ export function HomeView({
   // With two or more grandchildren nobody is picked until Nana taps one.
   const active = children.find(c => c.id === activeChildId) ?? (n === 1 ? children[0] : null);
   const onKidsIpad = perryOnline && perryHereChildId ? children.find(c => c.id === perryHereChildId) ?? null : null;
+  // Several homes: everyone signed in on an iPad right now, any home.
+  const hereKids = hereIds ? children.filter(c => hereIds.includes(c.id)) : (onKidsIpad ? [onKidsIpad] : []);
+  const hereLine = hereKids.length === 0 ? "" : hereKids.length === 1
+    ? `${hereKids[0].name} is on ${hereIds ? "their" : "the kids'"} iPad`
+    : `${hereKids.slice(0, -1).map(c => c.name).join(", ")} and ${hereKids[hereKids.length - 1].name} are on their iPads`;
   const size = n <= 1 ? 230 : n === 2 ? 190 : n === 3 ? 160 : 132;
   const name = active?.name ?? "your grandchild";
   const here = perryOnline && (!perryHereChildId || perryHereChildId === active?.id);
@@ -229,12 +244,12 @@ export function HomeView({
           <div role="radiogroup" aria-label="Choose a grandchild" style={{
             marginTop: active ? 26 : 18,
             display: "flex", flexWrap: "wrap", justifyContent: "center",
-            gap: n <= 2 ? 56 : 36, rowGap: 24,
+            columnGap: n <= 2 ? 56 : 36, rowGap: 24,
             maxWidth: 980,
           }}>
             {children.map((c, i) => {
               const selected = c.id === active?.id;
-              const isHere = perryOnline && perryHereChildId === c.id;
+              const isHere = hereIds ? hereIds.includes(c.id) : perryOnline && perryHereChildId === c.id;
               return (
                 <div key={c.id} className="nm-home-kid" style={{
                   display: "flex", flexDirection: "column", alignItems: "center", gap: 10,
@@ -287,10 +302,10 @@ export function HomeView({
           {/* Status line: who is here, or the next saved visit */}
           <div data-testid="home-status" style={{ marginTop: 22, minHeight: 34, display: "flex", alignItems: "center", gap: 10, fontFamily: FONT, fontSize: 18, fontWeight: 700 }}>
             {!active ? (
-              onKidsIpad ? (
+              hereLine ? (
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 10, color: "var(--lk-ok-t, #86efac)" }}>
                   <span aria-hidden style={{ width: 12, height: 12, borderRadius: "50%", background: "#22c55e", animation: "nm-here-pulse 2s ease-in-out infinite" }} />
-                  {onKidsIpad.name} is on the kids' iPad
+                  {hereLine}
                 </span>
               ) : next ? (
                 <span style={{ color: "var(--lk-ink-850, rgba(247,240,227,0.85))" }}>📅 Next • {next}</span>
@@ -334,10 +349,22 @@ export function HomeView({
             + Add a grandchild
           </button>
           {photoError && <div role="alert" style={{ color: "var(--lk-bad-t, #fca5a5)", fontFamily: FONT, fontSize: 15, marginTop: 6 }}>{photoError}</div>}
-          {familyCode && (
-            <div data-testid="home-family" style={{ marginTop: 18, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+          {familyCodes && familyCodes.length > 1 && !active ? (
+            <div data-testid="home-family-codes" style={{ marginTop: 18, display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
               <span style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: FONT, fontSize: 13, fontWeight: 600 }}>
-                Family code, for a grandchild's iPad
+                Family codes, one for each home's iPad
+              </span>
+              {familyCodes.map(f => (
+                <div key={f.code} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>
+                  <span style={{ color: "var(--lk-ink-750, rgba(247,240,227,0.75))", fontFamily: FONT, fontSize: 15, fontWeight: 700 }}>{f.label}</span>
+                  <span style={{ color: AMBER_T, fontFamily: FONT, fontSize: 20, fontWeight: 900, letterSpacing: "0.2em" }}>{f.code}</span>
+                </div>
+              ))}
+            </div>
+          ) : familyCode && (
+            <div data-testid="home-family" style={{ marginTop: 18, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+              <span data-testid="home-family-label" style={{ color: "var(--lk-ink-550, rgba(247,240,227,0.55))", fontFamily: FONT, fontSize: 13, fontWeight: 600 }}>
+                {familyLabel ? `Family code for ${familyLabel}` : "Family code, for a grandchild's iPad"}
               </span>
               <FamilyCodeLine code={familyCode} small />
             </div>
