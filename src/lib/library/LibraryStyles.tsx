@@ -20,7 +20,11 @@ export interface ShelfBook {
   coverUrl?: string;
   /** A small cover picture made by the admin (Step 5); preferred over the full one. */
   coverThumbUrl?: string;
+  /** Build 44: the book's Library filter choices. */
+  filterChoices?: string[];
 }
+/** Build 44: shelves by one of the admin's filter groups (its choices, in order). */
+export interface ShelfGrouping { choices: Array<{ id: string; label: string; emoji?: string; age?: string }> }
 export interface ShelfProgress { bookId: string; currentPage: number; lastReadAt: string }
 export interface BookGroup { key: string; title: string; books: ShelfBook[] }
 /** The book at the top of the Library and its distance from the top, in pixels. */
@@ -33,8 +37,9 @@ const AGE_GROUPS: Array<{ tier: string; title: string }> = [
   { tier: "10-13", title: "For ages 10 to 13" },
 ];
 
-/** "Continue reading" first (most recent first), then one group per age, then the rest. */
-export function groupBooks(books: ShelfBook[], progressById: Map<string, ShelfProgress>): BookGroup[] {
+/** "Continue reading" first (most recent first), then one group per age (or per
+ *  choice of the admin's shelf group), then the rest. A book shows once. */
+export function groupBooks(books: ShelfBook[], progressById: Map<string, ShelfProgress>, by: ShelfGrouping | null = null): BookGroup[] {
   const inProgress = (b: ShelfBook) => { const p = progressById.get(b.id); return !!p && p.currentPage >= 1 && p.currentPage < b.pages.length; };
   const reading = books.filter(inProgress).sort((a, b) =>
     new Date(progressById.get(b.id)!.lastReadAt).getTime() - new Date(progressById.get(a.id)!.lastReadAt).getTime());
@@ -42,10 +47,18 @@ export function groupBooks(books: ShelfBook[], progressById: Map<string, ShelfPr
   const tierOf = (b: ShelfBook) => (b.ageRange ?? "").toLowerCase().replace(/[–—]/g, "-");
   const groups: BookGroup[] = [{ key: "reading", title: "Continue reading", books: reading }];
   const placed = new Set<string>();
-  for (const g of AGE_GROUPS) {
-    const list = rest.filter(b => !placed.has(b.id) && tierOf(b).includes(g.tier));
-    list.forEach(b => placed.add(b.id));
-    groups.push({ key: g.tier, title: g.title, books: list });
+  if (by && by.choices.length > 0) {
+    for (const ch of by.choices) {
+      const list = rest.filter(b => !placed.has(b.id) && (ch.age ? tierOf(b).includes(ch.age) : !!b.filterChoices?.includes(ch.id)));
+      list.forEach(b => placed.add(b.id));
+      groups.push({ key: `f:${ch.id}`, title: ch.emoji ? `${ch.emoji} ${ch.label}` : ch.label, books: list });
+    }
+  } else {
+    for (const g of AGE_GROUPS) {
+      const list = rest.filter(b => !placed.has(b.id) && tierOf(b).includes(g.tier));
+      list.forEach(b => placed.add(b.id));
+      groups.push({ key: g.tier, title: g.title, books: list });
+    }
   }
   groups.push({ key: "more", title: "More books", books: rest.filter(b => !placed.has(b.id)) });
   return groups.filter(g => g.books.length > 0);

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { api, ApiError, type StoreBook, type StorePage } from "../api";
 import { BookCover } from "../library/LibraryStyles";
+import { useFilterDefs } from "../library/filterDefs";
 
 /**
  * The Book Store on Nana's iPad (Build 44): books from NeverMiss authors.
@@ -34,6 +35,9 @@ export function BookStore({ connectionId, onClose, onReadNow }: {
   const [books, setBooks] = useState<StoreBook[] | null>(null);
   const [error, setError] = useState("");
   const [age, setAge] = useState<string>("all");
+  // Build 44: the admin's Library filters (topics, seasons...) that store books are in.
+  const [topic, setTopic] = useState<string | null>(null);
+  const filterDefs = useFilterDefs();
   const [detail, setDetail] = useState<StoreBook | null>(null);
   const [sample, setSample] = useState<{ book: StoreBook; pages: StorePage[] } | null>(null);
   const [gate, setGate] = useState<StoreBook | null>(null);
@@ -72,7 +76,9 @@ export function BookStore({ connectionId, onClose, onReadNow }: {
   }, [buying, load]);
 
   const ages = useMemo(() => Array.from(new Set((books ?? []).map(b => b.ageTier).filter(Boolean) as string[])).sort((a, b) => parseInt(a) - parseInt(b)), [books]);
-  const shown = (books ?? []).filter(b => age === "all" || b.ageTier === age);
+  const topics = useMemo(() => (filterDefs?.groups ?? []).filter(g => !g.builtin)
+    .flatMap(g => g.choices.filter(ch => !ch.age && (books ?? []).some(b => b.f?.includes(ch.id)))), [filterDefs, books]);
+  const shown = (books ?? []).filter(b => (age === "all" || b.ageTier === age) && (!topic || !!b.f?.includes(topic)));
 
   const openSample = async (b: StoreBook) => {
     setBusy(true);
@@ -133,6 +139,26 @@ export function BookStore({ connectionId, onClose, onReadNow }: {
                     color: age === a ? NAVY : INK, fontFamily: FONT, fontSize: 16, fontWeight: 700,
                   }}>{a === "all" ? "✨ All" : AGE_LABEL[a] ?? a}</button>
                 ))}
+              </div>
+            )}
+            {topics.length > 0 && (
+              <div data-testid="store-topics" style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
+                {[null, ...topics].map(ch => {
+                  const on = topic === (ch?.id ?? null);
+                  return (
+                    <button key={ch?.id ?? "any"} type="button" data-testid={ch ? `store-topic-${ch.id}` : "store-topic-any"} onClick={() => setTopic(ch?.id ?? null)} style={{
+                      minHeight: 44, padding: "0 18px", borderRadius: 999, cursor: "pointer", touchAction: "manipulation",
+                      background: on ? ACCENT : "var(--lk-fill-060, rgba(255,255,255,0.06))",
+                      border: `1.5px solid ${on ? ACCENT : ch?.color ?? "var(--lk-line-200, rgba(255,255,255,0.2))"}`,
+                      color: on ? NAVY : INK, fontFamily: FONT, fontSize: 16, fontWeight: 700,
+                    }}>{ch ? `${ch.emoji ? ch.emoji + " " : ""}${ch.label}` : "Any topic"}</button>
+                  );
+                })}
+              </div>
+            )}
+            {shown.length === 0 && (
+              <div style={{ textAlign: "center", padding: "30px 20px", color: MUTED, fontSize: 17 }}>
+                No books here yet. <button type="button" onClick={() => { setAge("all"); setTopic(null); }} style={{ background: "none", border: "none", color: ACCENT, fontSize: 17, fontWeight: 700, cursor: "pointer", textDecoration: "underline" }}>Show all books</button>
               </div>
             )}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(170px, 1fr))", gap: 26 }}>

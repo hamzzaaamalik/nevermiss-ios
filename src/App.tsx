@@ -70,6 +70,7 @@ import { HomesPanel, homeLabel } from "./lib/home/HomesPanel";
 import { LookPicker } from "./lib/theme/LookPicker";
 import { LooksIntro } from "./lib/theme/LooksIntro";
 import { ShelfStyle, StorefrontStyle, CleanListStyle, groupBooks, readAnchor, applyAnchor, type LibraryAnchor } from "./lib/library/LibraryStyles";
+import { useFilterDefs, libraryGroups, bookInChoice, bookMatchesChoices, choicesFromMirror, legacyAge, setFilterDefs, parseFilterDefs, type FilterGroupDef } from "./lib/library/filterDefs";
 import { APP_BUILD } from "./lib/build";
 import { FpsMeter, tapForFpsMeter } from "./lib/ui/FpsMeter";
 import { BookStore } from "./lib/store/BookStore";
@@ -687,6 +688,8 @@ interface Book {
   /** Build 44: a Book Store book this family bought (a paid book is only
    *  in the catalog for a family that owns it). */
   purchased?: boolean;
+  /** Build 44: the book's Library filter choices (from the book index). */
+  filterChoices?: string[];
 }
 
 /** Build a Book from an array of chapters. The flat `pages` array is
@@ -1261,11 +1264,21 @@ const catalogCovers = new Map<string, string>(((): Array<[string, string]> => {
     return Object.entries(raw).filter((e): e is [string, string] => typeof e[1] === "string");
   } catch { return []; }
 })());
-function rememberCovers(index: Array<{ id: string; cover?: string }>): void {
+/** Each book's Library filter choices, from /api/books/index (Build 44). */
+const catalogChoices = new Map<string, string[]>(((): Array<[string, string[]]> => {
+  try {
+    const raw = JSON.parse(localStorage.getItem("nm_book_filters_v1") ?? "{}") as Record<string, unknown>;
+    return Object.entries(raw).filter((e): e is [string, string[]] => Array.isArray(e[1]) && e[1].every(x => typeof x === "string"));
+  } catch { return []; }
+})());
+function rememberCovers(index: Array<{ id: string; cover?: string; f?: string[] }>): void {
   catalogCovers.clear();
   for (const e of index) if (typeof e.cover === "string" && /^https?:\/\//.test(e.cover)) catalogCovers.set(e.id, e.cover);
   try { localStorage.setItem("nm_covers_v1", JSON.stringify(Object.fromEntries(catalogCovers))); } catch { /* not kept */ }
-  for (const [id, b] of Object.entries(booksLibrary)) if (b.fromCatalog) b.coverThumbUrl = catalogCovers.get(id);
+  catalogChoices.clear();
+  for (const e of index) if (Array.isArray(e.f)) catalogChoices.set(e.id, e.f.filter((x): x is string => typeof x === "string").slice(0, 60));
+  try { localStorage.setItem("nm_book_filters_v1", JSON.stringify(Object.fromEntries(catalogChoices))); } catch { /* not kept */ }
+  for (const [id, b] of Object.entries(booksLibrary)) if (b.fromCatalog) { b.coverThumbUrl = catalogCovers.get(id); b.filterChoices = catalogChoices.get(id); }
 }
 
 function mergeServerCatalog(serverBooks: unknown[]): void {
@@ -1424,6 +1437,7 @@ function mergeServerCatalog(serverBooks: unknown[]): void {
       coverThumbUrl: catalogCovers.get(id) ?? (typeof b.coverThumbUrl === "string" && /^https?:\/\//.test(b.coverThumbUrl) ? b.coverThumbUrl : undefined),
       fromCatalog: true,
       purchased: typeof b.priceCents === "number" && b.priceCents > 0,
+      filterChoices: catalogChoices.get(id),
     };
   }
 }
@@ -4294,8 +4308,46 @@ function parseLibraryAnchor(v: unknown): LibraryAnchor | null {
 type LibraryFilters = {
   q: string;
   status: "all" | "in-progress" | "not-started" | "finished" | "purchased";
+  /** Older iPads (Build 43 and before) only know the age. */
   age: "any" | "4-5" | "5-7" | "7-10" | "10-13";
+  /** Build 44: the chosen Library filter in each group. */
+  choices?: Record<string, string>;
 };
+
+/** "All ages", "All topics", "Any book type": the first button of a filter row. */
+function allChoiceLabel(g: FilterGroupDef): string {
+  const name = g.name.trim().toLowerCase();
+  return `${/s$/.test(name) ? "All" : "Any"} ${name}`;
+}
+
+/** One Library filter button (one choice of a group). */
+function LibraryChoiceChip({ active, onClick, color, testId, big = false, children }: {
+  active: boolean; onClick: () => void; color?: string | null; testId?: string; big?: boolean; children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      data-testid={testId}
+      onClick={onClick}
+      style={{
+        flexShrink: 0,
+        display: "inline-flex", alignItems: "center", gap: 6,
+        padding: big ? "10px 16px" : "6px 12px", minHeight: big ? 44 : 30,
+        borderRadius: 999,
+        background: active ? (color ? `${color}33` : "rgba(96,165,250,0.18)") : "var(--lk-fill-040, rgba(255,255,255,0.04))",
+        border: `1px solid ${active ? (color ?? "rgba(96,165,250,0.55)") : "var(--lk-line-100, rgba(255,255,255,0.10))"}`,
+        color: active ? (color ? CREAM : "var(--lk-info-t2, #93c5fd)") : "var(--lk-ink-680, rgba(247,240,227,0.68))",
+        fontFamily: "DM Sans, sans-serif", fontSize: big ? 15 : 11.5, fontWeight: 700,
+        cursor: "pointer", letterSpacing: "0.02em", whiteSpace: "nowrap",
+        touchAction: "manipulation",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
 
 function LibraryView({
   selectedBookId,
@@ -4395,22 +4447,34 @@ function LibraryView({
   // Rick's Build 32 review #B-3: age-tier filter. AI-suggested tiers
   // come from the /api/books catalog (ageRange like "Ages 4-5" through
   // "Ages 10-13"). "any" = show all tiers.
-  const [ageFilter, setAgeFilter] = useState<"any" | "4-5" | "5-7" | "7-10" | "10-13">("any");
+  // Build 44: the admin's Library filters (or, from an older server, the
+  // age buttons as before). One choice per group; a book must match each.
+  const filterDefs = useFilterDefs();
+  const filterGroups = libraryGroups(filterDefs);
+  const [choiceSel, setChoiceSel] = useState<Record<string, string>>({});
+  const [moreOpen, setMoreOpen] = useState(false);
+  const ageFilter = legacyAge(choiceSel, filterGroups);
+  const pickChoice = (groupId: string, choiceId: string | null) => setChoiceSel(cur => {
+    const next = { ...cur };
+    if (!choiceId || next[groupId] === choiceId) delete next[groupId]; else next[groupId] = choiceId;
+    return next;
+  });
   // Rick's Build 38 review #3: the child sees the same search results as
   // Nana (the shelf scroll was already shared, so it lines up again).
   useEffect(() => {
     if (!mirroredFilters) return;
     setSearchQuery(mirroredFilters.q);
     setStatusFilter(mirroredFilters.status);
-    setAgeFilter(mirroredFilters.age);
+    setChoiceSel(choicesFromMirror(mirroredFilters, filterGroups));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mirroredFilters]);
   const onFiltersChangeRef = useRef(onFiltersChange);
   onFiltersChangeRef.current = onFiltersChange;
   useEffect(() => {
     if (!onFiltersChangeRef.current) return;
-    const t = window.setTimeout(() => onFiltersChangeRef.current?.({ q: searchQuery, status: statusFilter, age: ageFilter }), 200);
+    const t = window.setTimeout(() => onFiltersChangeRef.current?.({ q: searchQuery, status: statusFilter, age: ageFilter, choices: choiceSel }), 200);
     return () => window.clearTimeout(t);
-  }, [searchQuery, statusFilter, ageFilter]);
+  }, [searchQuery, statusFilter, ageFilter, choiceSel]);
 
   const progressByBookId = new Map(progress.map(p => [p.bookId, p]));
   const allBooks = Object.values(booksLibrary);
@@ -4421,13 +4485,9 @@ function LibraryView({
       const haystack = `${book.title} ${book.author} ${book.tagline ?? ""}`.toLowerCase();
       if (!haystack.includes(q)) return false;
     }
-    if (ageFilter !== "any") {
-      // Match books whose ageRange contains the tier ("Ages 4-5",
-      // "4–5", etc.). Books without a tier are excluded when the filter
-      // is active — that pushes admin/nana to triage older imports.
-      const range = (book.ageRange ?? "").toLowerCase().replace(/[–—]/g, "-");
-      if (!range.includes(ageFilter)) return false;
-    }
+    // Library filters (ages match the book's age, "Ages 4-5" or "4–5";
+    // books without an age are left out while an age is chosen).
+    if (!bookMatchesChoices(book, choiceSel, filterGroups)) return false;
     // Build 44: books this family bought in the Book Store.
     if (statusFilter === "purchased") return !!book.purchased;
     if (statusFilter !== "all") {
@@ -4478,6 +4538,20 @@ function LibraryView({
     // Only when the shown books change; new positions are handled above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shownKey]);
+
+  const choiceCounts = new Map<string, number>();
+  for (const g of filterGroups) for (const ch of g.choices) choiceCounts.set(ch.id, allBooks.filter(b => bookInChoice(b, ch)).length);
+  const shownGroups: FilterGroupDef[] = filterGroups
+    .map(g => ({ ...g, choices: g.choices.filter(ch => (choiceCounts.get(ch.id) ?? 0) > 0 || choiceSel[g.id] === ch.id) }))
+    .filter(g => g.choices.length > 0);
+  const pinnedGroups = shownGroups.filter(g => g.pinned);
+  const moreGroups = shownGroups.filter(g => !g.pinned);
+  const moreActive = moreGroups.filter(g => choiceSel[g.id]).length;
+  const chosenLabels = shownGroups.flatMap(g => g.choices.filter(ch => choiceSel[g.id] === ch.id).map(ch => `${ch.emoji ? ch.emoji + " " : ""}${ch.label}`));
+  const anyFilter = !!searchQuery.trim() || statusFilter !== "all" || Object.keys(choiceSel).length > 0;
+  const clearAll = () => { setSearchQuery(""); setStatusFilter("all"); setChoiceSel({}); };
+  // Shelves by the admin's chosen group (cover styles); by age otherwise.
+  const shelfGroup = filterDefs?.shelvesBy ? filterGroups.find(g => g.id === filterDefs.shelvesBy) ?? null : null;
 
   const STATUS_CHIPS: Array<{ key: typeof statusFilter; label: string; icon: string }> = [
     { key: "all",          label: "All",         icon: "📚" },
@@ -4540,7 +4614,7 @@ function LibraryView({
           controls she can't usefully drive — they'd just confuse the
           read-only contract. Future: optionally sync Nana's filter
           state so Perry's view stays in lockstep. */}
-      {readOnly && (searchQuery.trim() || statusFilter !== "all" || ageFilter !== "any") && (
+      {readOnly && (searchQuery.trim() || statusFilter !== "all" || chosenLabels.length > 0) && (
         <div data-testid="library-mirror-filter" style={{
           margin: "10px 12px 4px", padding: "10px 16px", borderRadius: 999, flexShrink: 0,
           background: "var(--lk-accent-100, rgba(201,146,42,0.10))", border: "1px solid var(--lk-accent-400, rgba(201,146,42,0.40))",
@@ -4551,7 +4625,7 @@ function LibraryView({
           <span>
             {nanaName || getRoleLabel("nana")} is looking
             {searchQuery.trim() ? <> for <span style={{ color: AMBER_T }}>“{searchQuery.trim()}”</span></> : null}
-            {ageFilter !== "any" ? <> · Ages {ageFilter.replace("-", "–")}</> : null}
+            {chosenLabels.map(l => <span key={l}> · {l}</span>)}
             {statusFilter !== "all" ? <> · {statusFilter === "in-progress" ? "Reading" : statusFilter === "not-started" ? "New" : statusFilter === "purchased" ? "Purchased" : "Finished"}</> : null}
           </span>
         </div>
@@ -4637,45 +4711,121 @@ function LibraryView({
               </button>
             );
           })}
+          {moreGroups.length > 0 && (
+            <button
+              type="button"
+              data-testid="library-more-filters"
+              onClick={() => setMoreOpen(true)}
+              style={{
+                flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 12px", borderRadius: 999,
+                background: moreActive ? "var(--lk-accent-180, rgba(201,146,42,0.18))" : "transparent",
+                border: `1px dashed ${moreActive ? "var(--lk-accent-550, rgba(201,146,42,0.55))" : "var(--lk-line-140, rgba(255,255,255,0.14))"}`,
+                color: moreActive ? AMBER_T : "var(--lk-ink-750, rgba(247,240,227,0.75))",
+                fontFamily: "DM Sans, sans-serif", fontSize: 11.5, fontWeight: 700, cursor: "pointer", letterSpacing: "0.02em", touchAction: "manipulation",
+              }}
+            >
+              <span aria-hidden style={{ fontSize: 12, lineHeight: 1 }}>＋</span>
+              <span>More filters{moreActive ? ` · ${moreActive}` : ""}</span>
+            </button>
+          )}
+          {anyFilter && (
+            <button
+              type="button"
+              data-testid="library-clear-filters"
+              onClick={clearAll}
+              style={{
+                flexShrink: 0, display: "inline-flex", alignItems: "center", gap: 5, padding: "6px 12px", borderRadius: 999,
+                background: "transparent", border: "1px solid transparent",
+                color: "var(--lk-ink-550, rgba(247,240,227,0.55))", textDecoration: "underline", textUnderlineOffset: 3,
+                fontFamily: "DM Sans, sans-serif", fontSize: 11.5, fontWeight: 700, cursor: "pointer", touchAction: "manipulation",
+              }}
+            >Clear all</button>
+          )}
         </div>
 
         {/* Rick's Build 32 review #B-3: age-tier filter chips.
             Populated from the AI triage. "Any" shows all books;
             picking a tier hides everything else. */}
-        <div role="tablist" aria-label="Filter by age" style={{ display: "flex", gap: 6, overflowX: "auto", scrollbarWidth: "none" as const, marginTop: 6 }}>
-          {([
-            { key: "any" as const,   label: "All ages" },
-            { key: "4-5" as const,   label: "Ages 4–5" },
-            { key: "5-7" as const,   label: "Ages 5–7" },
-            { key: "7-10" as const,  label: "Ages 7–10" },
-            { key: "10-13" as const, label: "Ages 10–13" },
-          ]).map(chip => {
-            const active = ageFilter === chip.key;
-            return (
-              <button
-                key={chip.key}
-                role="tab"
-                aria-selected={active}
-                onClick={() => setAgeFilter(chip.key)}
-                style={{
-                  flexShrink: 0,
-                  display: "inline-flex", alignItems: "center", gap: 6,
-                  padding: "5px 11px",
-                  borderRadius: 999,
-                  background: active ? "rgba(96,165,250,0.18)" : "var(--lk-fill-040, rgba(255,255,255,0.04))",
-                  border: `1px solid ${active ? "rgba(96,165,250,0.55)" : "var(--lk-line-100, rgba(255,255,255,0.10))"}`,
-                  color: active ? "var(--lk-info-t2, #93c5fd)" : "var(--lk-ink-680, rgba(247,240,227,0.68))",
-                  fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 700,
-                  cursor: "pointer", letterSpacing: "0.02em",
-                  touchAction: "manipulation",
-                }}
-              >
-                {chip.label}
-              </button>
-            );
-          })}
-        </div>
+        {pinnedGroups.map((g, gi) => (
+          <div key={g.id} role="tablist" aria-label={`Filter by ${g.name.toLowerCase()}`} data-testid={`library-filter-row-${g.id}`} style={{ display: "flex", gap: 6, overflowX: "auto", scrollbarWidth: "none" as const, marginTop: gi === 0 ? 6 : 0 }}>
+            <LibraryChoiceChip active={!choiceSel[g.id]} onClick={() => pickChoice(g.id, null)}>{allChoiceLabel(g)}</LibraryChoiceChip>
+            {g.choices.map(ch => (
+              <LibraryChoiceChip key={ch.id} active={choiceSel[g.id] === ch.id} color={ch.color} testId={`library-chip-${ch.id}`} onClick={() => pickChoice(g.id, ch.id)}>
+                {ch.emoji && <span aria-hidden>{ch.emoji}</span>}{ch.label}
+              </LibraryChoiceChip>
+            ))}
+          </div>
+        ))}
       </div>
+      )}
+
+      {moreOpen && !readOnly && (
+        <div
+          onClick={() => setMoreOpen(false)}
+          style={{ position: "fixed", inset: 0, zIndex: 80, background: "var(--lk-shadow-550, rgba(0,0,0,0.55))", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}
+        >
+          <div
+            role="dialog"
+            aria-label="More filters"
+            data-testid="library-more-sheet"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "min(640px, 100%)", maxHeight: "80vh", display: "flex", flexDirection: "column", borderRadius: 20, overflow: "hidden",
+              background: "linear-gradient(180deg, var(--lk-bg-980, rgba(11,23,46,0.98)), var(--lk-bg-950, rgba(11,23,46,0.95)))",
+              border: "1px solid var(--lk-accent-hi-550, rgba(247,201,93,0.55))", boxShadow: "0 18px 44px var(--lk-shadow-550, rgba(0,0,0,0.55))",
+              animation: "phase-card-up 0.20s cubic-bezier(0.22,1,0.36,1)",
+            }}
+          >
+            <div style={{ padding: "18px 22px 12px", display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ flex: 1, color: CREAM, fontFamily: "Playfair Display, serif", fontSize: 20, fontWeight: 700 }}>Filters</div>
+              <button
+                type="button"
+                onClick={() => setMoreOpen(false)}
+                aria-label="Close"
+                style={{ width: 40, height: 40, borderRadius: "50%", background: "var(--lk-fill-080, rgba(255,255,255,0.08))", border: "1px solid var(--lk-line-140, rgba(255,255,255,0.14))", color: CREAM, fontSize: 20, lineHeight: 1, cursor: "pointer", padding: 0 }}
+              >×</button>
+            </div>
+            <div style={{ padding: "4px 22px 12px", overflowY: "auto", display: "flex", flexDirection: "column", gap: 16 }}>
+              {shownGroups.map(g => (
+                <div key={g.id}>
+                  <div style={{ color: "var(--lk-ink-700, rgba(247,240,227,0.7))", fontFamily: "DM Sans, sans-serif", fontSize: 13, fontWeight: 800, marginBottom: 8, letterSpacing: "0.02em" }}>
+                    {g.emoji ? `${g.emoji} ` : ""}{g.name}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <LibraryChoiceChip big active={!choiceSel[g.id]} onClick={() => pickChoice(g.id, null)}>{allChoiceLabel(g)}</LibraryChoiceChip>
+                    {g.choices.map(ch => (
+                      <LibraryChoiceChip big key={ch.id} active={choiceSel[g.id] === ch.id} color={ch.color} testId={`library-sheet-chip-${ch.id}`} onClick={() => pickChoice(g.id, ch.id)}>
+                        {ch.emoji && <span aria-hidden>{ch.emoji}</span>}{ch.label}
+                      </LibraryChoiceChip>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{ padding: "12px 22px 18px", display: "flex", gap: 10, borderTop: "1px solid var(--lk-line-100, rgba(255,255,255,0.10))" }}>
+              <button
+                type="button"
+                onClick={() => setChoiceSel({})}
+                disabled={Object.keys(choiceSel).length === 0}
+                style={{
+                  minHeight: 48, padding: "0 20px", borderRadius: 999, cursor: "pointer", touchAction: "manipulation",
+                  background: "transparent", border: "1px solid var(--lk-line-140, rgba(255,255,255,0.14))", color: CREAM,
+                  fontFamily: "DM Sans, sans-serif", fontSize: 15, fontWeight: 700, opacity: Object.keys(choiceSel).length === 0 ? 0.45 : 1,
+                }}
+              >Clear all</button>
+              <button
+                type="button"
+                data-testid="library-more-done"
+                onClick={() => setMoreOpen(false)}
+                style={{
+                  flex: 1, minHeight: 48, borderRadius: 999, border: "none", cursor: "pointer", touchAction: "manipulation",
+                  background: "linear-gradient(135deg, var(--lk-accent-hi, #f7c95d) 0%, var(--lk-accent, #C9922A) 55%, var(--lk-accent-2, #d97706) 100%)",
+                  color: NAVY, fontFamily: "DM Sans, sans-serif", fontSize: 16, fontWeight: 800,
+                }}
+              >{filteredBooks.length === 0 ? "No books match these" : `Show ${filteredBooks.length} book${filteredBooks.length === 1 ? "" : "s"}`}</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Bookshelf — Nana's scroll is published to Perry so her mirror
@@ -4695,7 +4845,7 @@ function LibraryView({
         {/* Bookshelf, Storefront and Clean List: covers grouped as "Continue
             reading", then by age. The Classic list below is unchanged. */}
         {coverStyle && filteredBooks.length > 0 && (() => {
-          const groups = groupBooks(filteredBooks, progressByBookId);
+          const groups = groupBooks(filteredBooks, progressByBookId, shelfGroup);
           const pick = readOnly ? undefined : onSelectBook;
           if (libraryStyle === "shelf") return <ShelfStyle groups={groups} selectedId={selectedBookId} onSelect={pick} progressById={progressByBookId} />;
           if (libraryStyle === "list") return <CleanListStyle groups={groups} selectedId={selectedBookId} onSelect={pick} progressById={progressByBookId} />;
@@ -4858,7 +5008,7 @@ function LibraryView({
             </div>
             )}
             <button
-              onClick={() => { setSearchQuery(""); setStatusFilter("all"); }}
+              onClick={clearAll}
               style={{
                 background: "var(--lk-accent-180, rgba(201,146,42,0.18))",
                 border: `1px solid ${AMBER}`,
@@ -4979,7 +5129,7 @@ function LibraryView({
                     fontFamily: "DM Sans, sans-serif", fontSize: "11px", fontWeight: 700,
                     borderRadius: "8px", padding: "3px 9px", letterSpacing: "0.04em",
                   }}>
-                    Ages {book.ageRange}
+                    Ages {book.ageRange.replace(/^ages\s*/i, "")}
                   </span>
                   <span style={{
                     backgroundColor: sel ? "rgba(192,132,252,0.18)" : "var(--lk-fill-060, rgba(255,255,255,0.06))",
@@ -16873,8 +17023,9 @@ export default function App() {
           const p = msg.payload as Partial<LibraryFilters>;
           setLibraryFilters({
             q: typeof p.q === "string" ? p.q.slice(0, 80) : "",
-            status: p.status === "in-progress" || p.status === "not-started" || p.status === "finished" ? p.status : "all",
+            status: p.status === "in-progress" || p.status === "not-started" || p.status === "finished" || p.status === "purchased" ? p.status : "all",
             age: p.age === "4-5" || p.age === "5-7" || p.age === "7-10" || p.age === "10-13" ? p.age : "any",
+            ...(p.choices && typeof p.choices === "object" ? { choices: choicesFromMirror(p, []) } : {}),
           });
         } else if (msg.type === "library_scroll") {
           // Bidirectional library scroll mirror on Perry's side.
@@ -18351,6 +18502,9 @@ export default function App() {
       try {
         const index = await api.catalog.index();
         rememberCovers(index);
+        api.catalog.filters()
+          .then(r => { if (alive) setFilterDefs(parseFilterDefs(r)); })
+          .catch(e => { if (alive && e instanceof ApiError && e.status === 404) setFilterDefs(null); });
         await keptReady;
         const order = index.map(e => e.id);
         const stale = index.filter(e => kept.get(e.id)?.updatedAt !== e.updatedAt).map(e => e.id);

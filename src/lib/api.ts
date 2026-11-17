@@ -420,7 +420,10 @@ export const api = {
     listBooks: () => req<{ books: CatalogBook[] }>("GET", "/books").then(r => r.books),
     /** Which books families can read and when each last changed (Build 40). */
     /** `cover` (Build 43): the book's small cover picture, when the admin has made one. */
-    index: () => req<{ books: Array<{ id: string; updatedAt: string; cover?: string }> }>("GET", "/books/index").then(r => r.books),
+    /** `f` (Build 44): the book's Library filter choices. Older servers send none. */
+    index: () => req<{ books: Array<{ id: string; updatedAt: string; cover?: string; f?: string[] }> }>("GET", "/books/index").then(r => r.books),
+    /** Build 44: the Library filters the admin made (404 on an older server). */
+    filters: () => req<unknown>("GET", "/filters"),
     /** Just these books. */
     byIds: (ids: string[]) => req<{ books: CatalogBook[] }>("GET", `/books?ids=${ids.map(encodeURIComponent).join(",")}`).then(r => r.books),
   },
@@ -710,6 +713,8 @@ export interface StoreBook {
   cover: string | null;
   emoji: string;
   spineColor: string;
+  /** Build 44: the book's Library filter choices. */
+  f?: string[];
 }
 export interface StorePage {
   imageUrl?: string; leftBody?: string; rightBody?: string; leftChapter?: string;
