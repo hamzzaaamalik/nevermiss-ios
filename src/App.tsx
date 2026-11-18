@@ -1553,15 +1553,17 @@ function WordWrapped({
 }
 
 /**
- * Nana's actions for the word highlighted on both iPads: Pronunciation,
- * Phonics, Save. Anchored under the highlighted word when it is on
- * screen, docked at the bottom of the book otherwise. Never rendered on
- * the child's iPad.
+ * Actions for the word highlighted on both iPads. Nana: Pronunciation,
+ * Phonics, Definition, Save. The child (Rick's Build 43 session notes,
+ * Nov 17: "give the grandkids access to the phonics and definition
+ * prompts"): Say it, Sounds, Meaning. Anchored under the highlighted
+ * word when it is on screen, docked at the bottom of the book otherwise.
  */
 function WordActionMenu({
   bookAreaRef,
   selection,
   childName,
+  kid = false,
   layoutKey,
   onPronounce,
   onPhonics,
@@ -1588,9 +1590,15 @@ function WordActionMenu({
   phonicsState: { word: string; status: "loading" | "done" | "err" } | null;
   defineState?: { word: string; status: "loading" | "done" | "err" } | null;
   saveState: { word: string; status: "saving" | "saved" | "already" | "err" } | null;
+  /** The child's iPad: no Save, and simpler names. */
+  kid?: boolean;
 }) {
   const fromChild = selection.by === "perry";
-  const menuH = fromChild ? 104 : 86;
+  // Who picked the word, when it wasn't the person holding this iPad.
+  const pickedBy = kid
+    ? (selection.by === "nana" ? `${getRoleLabel("nana")} picked this word` : null)
+    : (fromChild ? `${childName || "Your grandchild"} picked this word` : null);
+  const menuH = pickedBy ? 104 : 86;
   const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
   // Its real height once drawn (with Definition it is taller than the
   // estimate, and above a word it used to overlap the word's top).
@@ -1691,9 +1699,9 @@ function WordActionMenu({
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 28 }}>
         <div style={{ flex: 1, minWidth: 0, textAlign: "center", lineHeight: 1.2 }}>
-          {fromChild && (
-            <div style={{ fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 800, letterSpacing: "0.08em", color: "var(--lk-ok-t, #86efac)", textTransform: "uppercase" }}>
-              {childName || "Your grandchild"} picked this word
+          {pickedBy && (
+            <div style={{ fontFamily: "DM Sans, sans-serif", fontSize: 11, fontWeight: 800, letterSpacing: "0.08em", color: kid ? AMBER_T : "var(--lk-ok-t, #86efac)", textTransform: "uppercase" }}>
+              {pickedBy}
             </div>
           )}
           <div style={{ fontFamily: "Merriweather, Georgia, serif", fontSize: 17, fontWeight: 700, color: CREAM, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
@@ -1712,6 +1720,13 @@ function WordActionMenu({
           }}
         >✕</button>
       </div>
+      {kid ? (
+      <div style={{ display: "flex", gap: 6 }} data-testid="kid-word-menu">
+        {btn("🔊", "Say it", () => onPronounce(w), pronBusy, "kid-word-say")}
+        {btn("🔤", "Sounds", () => onPhonics(w), phonBusy, "kid-word-sounds")}
+        {onDefine && btn("📖", "Meaning", () => onDefine(w, selection.sentence), defBusy, "kid-word-meaning")}
+      </div>
+      ) : (
       <div style={{ display: "flex", gap: 6 }}>
         {btn("🔊", "Pronunciation", () => onPronounce(w), pronBusy)}
         {btn("🔤", "Phonics", () => onPhonics(w), phonBusy)}
@@ -1724,6 +1739,7 @@ function WordActionMenu({
           "word-save",
         )}
       </div>
+      )}
     </div>
   );
 }
@@ -4066,8 +4082,9 @@ function BookSpread({
         onPointerUp={handleBookPointerUp}
         onPointerCancel={handleBookPointerCancel}
       >
-        {isNana && wordSelection && onSelectWord && onSelectionPronounce && onSelectionPhonics && onSelectionSave && (
+        {wordSelection && onSelectWord && onSelectionPronounce && onSelectionPhonics && (!isNana || onSelectionSave) && (
           <WordActionMenu
+            kid={!isNana}
             bookAreaRef={bookAreaRef}
             selection={wordSelection}
             childName={childName}
@@ -4075,7 +4092,7 @@ function BookSpread({
             onPronounce={onSelectionPronounce}
             onPhonics={onSelectionPhonics}
             onDefine={onSelectionDefine}
-            onSave={onSelectionSave}
+            onSave={onSelectionSave ?? (() => {})}
             onClose={() => onSelectWord(null)}
             pronunciationState={selectionPronunciationState ?? null}
             phonicsState={selectionPhonicsState ?? null}
@@ -17206,10 +17223,10 @@ export default function App() {
           if (!ownEcho && action === "say" && typeof word === "string" && word.length > 0) {
             void pronounce(word);
           }
-        } else if (msg.type === "phonics_card") {
-          // Rick's Build 30 review #3: Perry side must NOT render the
-          // phonics card. Only Nana teaches through the lesson; Perry
-          // just sees the highlight. Suppress on Perry entirely.
+        } else if (msg.type === "phonics_card" || msg.type === "definition_card") {
+          // Rick, Nov 17 (reversing Build 30 #3): the child sees the
+          // phonics and meaning cards too, in a child version.
+          applyRemoteWordCardRef.current(msg.type, msg.payload);
         } else if (msg.type === "layout_change") {
           const l = msg.payload?.layout;
           if (typeof l === "string" && l) setReadingLayout(normalizeLayout(l));
@@ -17546,46 +17563,10 @@ export default function App() {
           if (!ownEcho && action === "say" && typeof word === "string" && word.length > 0) {
             void pronounce(word);
           }
-        } else if (msg.type === "phonics_card") {
+        } else if (msg.type === "phonics_card" || msg.type === "definition_card") {
           // Rick's Aug 14: cross-iPad phonics coaching card. Whichever
-          // side tapped Phonics, both see the same OG rule + Nana cue.
-          // Sep 24: multi-step Diane walkthroughs carry `steps` array;
-          // both iPads open on step 1 and Nana advances everyone.
-          const p = msg.payload as {
-            word?: string;
-            rule?: string;
-            ruleLabel?: string;
-            nanaCue?: string;
-            perryHint?: string;
-            source?: string;
-            steps?: Array<{ code: string; codeLabel: string; target: string; prompt: string }>;
-            level?: string;
-            syllables?: string;
-            respelling?: string;
-            origin?: string;
-          };
-          // Our own card, back from the server: already showing (or closed).
-          if (p.origin && p.origin === myLibraryOriginRef.current) {
-            // nothing to do
-          } else if (typeof p.word === "string" && typeof p.nanaCue === "string") {
-            setSelPhonicsCard({
-              word: p.word,
-              rule: p.rule ?? "other",
-              ruleLabel: p.ruleLabel ?? "Phonics",
-              nanaCue: p.nanaCue,
-              perryHint: p.perryHint ?? "",
-              source: p.source,
-              steps: Array.isArray(p.steps) ? p.steps : undefined,
-              level: p.level,
-              syllables: p.syllables,
-              respelling: p.respelling,
-            });
-            setSelPhonicsStep(0);
-            if (selPhonicsTimerRef.current) window.clearTimeout(selPhonicsTimerRef.current);
-            if (!p.steps || p.steps.length <= 1) {
-              selPhonicsTimerRef.current = window.setTimeout(() => setSelPhonicsCard(null), 12_000);
-            }
-          }
+          // side tapped Phonics (or Meaning, since Nov 17), both see it.
+          applyRemoteWordCardRef.current(msg.type, msg.payload);
         } else if (msg.type === "selection_broadcast") {
           // Child iPad still on an older build: it sends the word only,
           // no word id, so Nana gets the actions without a highlight.
@@ -18746,8 +18727,44 @@ export default function App() {
     respelling?: string;
   } | null>(null);
   const [selPhonicsStep, setSelPhonicsStep] = useState<number>(0);
+  // A phonics or meaning card from the other iPad (our own comes back too:
+  // it is already showing). Phonics cards carry Diane's steps.
+  const applyRemoteWordCardRef = useRef<(type: string, raw: unknown) => void>(() => {});
+  applyRemoteWordCardRef.current = (type, raw) => {
+    const p = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    if (p.origin && p.origin === myLibraryOriginRef.current) return;
+    if (typeof p.word !== "string" || !p.word) return;
+    const str = (v: unknown) => (typeof v === "string" ? v : undefined);
+    if (type === "definition_card") {
+      phoRequestRef.current = null;
+      setSelPhoState(null);
+      setSelPhonicsCard(null);
+      setSelDefinition({ word: p.word, status: "done", definition: str(p.definition) ?? null, partOfSpeech: str(p.partOfSpeech) ?? null, respelling: str(p.respelling) });
+      return;
+    }
+    if (typeof p.nanaCue !== "string") return;
+    const steps = Array.isArray(p.steps) ? p.steps as Array<{ code: string; codeLabel: string; target: string; prompt: string }> : undefined;
+    setSelDefinition(null);
+    setSelPhonicsCard({
+      word: p.word,
+      rule: str(p.rule) ?? "other",
+      ruleLabel: str(p.ruleLabel) ?? "Phonics",
+      nanaCue: p.nanaCue,
+      perryHint: str(p.perryHint) ?? "",
+      source: str(p.source),
+      steps,
+      level: str(p.level),
+      syllables: str(p.syllables),
+      respelling: str(p.respelling),
+    });
+    setSelPhonicsStep(0);
+    if (selPhonicsTimerRef.current) window.clearTimeout(selPhonicsTimerRef.current);
+    if (!steps || steps.length <= 1) {
+      selPhonicsTimerRef.current = window.setTimeout(() => setSelPhonicsCard(null), 12_000);
+    }
+  };
   // A meaning belongs to the page it was asked on.
-  useEffect(() => { setSelDefinition(null); }, [nanaPage]);
+  useEffect(() => { setSelDefinition(null); }, [nanaPage, childPage]);
   // Where the phonics card sits: over the book, on the half away from the
   // word it explains, so it covers neither that word nor the page arrows
   // below the book (Rick's Build 39 D1 screenshot).
@@ -18781,12 +18798,13 @@ export default function App() {
   const wordSelectionNowRef = useRef(wordSelection);
   wordSelectionNowRef.current = wordSelection;
   useEffect(() => {
-    if (deviceView === "perry" || mode === "reading") return;
+    if (mode === "reading") return;
     phoRequestRef.current = null;
     setSelPhoState(null);
     setSelPhonicsCard(null);
     setSelPhonicsStep(0);
     setSelDefinition(null);
+    if (deviceView === "perry") return;
     if (wordSelectionNowRef.current) {
       setWordSelection(null);
       if (connectionId) api.sessions.publishEvent(connectionId, "word_select_clear", { by: "nana" }).catch(() => {});
@@ -18846,7 +18864,7 @@ export default function App() {
     const onResize = () => placeWordCardRef.current();
     window.addEventListener("resize", onResize);
     return () => { ro?.disconnect(); window.removeEventListener("resize", onResize); };
-  }, [selPhonicsCard, selDefinition?.word, selDefinition?.status, wordSelection?.wid, phoPending, selPhonicsStep, nanaPage]);
+  }, [selPhonicsCard, selDefinition?.word, selDefinition?.status, wordSelection?.wid, phoPending, selPhonicsStep, nanaPage, childPage]);
   // Rick's Build 30 review #2: Perry can tap Ask/Pick-a-Book/etc pills
   // that ask Nana to do something. Nana sees a floating banner and
   // taps Accept to route the request.
@@ -18915,10 +18933,14 @@ export default function App() {
     try {
       const d = await api.phonics.define({ word, sentence, bookTitle: currentBook?.title });
       setSelDefinition(cur => (cur && cur.word === word ? { word, status: "done", definition: d.definition, partOfSpeech: d.partOfSpeech, respelling: d.respelling } : cur));
+      // The other iPad shows the same meaning (older apps ignore it).
+      if (connectionId && d.definition) {
+        api.sessions.publishEvent(connectionId, "definition_card", { word, definition: d.definition, partOfSpeech: d.partOfSpeech, respelling: d.respelling, origin: myLibraryOriginRef.current }).catch(() => {});
+      }
     } catch {
       setSelDefinition(cur => (cur && cur.word === word ? { word, status: "err" } : cur));
     }
-  }, [currentBook?.title]);
+  }, [currentBook?.title, connectionId]);
 
   const handleSelectionPhonics = useCallback(async (word: string) => {
     setSelDefinition(null);
@@ -21296,7 +21318,9 @@ export default function App() {
           walkthrough. When source='diane' and steps has 2+ entries,
           the card shows one step at a time with Prev/Next controls
           and a step-count chip. Single-step cards render unchanged. */}
-      {selPhonicsCard && deviceView !== "perry" && mode === "reading" && (() => {
+      {selPhonicsCard && mode === "reading" && (() => {
+        // The child's iPad: Diane's steps, or the short hint for the child.
+        const kidView = deviceView === "perry";
         // Steps for any answer that has them (Diane's list, and the AI
         // since Build 39 F4); the green chip only for teacher-checked ones.
         const isDiane = Array.isArray(selPhonicsCard.steps) && selPhonicsCard.steps.length > 0;
@@ -21307,7 +21331,7 @@ export default function App() {
         // Header shows the ACTIVE step's rule label (each step can be a
         // different rule) so Nana knows which lesson is on screen.
         const activeRuleLabel = currentStep?.codeLabel ?? selPhonicsCard.ruleLabel;
-        const activePrompt = currentStep?.prompt ?? selPhonicsCard.nanaCue;
+        const activePrompt = currentStep?.prompt ?? (kidView ? (selPhonicsCard.perryHint || selPhonicsCard.nanaCue) : selPhonicsCard.nanaCue);
         const activeTarget = currentStep?.target ?? "";
         const totalSteps = isDiane ? steps.length : 1;
         return (
@@ -21456,7 +21480,7 @@ export default function App() {
               )}
             </div>
           )}
-          {!isDiane && selPhonicsCard.perryHint && (
+          {!isDiane && !kidView && selPhonicsCard.perryHint && (
             <div style={{ fontFamily: "DM Sans, sans-serif", fontSize: 12, color: "#5C3A1E", fontStyle: "italic", opacity: 0.85 }}>
               For {(dashboardPerryName || "Perry")}: {selPhonicsCard.perryHint}
             </div>
@@ -21486,7 +21510,7 @@ export default function App() {
       {/* Phonics on its way, or it didn't work (Rick's Build 40 review: a
           new word can take the AI a few seconds; before, only a "…" on the
           button showed, and an error showed nothing). */}
-      {phoPending && selPhoState && deviceView !== "perry" && mode === "reading" && (
+      {phoPending && selPhoState && mode === "reading" && (
         <div
           role="status"
           aria-live="polite"
@@ -21537,7 +21561,7 @@ export default function App() {
       {/* Definition card (Rick's Build 39 G1): what the word means in its
           sentence, said simply, inside NeverMiss. Nana's iPad only, in the
           same spot as the phonics card. */}
-      {selDefinition && deviceView !== "perry" && mode === "reading" && (
+      {selDefinition && mode === "reading" && (
         <div
           role="dialog"
           aria-live="polite"
@@ -22237,6 +22261,9 @@ export default function App() {
           onPointer={handleBookPointer}
           wordSelection={wordSelection}
           onSelectWord={handleSelectWordPerry}
+          onSelectionPronounce={handleSelectionPronounce}
+          onSelectionPhonics={handleSelectionPhonics}
+          onSelectionDefine={handleSelectionDefine}
           onPerryPickBook={() => handlePerryRequest("pickbook")}
           onOpenFeedback={() => setFeedbackModalOpen(true)}
           onPerryAskNana={() => handlePerryRequest("wave")}
